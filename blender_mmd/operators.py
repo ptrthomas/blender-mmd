@@ -109,6 +109,69 @@ class BLENDER_MMD_OT_import_vmd(bpy.types.Operator, ImportHelper):
             return {"CANCELLED"}
 
 
+class BLENDER_MMD_OT_build_physics(bpy.types.Operator):
+    """Build rigid body physics for an MMD model"""
+
+    bl_idname = "blender_mmd.build_physics"
+    bl_label = "Build MMD Physics"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        from .physics import build_physics
+        from .pmx import parse
+
+        armature_obj = _find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        filepath = armature_obj.get("pmx_filepath")
+        if not filepath:
+            self.report({"ERROR"}, "No PMX filepath stored on armature.")
+            return {"CANCELLED"}
+
+        scale = armature_obj.get("import_scale", 0.08)
+
+        try:
+            model = parse(filepath)
+            build_physics(armature_obj, model, scale)
+            self.report(
+                {"INFO"},
+                f"Physics built: {len(model.rigid_bodies)} rigid bodies, "
+                f"{len(model.joints)} joints",
+            )
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("Physics build failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
+class BLENDER_MMD_OT_clear_physics(bpy.types.Operator):
+    """Remove rigid body physics for an MMD model"""
+
+    bl_idname = "blender_mmd.clear_physics"
+    bl_label = "Clear MMD Physics"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        from .physics import clear_physics
+
+        armature_obj = _find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        try:
+            clear_physics(armature_obj)
+            self.report({"INFO"}, "Physics cleared.")
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("Physics clear failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
 def menu_func_import(self, context):
     self.layout.operator(
         BLENDER_MMD_OT_import_pmx.bl_idname,
@@ -123,6 +186,8 @@ def menu_func_import(self, context):
 _classes = (
     BLENDER_MMD_OT_import_pmx,
     BLENDER_MMD_OT_import_vmd,
+    BLENDER_MMD_OT_build_physics,
+    BLENDER_MMD_OT_clear_physics,
 )
 
 

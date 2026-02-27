@@ -36,6 +36,9 @@ def import_pmx(filepath: str, scale: float = DEFAULT_SCALE) -> bpy.types.Object:
     # Build mesh
     mesh_obj = create_mesh(model, armature_obj, scale)
 
+    # Store filepath for deferred physics build
+    armature_obj["pmx_filepath"] = filepath
+
     # Select armature as active
     bpy.context.view_layer.objects.active = armature_obj
     armature_obj.select_set(True)
