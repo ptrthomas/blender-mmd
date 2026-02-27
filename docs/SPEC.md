@@ -749,6 +749,45 @@ Build chain detection and interactive cloth conversion. This is the quality path
 - Better than both mmd_tools rigid body AND our M4 rigid body
 - User can iterate: convert one chain, test, adjust, convert next
 
+#### Rigid Body Mode — Lessons Learned and Compromises
+
+What we learned from implementing and testing M4 rigid body physics. This informs Phase 2 cleanup and sets realistic expectations.
+
+**What works (keep these):**
+- RBW disabled during setup (`rigidbody_world.enabled = False`) — without this, solver corrupts initial state
+- Depsgraph flushes (`scene.frame_set(scene.frame_current)`) at key build points — without this, `matrix_world` is stale
+- Collision margin 1e-6 — Blender default 0.04 is huge at 0.08 model scale
+- Collision layers: shared layer 0 + own group, with GENERIC constraints for non-collision pairs
+- Dynamic body repositioning to match bone pose before creating joints
+- Joint empty repositioning using src_rigid's bone delta
+- Bone coupling: STATIC → bone parent, DYNAMIC/DYNAMIC_BONE → COPY_ROTATION via tracking empty
+- CAPSULE/SPHERE/BOX mesh geometry for collision shapes (empty mesh = zero-size collision)
+- Rotation negation `(-x,-y,-z)` beyond parser's Y↔Z swap
+- Joint rotation limits: negate AND swap min/max
+
+**What doesn't work well (known compromises):**
+- **Soft constraints (lower > upper trick)**: Meant to make locked DOFs elastic. In practice, can cause oscillation or explosion with typical MMD spring stiffness. Currently enabled but may need per-model tuning or disabling.
+- **Springs (SPRING1)**: We apply spring values (unlike mmd_tools which doesn't), but Blender's SPRING1 damping is capped at 1.0 and the overall spring behavior doesn't match MMD's solver. Hair can be too loose or too stiff depending on the model's spring constants.
+- **Scrubbing/rewinding**: Resets baked simulation. Must re-bake after rewind. This is a Blender limitation, not a bug.
+- **`frame_set()` doesn't run physics**: Only timeline playback or explicit baking advances the simulation. No way to "preview" physics at a specific frame.
+- **One-frame lag**: Inherent to Blender's dependency graph. Physics always trails bone motion by one frame.
+- **Hair/skirt stiffness**: Even with soft constraints and springs, chain physics through rigid bodies is fundamentally different from cloth. Hair tends to be too stiff or wobbles unrealistically.
+- **Physics explosion on rewind**: Baked cache gets cleared, dynamic bodies may be in wrong positions. Mitigation: always bake before playback, re-bake after rewind.
+
+**What to simplify in Phase 2:**
+- Drop `_apply_soft_constraints()` — the lower>upper trick is unreliable. Keep DOFs hard-locked as MMD defines them. This matches mmd_tools behavior and is more stable.
+- Drop spring complexity — keep springs enabled (they're the critical fix over mmd_tools) but don't try to tune or transform them. Raw PMX values, pass-through.
+- Don't try to match MMD physics perfectly — the goal is "mmd_tools quality" which is itself imperfect. Users who want good physics should use cloth mode.
+- Keep non-collision constraints — they're correct and prevent false collisions.
+- Consider adding auto-bake after build (bake the first N frames so user sees immediate results).
+
+**What NOT to do:**
+- Don't add physics UI panels — use conversational workflow via Claude Code
+- Don't implement SPRING2 — it has known angular spring bugs in Blender
+- Don't try to match MMD's CCDIK-based physics solver — fundamentally different architecture
+- Don't over-optimize non-collision constraints — the O(n²) issue is theoretical; real models have <50 rigid bodies
+- Don't disable springs to "simplify" — applying springs is the #1 fix over mmd_tools
+
 ### Milestone 5: Materials & Textures
 
 **Deliverables:**
