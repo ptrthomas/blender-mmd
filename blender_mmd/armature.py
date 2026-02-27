@@ -9,7 +9,7 @@ import bpy
 from mathutils import Vector
 
 from .pmx.types import Bone, Model
-from .translations import translate
+from .translations import normalize_lr, translate
 
 log = logging.getLogger("blender_mmd")
 
@@ -20,13 +20,15 @@ MIN_BONE_LENGTH = 0.001
 def _resolve_bone_name(bone: Bone) -> str:
     """Choose the Blender bone name from PMX data.
 
-    Priority: English name → translation table → Japanese name as-is.
+    Priority: translation table → English name → Japanese name as-is.
+    Translation table wins because PMX English names are often abbreviated
+    or incorrect (e.g. "view cnt", "D", "arm twist_L").
     """
-    if bone.name_e and bone.name_e.strip():
-        return bone.name_e.strip()
     translated = translate(bone.name)
     if translated:
         return translated
+    if bone.name_e and bone.name_e.strip():
+        return normalize_lr(bone.name_e.strip())
     return bone.name
 
 
