@@ -7,12 +7,14 @@ log.setLevel(logging.DEBUG)
 
 
 def register():
-    from . import operators
+    from . import operators, panels
     operators.register()
+    panels.register()
     log.info("Blender MMD registered")
 
 
 def unregister():
-    from . import operators
+    from . import operators, panels
+    panels.unregister()
     operators.unregister()
     log.info("Blender MMD unregistered")

@@ -13,7 +13,7 @@ A ground-up rewrite of [blender_mmd_tools](../../../blender_mmd_tools) targeting
 
 - PMX/PMD/VMD export (one-way import only, no round-trip)
 - PMD format support (PMX only)
-- Traditional Blender UI panels or sidebar
+- Traditional Blender UI panels or sidebar (except MMD4B cloth panel — see below)
 - Backwards compatibility with mmd_tools object hierarchy or metadata
 - Material library system
 - Rigify integration
@@ -62,6 +62,7 @@ blender-mmd/
 │   ├── armature.py           # Bone creation, IK setup, limit conversion
 │   ├── mesh.py               # Mesh creation and vertex weights
 │   ├── operators.py          # Thin Blender operator layer
+│   ├── panels.py             # MMD4B N-panel for cloth conversion
 │   ├── helpers.py            # Introspection and query helpers for Claude
 │   └── translations.py       # Japanese ↔ English bone name dictionary
 ├── docs/
@@ -499,8 +500,15 @@ Behavior:
 ```
 blender_mmd.build_physics              # Build physics (mode: none/rigid_body/cloth)
 blender_mmd.clear_physics              # Remove all physics objects and metadata
-blender_mmd.convert_chain_to_cloth     # Convert a detected chain to cloth simulation
+blender_mmd.convert_chain_to_cloth     # Convert a detected chain to cloth (legacy, RB-based)
 blender_mmd.clear_cloth                # Remove cloth objects and constraints
+```
+
+### Cloth operators (MMD4B panel)
+
+```
+blender_mmd.convert_selection_to_cloth  # Convert selected pose bones to cloth sim
+blender_mmd.remove_cloth_sim            # Remove a single cloth sim by object name
 ```
 
 ### VMD binary format
@@ -788,6 +796,109 @@ Systematic audit of rigid body build pattern against mmd_tools. Fixes applied to
 **Not changed (investigated, no fix needed):**
 - Bone disconnection: all hair chain bones already have `use_connect=False` from PMX data.
 - Soft constraints: mmd_tools doesn't implement inverted-limits workaround either. Springs enabled, soft constraints disabled — matches mmd_tools.
+
+### MMD4B — Cloth Conversion UI Panel
+
+Manual bone-selection-based cloth conversion. The user selects bones in Pose Mode, picks a preset, and clicks Convert. No PMX re-parse needed — everything works from Blender bone positions.
+
+**N-panel**: Tab "MMD4B" in 3D Viewport sidebar. Visible when active object is an MMD armature.
+
+#### Phase 1: Single Chain (hair, ties, accessories) ✅
+
+**Workflow:** Select bones forming one chain → pick preset + collision mesh → Convert to Cloth → repeat per chain.
+
+**Panel layout:**
+- Selection info: bone count, chain range (first → last)
+- Preset picker: Hair (stiff strands), Cotton (general), Silk (flowing)
+- Collision mesh picker (PointerProperty, filtered to meshes)
+- Convert button (enabled only with valid chain selection)
+- Active Cloth Sims list with per-item remove (X) buttons
+- Clear All button
+
+**Selection validation:** Minimum 2 bones, all forming a connected parent→child chain sorted by hierarchy depth. First bone's parent must NOT be in the selection (it's the anchor).
+
+**Ribbon mesh** (built from bone positions, not RB positions):
+- Vertex 0 = first bone's head (pinned)
+- Vertices 1–N = each bone's tail
+- Extruded perpendicular for ribbon width (30% of avg bone length)
+- Quad faces between center and extruded edges
+
+**Vertex groups:**
+- `pin`: root vertices at weight 1.0
+- Parent bone name: root vertices (Armature modifier moves pin with parent)
+- Per-bone: tail vertex pair (STRETCH_TO target)
+
+**Modifier stack:** Armature → Cloth → Corrective Smooth
+
+**Bone binding:** STRETCH_TO constraints on each bone → cloth vertex group
+
+**Files:** `panels.py` (NEW), `cloth.py` (added `convert_selection_to_cloth`, `remove_cloth_sim`), `operators.py` (added 2 operators), `__init__.py` (registers panels)
+
+**Verification (Blender integration test):**
+1. Import sample PMX (`初音ミク.pmx`), enter Pose Mode
+2. Verify MMD4B tab appears in N-panel
+3. Select 2+ hair chain bones (e.g. hair1.L → hair6.L) → panel shows bone count, Convert enabled
+4. Select non-chain bones (e.g. two unrelated bones) → panel shows validation error
+5. Set preset to Hair, pick body mesh as collision → click Convert
+6. Verify: cloth ribbon mesh appears in `{armature}_Cloth` collection, STRETCH_TO constraints on bones, Armature+Cloth+Corrective Smooth modifiers on ribbon
+7. Play timeline → hair bones follow cloth sim under gravity
+8. Frame 1: cloth at rest matches bone positions
+9. Repeat for a second chain (e.g. hair.R) → both appear in Active Cloth Sims list
+10. Click X on one sim → that cloth removed, bones freed, other sim unaffected
+11. Click Clear All → everything cleaned up, collection removed
+12. With VMD motion loaded: cloth reacts to head/body movement
+
+#### Phase 2: Connected Group (skirts, belts, straps) — planned
+
+For groups where multiple parallel chains need lateral connectivity (e.g. skirt panels).
+
+**Key insight: no PMX re-parse.** Instead of reading PMX joint topology for lateral connections, the connectivity comes from two sources:
+
+1. **Spatial auto-connect:** User selects ALL bones in the group. System groups them into parallel chains by ancestry, sorts chain roots by angle around the armature center, and auto-connects adjacent chains at matching depth levels to build a tube/cylinder mesh.
+
+2. **Manual strut bones (override):** User can add short bones bridging adjacent strands at specific levels. These are selected alongside the chain bones and treated as explicit lateral edges, overriding auto-connect at that point. More struts = stiffer mesh between panels.
+
+**Struts replace self-collision.** Each lateral face in the cloth mesh has compression stiffness. When adjacent panels try to collapse into each other, the shared faces resist it structurally — the cloth solver prevents compression before geometry intersects. This is superior to `use_self_collision`:
+- Zero extra cost (compression stiffness is already computed by the solver)
+- Spatially controllable (more struts where clipping happens, fewer where you want flow)
+- Stable (no O(n²) collision detection, no jitter)
+
+**Pinning:** Auto-pin bones whose parent is NOT in the selection (boundary detection). Covers most cases: skirt waistband bones (parent = hips) auto-pinned.
+
+**Mesh construction:**
+1. Detect parallel chains from selected bones
+2. Sort chain roots by angle around armature center → ring topology
+3. Connect adjacent chains at matching depth → quad grid
+4. Strut bones add explicit lateral edges where auto-connect is insufficient
+5. Pin top row, per-bone vertex groups, same modifier stack as Phase 1
+
+#### Struts as First-Class Citizens — design direction
+
+Struts and pins are the same concept: invisible structural elements that encode user intent as cloth mesh topology. Pins anchor to world/bone space; struts anchor to other parts of the mesh. Both should be first-class primitives in the model.
+
+**Use cases beyond lateral connectivity:**
+
+- **Hair deflectors:** Strut from a hair chain to a shoulder/collar bone. The cloth mesh gets a face there, compression stiffness keeps hair from clipping through the shoulder — no collision modifier needed on the body mesh for that zone.
+- **Directional bias:** Asymmetric strut placement. More struts on the front of a skirt = stiffer front panel, fewer on the back = more flow. A cape pinned at shoulders with a single strut to a spine bone preventing torso clip-through.
+- **Weighted struts:** Strut bones with a stiffness weight (mapped to vertex group weight on connecting faces). Light strut = gentle bias. Heavy strut = hard wall. Gives per-edge control over cloth behavior.
+
+**Design principle:** The user builds a "constraint skeleton" from pins (anchors) and struts (connections). The cloth mesh is derived from this skeleton. Tuning physics means editing the skeleton — adding, removing, or reweighting struts — not tweaking solver parameters. This is more intuitive and more powerful than parameter-driven workflows.
+
+**Implementation:** Struts are regular Blender bones in the armature. They participate in mesh construction (adding lateral edges/faces) but don't get STRETCH_TO binding — they're structural only.
+
+**Identification — bone collection membership:** A bone collection named "Struts" on the armature holds all strut bones. The cloth converter checks collection membership:
+
+```python
+"Struts" in [col.name for col in bone.collections]
+```
+
+No naming convention to enforce, no custom property to manage. The user creates a strut bone in Edit Mode, drags it into the Struts collection, and it becomes structural. Bone collections also support visibility toggling — hide struts when not editing physics, show them when tuning.
+
+**Display:** Armature display type set to STICK on MMD4B cloth build. All bones render as lines — clean, lightweight, standard for MMD work. Struts are visually distinguished by bone collection color (e.g. cyan for struts vs default for chain bones). If finer distinction is needed later, per-bone custom shapes (a simple 2-vertex wire mesh) can override STICK for strut bones only.
+
+#### Future: Soft Body (research)
+
+Tubular low-poly hidden mesh approximating hair volume, Blender soft body simulation, Surface Deform to bind visible mesh. Research phase — not part of initial MMD4B.
 
 ### Milestone 5: Materials & Textures
 

@@ -290,6 +290,82 @@ class BLENDER_MMD_OT_clear_cloth(bpy.types.Operator):
             return {"CANCELLED"}
 
 
+class BLENDER_MMD_OT_convert_selection_to_cloth(bpy.types.Operator):
+    """Convert selected pose bones to cloth simulation"""
+
+    bl_idname = "blender_mmd.convert_selection_to_cloth"
+    bl_label = "Convert Selection to Cloth"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return (
+            context.mode == "POSE"
+            and context.active_object is not None
+            and _is_mmd_armature(context.active_object)
+            and context.selected_pose_bones
+        )
+
+    def execute(self, context):
+        from .cloth import convert_selection_to_cloth
+        from .panels import validate_bone_chain
+
+        armature_obj = context.active_object
+        selected = list(context.selected_pose_bones)
+        valid, sorted_bones, message = validate_bone_chain(selected)
+        if not valid:
+            self.report({"ERROR"}, message)
+            return {"CANCELLED"}
+
+        bone_names = [pb.name for pb in sorted_bones]
+        preset = context.scene.mmd4b_preset
+        collision_obj = context.scene.mmd4b_collision_mesh
+
+        try:
+            cloth_obj = convert_selection_to_cloth(
+                armature_obj,
+                bone_names,
+                collision_mesh_obj=collision_obj,
+                preset=preset,
+            )
+            self.report({"INFO"}, f"Cloth created: {cloth_obj.name}")
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("Cloth conversion failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
+class BLENDER_MMD_OT_remove_cloth_sim(bpy.types.Operator):
+    """Remove a specific cloth simulation"""
+
+    bl_idname = "blender_mmd.remove_cloth_sim"
+    bl_label = "Remove Cloth Sim"
+    bl_options = {"REGISTER", "UNDO"}
+
+    cloth_object_name: StringProperty(
+        name="Cloth Object",
+        description="Name of the cloth object to remove",
+    )
+
+    def execute(self, context):
+        from .cloth import remove_cloth_sim
+
+        armature_obj = _find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        try:
+            remove_cloth_sim(armature_obj, self.cloth_object_name)
+            self.report({"INFO"}, f"Removed: {self.cloth_object_name}")
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("Cloth removal failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
 def menu_func_import(self, context):
     self.layout.operator(
         BLENDER_MMD_OT_import_pmx.bl_idname,
@@ -308,6 +384,8 @@ _classes = (
     BLENDER_MMD_OT_clear_physics,
     BLENDER_MMD_OT_convert_chain_to_cloth,
     BLENDER_MMD_OT_clear_cloth,
+    BLENDER_MMD_OT_convert_selection_to_cloth,
+    BLENDER_MMD_OT_remove_cloth_sim,
 )
 
 

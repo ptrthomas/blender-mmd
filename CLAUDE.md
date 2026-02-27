@@ -11,6 +11,7 @@ Read `docs/SPEC.md` first. It is the single source of truth for architecture, de
 - **Milestone 3.5** (done): IK fix — correct constraint placement, native limits, VMD IK toggle
 - **Milestone 4** (done): Rigid body physics — functional but limited by Blender's RB solver
 - **Milestone 4b** (done): Physics rework — three modes (none/rigid_body/cloth), chain detection, cloth conversion
+- **MMD4B** (in progress): Cloth UI panel — manual bone selection, Phase 1 (single chain) done, Phase 2 (connected group) planned
 - **Milestone 5** (next): Materials & textures
 
 ## Reference repos (siblings in ../  )
@@ -49,8 +50,8 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
   - `none` (default): metadata only, no physics objects. Clean import.
   - `rigid_body`: M4 implementation. RBW disabled during build, collision layers, non-collision constraints, margin 1e-6, dynamic body repositioning, depsgraph flushes. "Good enough" mmd_tools-quality.
   - `cloth`: Interactive chain-by-chain conversion to Blender cloth sim. Claude guides user through selecting chains and collision surfaces. Reference: `../blender_mmd_tools_append/`.
+- **MMD4B panel**: N-panel (tab "MMD4B") for cloth conversion. Select bones in Pose Mode, pick preset + collision mesh, click Convert. Phase 2 uses spatial auto-connect + manual strut bones for skirt tube mesh (struts replace self-collision via compression stiffness).
 - **No export**: One-way import only. No PMX/VMD/PMD export.
-- **No UI panels**: Claude Code is the interface.
 - **Logging**: Use blender-agent's session log. Python `logging` to stderr for diagnostics.
 
 ## Testing
