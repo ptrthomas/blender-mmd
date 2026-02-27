@@ -42,7 +42,7 @@ The addon should be designed so Claude can debug and compare output against the 
 ### Project layout
 
 ```
-bmmd/
+blender-mmd/
 ├── blender_mmd/              # Blender addon (symlinked to extensions dir)
 │   ├── __init__.py           # Addon entry, auto-registration
 │   ├── blender_manifest.toml # Blender 5.0+ extension manifest
