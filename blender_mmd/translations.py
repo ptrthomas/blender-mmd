@@ -223,3 +223,148 @@ def normalize_lr(name: str) -> str:
 def translate(name_j: str) -> str | None:
     """Look up English name for a Japanese bone name. Returns None if not found."""
     return BONE_NAMES.get(name_j)
+
+
+# fmt: off
+MORPH_NAMES: dict[str, str] = {
+    # --- Eyebrows ---
+    "真面目": "Serious",
+    "困る": "Troubled",
+    "にこり": "Cheerful",
+    "怒り": "Angry",
+    "上": "BrowUp",
+    "下": "BrowDown",
+    "前": "BrowForward",
+    "平行": "BrowFlat",
+    "左上": "BrowUp.L",
+    "右上": "BrowUp.R",
+    "左下": "BrowDown.L",
+    "右下": "BrowDown.R",
+    "眉頭": "BrowInner",
+    "左眉頭": "BrowInner.L",
+    "右眉頭": "BrowInner.R",
+    "眉粗": "BrowCoarse",
+    "左怒り": "Angry.L",
+    "右怒り": "Angry.R",
+
+    # --- Eyes (open/close) ---
+    "まばたき": "Blink",
+    "笑い": "Smile",
+    "笑い目": "SmileEyes",
+    "ウィンク": "Wink.L",
+    "ウィンク２": "Wink2.L",
+    "ウィンク右": "Wink.R",
+    "ｳｨﾝｸ２右": "Wink2.R",
+    # b-variants (bottom eyelid)
+    "bまばたき": "BlinkBottom",
+    "b笑い": "SmileBottom",
+    "bウィンク": "WinkBottom.L",
+    "bウィンク２": "Wink2Bottom.L",
+    "bウィンク右": "WinkBottom.R",
+    "bｳｨﾝｸ２右": "Wink2Bottom.R",
+
+    # --- Eye shape ---
+    "ｷﾘ?1": "SharpEyes",
+    "ｷﾞｭｯ": "SquintTight",
+    "なごみ": "Gentle",
+    "はぅ": "Hau",
+    "びっくり": "Surprised",
+    "じと目": "HalfClosed",
+    "たれ目": "DroopyEyes",
+    "なぬ！": "What!",
+
+    # --- Pupil ---
+    "瞳小": "PupilSmall",
+    "瞳縦": "PupilVertical",
+    "近": "EyesClose",
+    "近左": "EyeClose.L",
+    "近右": "EyeClose.R",
+    "離": "EyesFar",
+    "離左": "EyeFar.L",
+    "離右": "EyeFar.R",
+    "短": "EyesShort",
+    "カメラ目": "CameraEyes",
+    "はちゅ目": "HachuEyes",
+    "星目": "StarEyes",
+    "はぁと": "HeartEyes",
+    "恐ろしい子！": "Scary!",
+
+    # --- Mouth (vowels) ---
+    "あ": "A",
+    "あ２": "A2",
+    "い": "I",
+    "い２": "I2",
+    "う": "U",
+    "え": "E",
+    "お": "O",
+    "ん": "N",
+
+    # --- Mouth (shapes) ---
+    "▲": "MouthTriangle",
+    "∧": "MouthLambda",
+    "□": "MouthSquare",
+    "ワ": "MouthWa",
+    "ω": "MouthOmega",
+    "ω□": "MouthOmegaSquare",
+    "にやり": "Smirk",
+    "にっこり": "NiceSmile",
+    "ぺろっ": "TongueOut",
+    "口角上げ": "MouthCornersUp",
+    "左口角上げ": "MouthCornerUp.L",
+    "右口角上げ": "MouthCornerUp.R",
+    "口角下げ": "MouthCornersDown",
+    "左口角下げ": "MouthCornerDown.L",
+    "右口角下げ": "MouthCornerDown.R",
+    "口横広げ": "MouthWide",
+    "左口横広げ": "MouthWide.L",
+    "右口横広げ": "MouthWide.R",
+    "もぐもぐ": "Chewing",
+    "左もぐもぐ": "Chewing.L",
+    "右もぐもぐ": "Chewing.R",
+
+    # --- Teeth / tongue ---
+    "歯無し上": "NoUpperTeeth",
+    "歯無し下": "NoLowerTeeth",
+    "舌無し": "NoTongue",
+
+    # --- Tears / blush / effects ---
+    "涙": "Tear",
+    "涙長": "TearLong",
+    "涙上": "TearUp",
+    "涙下": "TearDown",
+    "涙前": "TearForward",
+    "涙近": "TearClose",
+    "照れ": "Blush",
+    "照れ2": "Blush2",
+    "照れ3": "Blush3",
+    "左汗": "Sweat.L",
+    "右汗": "Sweat.R",
+    "汗下": "SweatDown",
+
+    # --- Eyelashes / highlights ---
+    "下睫毛消": "HideLowerLashes",
+    "HL消１": "HideHighlight1",
+
+    # --- Face lines ---
+    "鼻線消し": "HideNoseLine",
+    "鼻線長": "NoseLineLong",
+
+    # --- Symbols / decorations ---
+    "左燈": "Light.L",
+    "右燈": "Light.R",
+    "左！": "Exclaim.L",
+    "右！": "Exclaim.R",
+    "左△△△": "Triangles.L",
+    "右△△△": "Triangles.R",
+
+    # --- Accessories ---
+    "眼鏡": "Glasses",
+    "マイクOFF": "MicOff",
+    "HP消": "HideHP",
+}
+# fmt: on
+
+
+def translate_morph(name_j: str) -> str | None:
+    """Look up English name for a Japanese morph name. Returns None if not found."""
+    return MORPH_NAMES.get(name_j)

@@ -15,6 +15,8 @@ from .pmx.types import (
     BoneWeightQDEF,
     BoneWeightSDEF,
     Model,
+    MorphType,
+    VertexMorphOffset,
 )
 
 log = logging.getLogger("blender_mmd")
@@ -110,6 +112,9 @@ def create_mesh(
     normals = [pmx_verts[v.vertex_index].normal for v in mesh_data.loops]
     mesh_data.normals_split_custom_set(normals)
 
+    # --- Shape keys (vertex morphs) ---
+    _create_shape_keys(model, mesh_obj, scale)
+
     # --- Parent to armature ---
     mesh_obj.parent = armature_obj
     mod = mesh_obj.modifiers.new(name="Armature", type="ARMATURE")
@@ -122,3 +127,92 @@ def create_mesh(
         len(mesh_data.uv_layers),
     )
     return mesh_obj
+
+
+def _resolve_morph_name(morph: "Morph") -> str:
+    """Choose English shape key name for a morph.
+
+    Resolution order (same logic as bone names):
+    1. PMX English name (name_e) — if non-empty
+    2. Translation table lookup of Japanese name
+    3. Japanese name as-is — fallback
+    """
+    from .translations import translate_morph
+
+    if morph.name_e:
+        return morph.name_e
+    translated = translate_morph(morph.name)
+    if translated:
+        return translated
+    return morph.name
+
+
+def _create_shape_keys(
+    model: Model,
+    mesh_obj: bpy.types.Object,
+    scale: float,
+) -> None:
+    """Create Blender shape keys from PMX vertex morphs.
+
+    Only vertex morphs become shape keys. Bone, material, UV, and group
+    morphs are stored as metadata for later milestones (VMD import).
+
+    Shape keys are named in English where possible. A mapping from
+    Japanese name → shape key name is stored on the mesh object as
+    ``mmd_morph_map`` for VMD import to find shape keys by Japanese name.
+    """
+    vertex_morphs = [
+        m for m in model.morphs if m.morph_type == MorphType.VERTEX
+    ]
+    if not vertex_morphs:
+        return
+
+    # Create basis shape key
+    basis = mesh_obj.shape_key_add(name="Basis", from_mix=False)
+    basis.value = 0.0
+
+    # Get basis coordinates (flat array: x0,y0,z0, x1,y1,z1, ...)
+    n_verts = len(mesh_obj.data.vertices)
+    basis_coords = [0.0] * (n_verts * 3)
+    basis.data.foreach_get("co", basis_coords)
+
+    # Track Japanese → shape key name mapping for VMD import
+    morph_map: dict[str, str] = {}
+    # Track used names to avoid duplicates
+    used_names: set[str] = {"Basis"}
+
+    for morph in vertex_morphs:
+        name = _resolve_morph_name(morph)
+        # Ensure unique name
+        if name in used_names:
+            suffix = 1
+            while f"{name}.{suffix:03d}" in used_names:
+                suffix += 1
+            name = f"{name}.{suffix:03d}"
+        used_names.add(name)
+
+        sk = mesh_obj.shape_key_add(name=name, from_mix=False)
+        sk.value = 0.0
+        morph_map[morph.name] = sk.name  # Blender may rename on collision
+
+        # Copy basis coords then apply offsets
+        coords = basis_coords.copy()
+        for offset in morph.offsets:
+            vi = offset.vertex_index
+            if 0 <= vi < n_verts:
+                base = vi * 3
+                coords[base] += offset.offset[0] * scale
+                coords[base + 1] += offset.offset[1] * scale
+                coords[base + 2] += offset.offset[2] * scale
+
+        sk.data.foreach_set("co", coords)
+
+    # Store mapping on mesh object for VMD import
+    import json
+    mesh_obj["mmd_morph_map"] = json.dumps(morph_map, ensure_ascii=False)
+
+    translated = sum(1 for m in vertex_morphs if _resolve_morph_name(m) != m.name)
+    log.info(
+        "Created %d shape keys from vertex morphs (%d translated)",
+        len(vertex_morphs), translated,
+    )
