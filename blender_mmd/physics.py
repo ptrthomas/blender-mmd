@@ -110,7 +110,7 @@ def _build_rigid_body_physics(armature_obj, model, scale: float) -> None:
         rigid_objects = _create_rigid_bodies(model, armature_obj, scale, rb_col)
 
         # Step 2: Reposition dynamic bodies to match current bone pose
-        _reposition_dynamic_bodies(model, armature_obj, rigid_objects, bone_names)
+        _reposition_dynamic_bodies(model, armature_obj, rigid_objects, bone_names, scale)
 
         # Flush depsgraph so matrix_world is up to date for joint/coupling steps
         bpy.context.scene.frame_set(bpy.context.scene.frame_current)
@@ -131,7 +131,7 @@ def _build_rigid_body_physics(armature_obj, model, scale: float) -> None:
         bpy.context.scene.frame_set(bpy.context.scene.frame_current)
 
         # Step 6: Physics world settings
-        _setup_physics_world(bpy.context.scene)
+        _setup_physics_world(bpy.context.scene, scale)
 
     finally:
         # Always enable rigid body world after build — we just created physics,
@@ -418,14 +418,19 @@ def _build_collision_collections(rigid: RigidBody) -> list[bool]:
     return cols
 
 
-def _reposition_dynamic_bodies(model, armature_obj, rigid_objects, bone_names) -> None:
+def _reposition_dynamic_bodies(model, armature_obj, rigid_objects, bone_names, scale) -> None:
     """Reposition dynamic rigid bodies to match current bone pose.
 
     PMX rigid body positions are in rest-pose coordinates. If VMD animation
     has moved bones (e.g. head), static (bone-parented) bodies follow, but
     dynamic bodies stay at rest-pose positions. This creates a mismatch at
     joints, causing physics explosions.
+
+    Builds local matrix from PMX data instead of reading obj.matrix_world,
+    which may be stale for newly created objects.
     """
+    from mathutils import Euler, Matrix, Vector
+
     for i, rigid in enumerate(model.rigid_bodies):
         if rigid.mode == RigidMode.STATIC:
             continue
@@ -444,8 +449,13 @@ def _reposition_dynamic_bodies(model, armature_obj, rigid_objects, bone_names) -
         pose_world = armature_obj.matrix_world @ pb.matrix
         delta = pose_world @ rest_world.inverted()
 
-        # Apply delta to rigid body's current world transform
-        new_matrix = delta @ obj.matrix_world
+        # Build local matrix from known PMX data (don't use stale matrix_world)
+        rx, ry, rz = rigid.rotation
+        loc = Vector(rigid.position) * scale
+        rot = Euler((-rx, -ry, -rz), "YXZ")
+        local_matrix = Matrix.Translation(loc) @ rot.to_matrix().to_4x4()
+
+        new_matrix = delta @ local_matrix
         t, r, _s = new_matrix.decompose()
         obj.location = t
         obj.rotation_euler = r.to_euler(obj.rotation_mode)
@@ -478,7 +488,7 @@ def _create_joints(model, armature_obj, rigid_objects: list, bone_names: dict,
         obj.rotation_euler = Euler((-rx, -ry, -rz), "YXZ")
 
         # Reposition joint to match posed bone (using src_rigid's bone)
-        _reposition_joint_empty(obj, joint, model, armature_obj, bone_names)
+        _reposition_joint_empty(obj, joint, model, armature_obj, bone_names, scale)
 
         # Add rigid body constraint
         bpy.context.view_layer.objects.active = obj
@@ -523,18 +533,24 @@ def _create_joints(model, armature_obj, rigid_objects: list, bone_names: dict,
         rbc.limit_ang_z_lower = -joint.limit_rotate_upper[2]
         rbc.limit_ang_z_upper = -joint.limit_rotate_lower[2]
 
-        # Springs disabled: Blender's Bullet implementation doesn't match
-        # MMD's spring behavior, causing instability and oscillation.
-        # mmd_tools also disables springs. Cloth mode (M4b) is the quality path.
-        rbc.use_spring_x = False
-        rbc.use_spring_y = False
-        rbc.use_spring_z = False
-        rbc.use_spring_ang_x = False
-        rbc.use_spring_ang_y = False
-        rbc.use_spring_ang_z = False
+        # Springs provide restoring force that keeps chain bodies together.
+        # Without springs, bodies scatter to joint limit edges under gravity.
+        rbc.use_spring_x = True
+        rbc.use_spring_y = True
+        rbc.use_spring_z = True
+        rbc.use_spring_ang_x = True
+        rbc.use_spring_ang_y = True
+        rbc.use_spring_ang_z = True
 
-        # Soft constraints (_apply_soft_constraints) also disabled:
-        # unlocking locked DOFs causes oscillation without working springs.
+        rbc.spring_stiffness_x = joint.spring_constant_move[0]
+        rbc.spring_stiffness_y = joint.spring_constant_move[1]
+        rbc.spring_stiffness_z = joint.spring_constant_move[2]
+        rbc.spring_stiffness_ang_x = joint.spring_constant_rotate[0]
+        rbc.spring_stiffness_ang_y = joint.spring_constant_rotate[1]
+        rbc.spring_stiffness_ang_z = joint.spring_constant_rotate[2]
+
+        # Soft constraints (_apply_soft_constraints) disabled:
+        # unlocking locked DOFs (lower > upper trick) causes oscillation.
         # Keep functions in file — tested and may re-enable for experimentation.
 
         obj["mmd_joint_index"] = i
@@ -543,8 +559,15 @@ def _create_joints(model, armature_obj, rigid_objects: list, bone_names: dict,
     return joint_objects
 
 
-def _reposition_joint_empty(obj, joint, model, armature_obj, bone_names) -> None:
-    """Apply pose-to-rest delta to a joint empty using its src_rigid's bone."""
+def _reposition_joint_empty(obj, joint, model, armature_obj, bone_names, scale) -> None:
+    """Apply pose-to-rest delta to a joint empty using its src_rigid's bone.
+
+    Builds the local matrix from the joint position/rotation directly instead
+    of reading obj.matrix_world, which is stale for newly created objects
+    (depsgraph hasn't evaluated yet).
+    """
+    from mathutils import Euler, Matrix, Vector
+
     if joint.src_rigid < 0 or joint.src_rigid >= len(model.rigid_bodies):
         return
     src_rigid = model.rigid_bodies[joint.src_rigid]
@@ -561,7 +584,13 @@ def _reposition_joint_empty(obj, joint, model, armature_obj, bone_names) -> None
     pose_world = armature_obj.matrix_world @ pb.matrix
     delta = pose_world @ rest_world.inverted()
 
-    new_matrix = delta @ obj.matrix_world
+    # Build local matrix from known location/rotation (don't use stale matrix_world)
+    rx, ry, rz = joint.rotation
+    loc = Vector(joint.position) * scale
+    rot = Euler((-rx, -ry, -rz), "YXZ")
+    local_matrix = Matrix.Translation(loc) @ rot.to_matrix().to_4x4()
+
+    new_matrix = delta @ local_matrix
     t, r, _s = new_matrix.decompose()
     obj.location = t
     obj.rotation_euler = r.to_euler(obj.rotation_mode)
@@ -779,13 +808,26 @@ def _create_tracking_empty(armature_obj, rb_obj, bone_name: str, collection):
     return empty
 
 
-def _setup_physics_world(scene) -> None:
-    """Configure physics world: substeps and solver iterations."""
+def _setup_physics_world(scene, scale: float = 0.08) -> None:
+    """Configure physics world: substeps, solver iterations, and gravity.
+
+    At 0.08 import scale, models are ~1.3m in Blender representing ~160cm.
+    Default gravity (-9.81) is effectively too strong for this scale, tearing
+    joints apart. Scale gravity proportionally.
+    """
+    from mathutils import Vector
+
     rbw = scene.rigidbody_world
     if rbw is None:
         return
-    rbw.substeps_per_frame = 10
-    rbw.solver_iterations = 10
+
+    # Higher substeps + iterations = tighter constraint enforcement.
+    # At small scale, the solver needs more passes to maintain zero-translation joints.
+    rbw.substeps_per_frame = 60
+    rbw.solver_iterations = 60
+
+    # Scale gravity to match model scale
+    scene.gravity = Vector((0, 0, -9.81 * scale))
 
 
 def _set_rigid_body_world_enabled(scene, enable: bool) -> bool:
