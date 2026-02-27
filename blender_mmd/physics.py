@@ -523,25 +523,19 @@ def _create_joints(model, armature_obj, rigid_objects: list, bone_names: dict,
         rbc.limit_ang_z_lower = -joint.limit_rotate_upper[2]
         rbc.limit_ang_z_upper = -joint.limit_rotate_lower[2]
 
-        # Spring values — THE critical fix over mmd_tools
-        rbc.use_spring_x = True
-        rbc.use_spring_y = True
-        rbc.use_spring_z = True
-        rbc.use_spring_ang_x = True
-        rbc.use_spring_ang_y = True
-        rbc.use_spring_ang_z = True
+        # Springs disabled: Blender's Bullet implementation doesn't match
+        # MMD's spring behavior, causing instability and oscillation.
+        # mmd_tools also disables springs. Cloth mode (M4b) is the quality path.
+        rbc.use_spring_x = False
+        rbc.use_spring_y = False
+        rbc.use_spring_z = False
+        rbc.use_spring_ang_x = False
+        rbc.use_spring_ang_y = False
+        rbc.use_spring_ang_z = False
 
-        rbc.spring_stiffness_x = joint.spring_constant_move[0]
-        rbc.spring_stiffness_y = joint.spring_constant_move[1]
-        rbc.spring_stiffness_z = joint.spring_constant_move[2]
-        rbc.spring_stiffness_ang_x = joint.spring_constant_rotate[0]
-        rbc.spring_stiffness_ang_y = joint.spring_constant_rotate[1]
-        rbc.spring_stiffness_ang_z = joint.spring_constant_rotate[2]
-
-        # Unlock locked angular DOFs: set lower > upper so Bullet treats
-        # them as free, with the spring providing soft resistance.
-        # Without this, locked DOFs (lower==upper) make hair/skirt rigid.
-        _apply_soft_constraints(rbc)
+        # Soft constraints (_apply_soft_constraints) also disabled:
+        # unlocking locked DOFs causes oscillation without working springs.
+        # Keep functions in file — tested and may re-enable for experimentation.
 
         obj["mmd_joint_index"] = i
         joint_objects.append(obj)
