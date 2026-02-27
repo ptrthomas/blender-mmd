@@ -415,19 +415,29 @@ The function `_apply_soft_constraints()` exists in `physics.py` but is not calle
 
 ### Physics world settings
 
-Recommended defaults for MMD models:
-
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| `substeps_per_frame` | 10–20 | Higher = more accurate, slower. 10 for preview, 20 for render bake |
-| `solver_iterations` | 10 | Default is fine for most models |
+| `substeps_per_frame` | 60 | Must be high at 0.08 scale for tight joint constraint enforcement |
+| `solver_iterations` | 60 | Same reason — more passes per substep to prevent joint separation |
+| `gravity` | `(0, 0, -9.81 * scale)` | **Critical**: default -9.81 is ~12.5x too strong for 0.08 scale models, tearing joints apart. Scale gravity proportionally. |
 | `use_split_impulse` | False | Can reduce bounce artifacts but causes stacking instability |
+
+### Springs and soft constraints
+
+**Springs are enabled** with PMX stiffness values. They provide the restoring force that keeps chain bodies connected at joint pivots. Without springs, bodies scatter to joint limit edges under gravity (no force pulling them back to center).
+
+**Soft constraints are disabled.** The Bullet trick (setting `lower > upper` to unlock frozen DOFs) causes oscillation at typical MMD spring stiffness values. The functions remain in code for experimentation.
+
+This means hair/clothing is slightly stiffer than MMD (locked DOFs stay locked) but stable. Cloth mode is the quality path for natural movement.
 
 ### Physics chain discovery
 
-Users select bones in Blender's viewport, then ask Claude to apply/modify physics. Claude reads the selection via helper functions and operates on the selected bones.
-
-No automatic chain detection or name-based body part identification. Claude can query the rigid body/joint graph topology via helpers if needed.
+Chain detection in `chains.py` (pure Python, no Blender imports):
+- Build adjacency graph from joints (`src_rigid → dest_rigid`)
+- Find STATIC rigid bodies connected to DYNAMIC neighbors (chain roots)
+- BFS from each root through DYNAMIC/DYNAMIC_BONE bodies
+- Classify chains by name pattern matching (hair/skirt/accessory/other)
+- Track visited bodies to prevent duplicates across chains
 
 ### Known limitations
 
@@ -494,6 +504,19 @@ blender_mmd.clear_physics              # Remove all physics objects and metadata
 blender_mmd.convert_chain_to_cloth     # Convert a detected chain to cloth simulation
 blender_mmd.clear_cloth                # Remove cloth objects and constraints
 ```
+
+### VMD binary format
+
+The VMD file is sequential binary with a 30-byte header (`Vocaloid Motion Data 0002\0`, model name in CP932). Sections are read in order, each prefixed by a 32-bit count:
+
+1. **Bone keyframes** (111 bytes each) — bone name (15 bytes CP932), frame number (u32), position (3×f32), rotation quaternion (4×f32), interpolation curves (64 bytes)
+2. **Morph keyframes** (23 bytes each) — morph name (15 bytes CP932), frame number (u32), weight (f32)
+3. **Camera keyframes** (61 bytes each) — parsed but not imported
+4. **Light keyframes** (28 bytes each) — parsed but not imported
+5. **Shadow keyframes** (9 bytes each) — parsed but not imported
+6. **Property keyframes** (variable) — frame (u32), visible (u8), IK count (u32), then per IK: name (20 bytes CP932), enabled (u8). Controls IK on/off per frame.
+
+Property section IK toggle is imported as IK constraint `influence` keyframes (0.0/1.0 with CONSTANT interpolation).
 
 ### VMD import operator
 
@@ -665,7 +688,7 @@ Rigid body physics implemented as intermediate step. Works but has fundamental l
 **Test data (`tests/samples/`):**
 - `初音ミク.pmx` — simple Miku model (122 bones, 45 rigid bodies, 27 joints)
 - `galaxias.vmd` — Galaxias dance motion
-- `baseline_mmd_tools.json` — mmd_tools bone transforms at key frames (pose + IK only)
+- `baseline_mmd_tools.json` — mmd_tools bone transforms at key frames (pose + IK only). 21 bones tracked across 11 frames (0, 100, ..., 1000). Uses Japanese bone names with .L/.R suffixes. Extracted from mmd_tools import with `ik_loop_factor=5`. The sample model is simpler (122 bones) — no arm twist or shoulder cancel bones.
 - `miku_galaxias.blend` — mmd_tools reference: **pose + IK only, no physics baked**. Do not use this blend for physics comparison — mmd_tools physics was never applied to it.
 
 ### Milestone 4b: Physics Rework — Three Modes ✅
@@ -779,6 +802,7 @@ API changes from earlier Blender versions that affect our code:
 - `collision_collections` (not `collision_groups`) on rigid bodies
 - New `Geometry Attribute Constraint` for bones reading geometry node attributes
 - Shape Keys UI overhauled (multi-selection, drag-and-drop)
+- **Stale `matrix_world`**: Newly created objects have identity `matrix_world` until depsgraph evaluates. Setting `obj.location`/`obj.rotation_euler` does NOT update it immediately. When you need the world matrix of a just-created object, build it manually from known position/rotation data instead of reading `obj.matrix_world`. This caused a subtle bug where all joint empties were placed at the origin.
 
 ---
 
