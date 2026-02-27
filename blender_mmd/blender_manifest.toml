@@ -1,0 +1,10 @@
+schema_version = "1.0.0"
+
+id = "blender_mmd"
+version = "0.1.0"
+name = "Blender MMD"
+tagline = "Import MMD (PMX) models into Blender"
+maintainer = "bmmd contributors"
+type = "add-on"
+blender_version_min = "5.0.0"
+license = ["SPDX:GPL-3.0-or-later"]

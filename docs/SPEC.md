@@ -159,9 +159,9 @@ The PMX file is a sequential binary format. Key details for the parser:
 
 **At parse time.** The parser outputs all positions, normals, and rotations in Blender's coordinate system (Z-up, right-handed). The conversion from MMD's Y-up system happens inside the parser:
 
-- Positions: `Vector(x, z, -y)` (swap Y↔Z, negate new Y)
-- Rotations: equivalent Euler conversion in parser
-- Normals: same swap as positions
+- Positions: `(x, -z, y)` — MMD Y-up → Blender Z-up, MMD Z-forward → Blender -Y
+- Rotations: `(x, -z, y)` — same axis remapping as positions
+- Normals: same conversion as positions
 
 Downstream code never deals with MMD coordinates.
 
