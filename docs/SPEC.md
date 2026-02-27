@@ -50,9 +50,14 @@ blender-mmd/
 │   │   ├── __init__.py
 │   │   ├── parser.py         # Binary PMX reader (clean rewrite)
 │   │   └── types.py          # Dataclasses for PMX structures
+│   ├── vmd/                  # VMD parser and importer
+│   │   ├── __init__.py
+│   │   ├── parser.py         # Binary VMD reader
+│   │   ├── types.py          # Dataclasses for VMD structures
+│   │   └── importer.py       # VMD → Blender F-curves, IK toggle
 │   ├── importer.py           # PMX → Blender object creation
 │   ├── physics.py            # Rigid body and joint setup
-│   ├── armature.py           # Bone creation and IK setup
+│   ├── armature.py           # Bone creation, IK setup, limit conversion
 │   ├── mesh.py               # Mesh creation and vertex weights
 │   ├── operators.py          # Thin Blender operator layer
 │   ├── helpers.py            # Introspection and query helpers for Claude
@@ -279,13 +284,18 @@ MMD bones have specific local axis orientations defined in two ways:
 
 ### IK setup
 
-Use **Blender's native IK solver** for milestone 1:
+Uses **Blender's native IK solver** with correct constraint placement:
 
-- Add `IK` constraint to the IK constraint bone
-- Set `chain_count` from PMX IK link count
-- Set `iterations` from PMX `loopCount`
-- Apply per-link rotation limits via `LIMIT_ROTATION` constraints
-- Convert PMX angle limits to Blender's local bone coordinate space
+- IK constraint placed on the **first link bone** (e.g. knee), NOT the end effector (ankle). Blender's IK solver positions the constrained bone's TAIL at the target, so placing on knee makes the ankle (knee's tail) reach the IK bone position.
+- Edge case: if first IK link == IK target, remove that link and use next link (matches mmd_tools)
+- Set `chain_count` from PMX IK link count (adjusted after any link removal)
+- Set `iterations` from PMX `loopCount * ik_loop_factor` (default factor=1, configurable)
+- Per-link rotation limits use **Blender-native IK properties** (`use_ik_limit_x`, `ik_min_x`, etc.) instead of `LIMIT_ROTATION` constraints — more performant and idiomatic
+- IK limits converted from Blender-global to bone-local space via `_convert_ik_limits()`: negate bone matrix, Y↔Z row swap, transpose, snap to axis-aligned permutation (matches mmd_tools' `convertIKLimitAngles`)
+
+**IK iteration multiplier**: Blender's IK solver converges slower than MMD's CCDIK. The `ik_loop_factor` parameter (stored as custom property on armature) multiplies PMX iteration counts. Default 1 uses raw PMX values. mmd_tools users typically set factor=5 for better foot placement precision.
+
+**VMD IK toggle**: VMD files contain per-frame IK enable/disable states. These are imported as IK constraint `influence` keyframes (0.0/1.0 with CONSTANT interpolation), which is more Blender-native than mmd_tools' custom property + update callback approach.
 
 CCD IK solver is a future enhancement for VMD motion fidelity.
 
@@ -493,13 +503,15 @@ Parameters:
 - Scale auto-detected from armature's `import_scale` custom property
 
 Behavior:
-1. Parse VMD file (bone keyframes, morph keyframes)
+1. Parse VMD file (bone keyframes, morph keyframes, property/IK toggle keyframes)
 2. Find the target armature (active selection or auto-detect)
 3. Build Japanese→English bone name lookup from `mmd_name_j` custom properties
 4. Apply bone keyframes via per-bone coordinate converter (`_BoneConverter`)
 5. Apply morph keyframes to shape key F-curves via `mmd_morph_map`
 6. Apply VMD Bézier interpolation handles to F-curves
-7. Log summary of matched/unmatched bones and morphs
+7. Apply IK toggle keyframes as constraint influence F-curves (CONSTANT interpolation)
+8. Set scene FPS to 30 (MMD standard) and extend frame range to fit animation
+9. Log summary of matched/unmatched bones and morphs
 
 **Per-bone VMD conversion**: VMD keyframes are in bone-local space. The `_BoneConverter` class constructs a conversion matrix from `bone.matrix_local` (with Y↔Z row swap + transpose) and converts each keyframe via matrix conjugation: `q_mat @ q_vmd @ q_mat.conjugated()`. This depends on correct bone roll (see above).
 
@@ -591,19 +603,27 @@ Morphs are needed before VMD import, since VMD files contain morph keyframes for
 VMD import follows morphs so we can see both body motion AND facial animation during playback.
 
 **Deliverables:**
-- VMD parser (bone keyframes + morph keyframes)
+- VMD parser (bone keyframes + morph keyframes + property/IK toggle keyframes)
 - Apply bone keyframes to armature as Blender actions/F-curves
 - Apply morph keyframes to shape key F-curves
 - VMD import operator
 - Japanese → English bone name matching via `mmd_name_j` custom properties
 - Translation table (`translations.py`) seeded by scanning user's PMX/VMD collection
 - `scripts/scan_translations.py` tool
+- IK constraint placement fix (first link bone, not end effector)
+- Blender-native IK limit properties (no LIMIT_ROTATION constraints)
+- IK limit angle conversion (Blender-global → bone-local space)
+- VMD IK toggle via constraint influence keyframes
+- Scene FPS (30) and frame range auto-set on VMD import
 
 **Validation:**
 - Import PMX model + VMD motion, play timeline
 - All VMD bone keyframes map to the correct English-named Blender bones
 - Character moves according to VMD with facial expressions animating
 - Compare playback side-by-side with mmd_tools on the same model + motion
+- IK constraint on knee (not ankle), native IK limits on knee PoseBone
+- Baseline comparison: 21 bones × 11 frames all within <0.05 tolerance
+- Floor penetration comparable to mmd_tools reference (Blender IK solver limitation)
 
 ### Milestone 4: Physics (current)
 

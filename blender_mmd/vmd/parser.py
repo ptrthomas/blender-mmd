@@ -15,7 +15,13 @@ import logging
 import struct
 from pathlib import Path
 
-from .types import BoneKeyframe, CameraKeyframe, MorphKeyframe, VmdMotion
+from .types import (
+    BoneKeyframe,
+    CameraKeyframe,
+    MorphKeyframe,
+    PropertyKeyframe,
+    VmdMotion,
+)
 
 log = logging.getLogger("blender_mmd")
 
@@ -68,13 +74,21 @@ def parse(filepath: str | Path) -> VmdMotion:
     # --- Camera keyframes (optional) ---
     camera_keyframes, pos = _read_camera_keyframes(buf, pos)
 
-    # Remaining sections (light, shadow, property) are skipped.
+    # --- Light keyframes (skip) ---
+    pos = _skip_section(buf, pos, 28)  # 28 bytes per light keyframe
+
+    # --- Shadow keyframes (skip) ---
+    pos = _skip_section(buf, pos, 9)  # 9 bytes per shadow keyframe
+
+    # --- Property keyframes (IK toggle) ---
+    property_keyframes, pos = _read_property_keyframes(buf, pos)
 
     log.info(
-        "VMD parsed: %d bone keyframes, %d morph keyframes, %d camera keyframes",
+        "VMD parsed: %d bone, %d morph, %d camera, %d property keyframes",
         len(bone_keyframes),
         len(morph_keyframes),
         len(camera_keyframes),
+        len(property_keyframes),
     )
 
     return VmdMotion(
@@ -82,6 +96,7 @@ def parse(filepath: str | Path) -> VmdMotion:
         bone_keyframes=bone_keyframes,
         morph_keyframes=morph_keyframes,
         camera_keyframes=camera_keyframes,
+        property_keyframes=property_keyframes,
     )
 
 
@@ -210,6 +225,76 @@ def _read_camera_keyframes(
                 interpolation=bytes(interp),
                 fov=fov,
                 orthographic=bool(persp),
+            )
+        )
+
+    return keyframes, pos
+
+
+def _skip_section(buf: bytes, pos: int, entry_size: int) -> int:
+    """Skip a fixed-size VMD section (light, shadow, etc.)."""
+    if pos + 4 > len(buf):
+        return pos
+    (count,) = struct.unpack_from("<I", buf, pos)
+    pos += 4
+    pos += count * entry_size
+    return min(pos, len(buf))
+
+
+def _read_property_keyframes(
+    buf: bytes, pos: int
+) -> tuple[list[PropertyKeyframe], int]:
+    """Read the property keyframe section (IK toggle + visibility).
+
+    Format per entry:
+        frame: uint32
+        visible: uint8 (0 or 1)
+        ik_count: uint32
+        per IK state:
+            name: 20 bytes (CP932, null-padded)
+            enabled: uint8
+    """
+    if pos + 4 > len(buf):
+        return [], pos
+
+    (count,) = struct.unpack_from("<I", buf, pos)
+    pos += 4
+
+    keyframes: list[PropertyKeyframe] = []
+    for _ in range(count):
+        if pos + 5 > len(buf):
+            log.warning(
+                "Truncated property keyframe section at entry %d",
+                len(keyframes),
+            )
+            break
+
+        (frame,) = struct.unpack_from("<I", buf, pos)
+        pos += 4
+        (visible_byte,) = struct.unpack_from("<B", buf, pos)
+        pos += 1
+
+        if pos + 4 > len(buf):
+            break
+        (ik_count,) = struct.unpack_from("<I", buf, pos)
+        pos += 4
+
+        ik_states: list[tuple[str, bool]] = []
+        for _ in range(ik_count):
+            if pos + 21 > len(buf):
+                break
+            # IK bone name: 20 bytes CP932
+            ik_name = _read_text(buf[pos : pos + 20])
+            pos += 20
+            (enabled_byte,) = struct.unpack_from("<B", buf, pos)
+            pos += 1
+            ik_states.append((ik_name, bool(enabled_byte)))
+
+        keyframes.append(
+            PropertyKeyframe(
+                frame=frame,
+                visible=bool(visible_byte),
+                ik_states=ik_states,
             )
         )
 

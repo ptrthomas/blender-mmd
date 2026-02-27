@@ -43,6 +43,15 @@ class CameraKeyframe:
 
 
 @dataclass
+class PropertyKeyframe:
+    """A single property keyframe from a VMD file (IK toggle + visibility)."""
+
+    frame: int
+    visible: bool
+    ik_states: list[tuple[str, bool]]  # (bone_name, enabled)
+
+
+@dataclass
 class VmdMotion:
     """Parsed VMD motion data."""
 
@@ -50,3 +59,4 @@ class VmdMotion:
     bone_keyframes: list[BoneKeyframe] = field(default_factory=list)
     morph_keyframes: list[MorphKeyframe] = field(default_factory=list)
     camera_keyframes: list[CameraKeyframe] = field(default_factory=list)
+    property_keyframes: list[PropertyKeyframe] = field(default_factory=list)

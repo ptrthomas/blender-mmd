@@ -18,7 +18,7 @@ from collections import defaultdict
 import bpy
 from mathutils import Matrix, Quaternion, Vector
 
-from .types import BoneKeyframe, MorphKeyframe, VmdMotion
+from .types import BoneKeyframe, MorphKeyframe, PropertyKeyframe, VmdMotion
 
 log = logging.getLogger("blender_mmd")
 
@@ -89,13 +89,50 @@ def import_vmd(
     if vmd.morph_keyframes:
         morph_count = _apply_morph_keyframes(vmd.morph_keyframes, armature_obj)
 
+    # Apply IK toggle keyframes
+    ik_toggle_count = 0
+    if vmd.property_keyframes:
+        ik_toggle_count = _apply_ik_toggle_keyframes(
+            vmd.property_keyframes, armature_obj, bone_action, jp_to_bone,
+        )
+
+    # Set scene FPS to 30 (MMD standard) and adjust frame range
+    _setup_scene_settings(armature_obj)
+
     log.info(
-        "VMD applied: %d/%d bones matched, %d morph channels, %d total bone keyframes",
+        "VMD applied: %d/%d bones matched, %d morph channels, %d IK toggles, "
+        "%d total bone keyframes",
         matched_bones,
         len(bone_groups),
         morph_count,
+        ik_toggle_count,
         len(vmd.bone_keyframes),
     )
+
+
+def _setup_scene_settings(armature_obj: bpy.types.Object) -> None:
+    """Set scene FPS and frame range to match the imported VMD.
+
+    MMD animations run at 30fps. The frame range is derived from all actions
+    on the armature and its child meshes (shape key actions).
+    """
+    scene = bpy.context.scene
+
+    # MMD standard: 30fps
+    scene.render.fps = 30
+    scene.render.fps_base = 1
+
+    # Collect frame range from all relevant actions
+    frame_end = scene.frame_start
+    for action in bpy.data.actions:
+        if action.users == 0:
+            continue
+        start, end = action.frame_range
+        frame_end = max(frame_end, int(end))
+
+    if frame_end > scene.frame_end:
+        scene.frame_end = frame_end
+        log.info("Scene frame range set to %d–%d at 30fps", scene.frame_start, frame_end)
 
 
 def _build_bone_lookup(armature_obj: bpy.types.Object) -> dict[str, str]:
@@ -399,3 +436,67 @@ def _apply_morph_keyframes(
 
     log.info("VMD morphs: %d/%d channels applied", applied, len(morph_groups))
     return applied
+
+
+def _apply_ik_toggle_keyframes(
+    property_keyframes: list[PropertyKeyframe],
+    armature_obj: bpy.types.Object,
+    bone_action: bpy.types.Action,
+    jp_to_bone: dict[str, str],
+) -> int:
+    """Apply IK toggle keyframes by animating IK constraint influence.
+
+    More Blender-native than mmd_tools' custom property + callback approach:
+    we directly keyframe the constraint's influence (0.0 or 1.0).
+
+    Returns the number of IK bones with toggle keyframes applied.
+    """
+    # Build a map: IK bone name (Japanese) → (pose_bone with IK constraint, constraint)
+    # The IK constraint's subtarget points to the IK bone (the one with is_ik flag)
+    ik_constraints: dict[str, list[tuple]] = {}
+    for pb in armature_obj.pose.bones:
+        for c in pb.constraints:
+            if c.type == "IK" and c.subtarget:
+                # Find the Japanese name of the subtarget bone
+                subtarget_bone = armature_obj.data.bones.get(c.subtarget)
+                if subtarget_bone:
+                    jp_name = subtarget_bone.get("mmd_name_j")
+                    if jp_name:
+                        if jp_name not in ik_constraints:
+                            ik_constraints[jp_name] = []
+                        ik_constraints[jp_name].append((pb, c))
+
+    applied = 0
+    for kf in property_keyframes:
+        for ik_name, enabled in kf.ik_states:
+            entries = ik_constraints.get(ik_name)
+            if not entries:
+                continue
+
+            influence = 1.0 if enabled else 0.0
+            frame = float(kf.frame)
+
+            for pb, constraint in entries:
+                constraint.influence = influence
+                data_path = f'pose.bones["{pb.name}"].constraints["{constraint.name}"].influence'
+                fc = bone_action.fcurve_ensure_for_datablock(
+                    armature_obj, data_path, index=0,
+                    group_name=pb.name,
+                )
+                # Add a single keyframe point
+                kp_count = len(fc.keyframe_points)
+                fc.keyframe_points.add(1)
+                kp = fc.keyframe_points[kp_count]
+                kp.co = (frame, influence)
+                kp.interpolation = "CONSTANT"
+
+            applied += 1
+
+    # Finalize all IK toggle F-curves
+    for fc in bone_action.fcurves:
+        if "influence" in fc.data_path:
+            fc.update()
+
+    if applied:
+        log.info("VMD IK toggles: %d state changes applied", applied)
+    return len(ik_constraints)

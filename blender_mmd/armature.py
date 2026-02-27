@@ -6,7 +6,7 @@ import logging
 import math
 
 import bpy
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 from .pmx.types import Bone, Model
 from .translations import normalize_lr, translate
@@ -123,8 +123,15 @@ def _set_auto_bone_roll(edit_bone: bpy.types.EditBone) -> None:
     edit_bone.align_roll(face_normal.cross(bone_dir))
 
 
-def create_armature(model: Model, scale: float) -> bpy.types.Object:
+def create_armature(
+    model: Model, scale: float, ik_loop_factor: int = 1,
+) -> bpy.types.Object:
     """Create a Blender armature from parsed PMX bone data.
+
+    Args:
+        ik_loop_factor: Multiplier for IK solver iterations. Blender's IK solver
+            converges slower than MMD's CCDIK, so higher values improve precision.
+            Default 1 uses raw PMX values. Increase to 5–10 if foot IK is imprecise.
 
     Returns the armature object (already linked to the scene).
     """
@@ -137,6 +144,7 @@ def create_armature(model: Model, scale: float) -> bpy.types.Object:
     arm_obj = bpy.data.objects.new(arm_name, arm_data)
     arm_obj["pmx_name"] = model.name
     arm_obj["import_scale"] = scale
+    arm_obj["ik_loop_factor"] = ik_loop_factor
 
     bpy.context.collection.objects.link(arm_obj)
     bpy.context.view_layer.objects.active = arm_obj
@@ -210,7 +218,7 @@ def create_armature(model: Model, scale: float) -> bpy.types.Object:
 
         # IK constraints
         if pmx_bone.is_ik and pmx_bone.ik_links:
-            _setup_ik(arm_obj, pose_bone, pmx_bone, bone_names)
+            _setup_ik(arm_obj, pose_bone, pmx_bone, bone_names, ik_loop_factor)
 
     bpy.ops.object.mode_set(mode="OBJECT")
 
@@ -218,33 +226,119 @@ def create_armature(model: Model, scale: float) -> bpy.types.Object:
     return arm_obj
 
 
+def _axis_aligned_permutation(mat: Matrix) -> Matrix:
+    """Snap a 3x3 matrix to an axis-aligned permutation matrix.
+
+    For each row, find the column with the largest absolute value and assign
+    +1 or -1. This produces a permutation matrix that best approximates the
+    input — used to convert per-axis IK limits through a rotation.
+
+    Matches mmd_tools' convertIKLimitAngles snapping logic.
+    """
+    m = Matrix([[0, 0, 0], [0, 0, 0], [0, 0, 0]])
+    i_set = [0, 1, 2]
+    j_set = [0, 1, 2]
+    for _ in range(3):
+        ii, jj = i_set[0], j_set[0]
+        for i in i_set:
+            for j in j_set:
+                if abs(mat[i][j]) > abs(mat[ii][jj]):
+                    ii, jj = i, j
+        i_set.remove(ii)
+        j_set.remove(jj)
+        m[ii][jj] = -1.0 if mat[ii][jj] < 0 else 1.0
+    return m
+
+
+def _convert_ik_limits(
+    limit_min: tuple[float, float, float],
+    limit_max: tuple[float, float, float],
+    bone_matrix_local: Matrix,
+) -> tuple[Vector, Vector]:
+    """Transform IK limits from Blender-global to Blender bone-local space.
+
+    Our parser already applied Y↔Z swap to the limits. The remaining transform
+    is: negate the bone's rest rotation matrix, swap Y↔Z rows, then transpose.
+    This matches mmd_tools' convertIKLimitAngles.
+
+    Then snap to an axis-aligned permutation (limits are per-axis, not arbitrary 3D).
+    """
+    mat = bone_matrix_local.to_3x3() * -1
+    mat[1], mat[2] = mat[2].copy(), mat[1].copy()
+    mat.transpose()
+
+    perm = _axis_aligned_permutation(mat)
+
+    new_min = perm @ Vector(limit_min)
+    new_max = perm @ Vector(limit_max)
+    # Ensure min <= max per axis
+    for i in range(3):
+        if new_min[i] > new_max[i]:
+            new_min[i], new_max[i] = new_max[i], new_min[i]
+    return new_min, new_max
+
+
 def _setup_ik(
     arm_obj: bpy.types.Object,
     pose_bone: bpy.types.PoseBone,
     pmx_bone: Bone,
     bone_names: list[str],
+    ik_loop_factor: int = 1,
 ) -> None:
-    """Set up IK constraint on a pose bone."""
+    """Set up IK constraint on the correct chain bone.
+
+    Blender's IK solver positions the constrained bone's TAIL at the target.
+    So the IK constraint must go on the first link bone (e.g. knee), not the
+    IK target bone (e.g. ankle). This way the knee's tail (= ankle's head)
+    reaches the IK bone position.
+
+    Matches mmd_tools' IK constraint placement logic.
+    """
     assert pmx_bone.ik_target is not None
     assert pmx_bone.ik_links is not None
 
     target_name = bone_names[pmx_bone.ik_target]
-
-    # The IK constraint goes on the target bone (end effector),
-    # pointing back at the IK bone as the target
     target_pb = arm_obj.pose.bones.get(target_name)
     if not target_pb:
         log.warning("IK target bone '%s' not found", target_name)
         return
 
-    ik = target_pb.constraints.new("IK")
+    # Work with a copy of the links list since we may remove the first entry
+    ik_links = list(pmx_bone.ik_links)
+
+    # Determine which bone gets the IK constraint: first link bone
+    if not ik_links:
+        log.warning("IK bone '%s' has no links", pose_bone.name)
+        return
+
+    first_link_name = bone_names[ik_links[0].bone_index]
+    ik_constraint_pb = arm_obj.pose.bones.get(first_link_name)
+    if not ik_constraint_pb:
+        log.warning("IK first link bone '%s' not found", first_link_name)
+        return
+
+    # Edge case: if first link bone IS the IK target, remove it and use next link
+    # (mmd_tools importer.py lines 322-327)
+    if ik_constraint_pb == target_pb:
+        ik_links = ik_links[1:]
+        if not ik_links:
+            log.warning("IK bone '%s': all links removed after fix", pose_bone.name)
+            return
+        first_link_name = bone_names[ik_links[0].bone_index]
+        ik_constraint_pb = arm_obj.pose.bones.get(first_link_name)
+        if not ik_constraint_pb:
+            log.warning("IK second link bone '%s' not found", first_link_name)
+            return
+        log.debug("IK fix: removed first link (== target) for '%s'", pose_bone.name)
+
+    ik = ik_constraint_pb.constraints.new("IK")
     ik.target = arm_obj
     ik.subtarget = pose_bone.name
-    ik.chain_count = len(pmx_bone.ik_links)
-    ik.iterations = pmx_bone.ik_loop_count or 40
+    ik.chain_count = len(ik_links)
+    ik.iterations = (pmx_bone.ik_loop_count or 40) * ik_loop_factor
 
-    # Per-link rotation limits
-    for link in pmx_bone.ik_links:
+    # Per-link rotation limits using Blender-native IK limit properties
+    for link in ik_links:
         if not link.has_limits or link.limit_min is None or link.limit_max is None:
             continue
         if link.bone_index < 0 or link.bone_index >= len(bone_names):
@@ -255,25 +349,25 @@ def _setup_ik(
         if not link_pb:
             continue
 
-        limit = link_pb.constraints.new("LIMIT_ROTATION")
-        limit.owner_space = "LOCAL"
+        # Convert limits from Blender-global to bone-local space
+        new_min, new_max = _convert_ik_limits(
+            link.limit_min, link.limit_max,
+            link_pb.bone.matrix_local,
+        )
 
-        limit.use_limit_x = True
-        limit.min_x = link.limit_min[0]
-        limit.max_x = link.limit_max[0]
-
-        limit.use_limit_y = True
-        limit.min_y = link.limit_min[1]
-        limit.max_y = link.limit_max[1]
-
-        limit.use_limit_z = True
-        limit.min_z = link.limit_min[2]
-        limit.max_z = link.limit_max[2]
+        link_pb.use_ik_limit_x = True
+        link_pb.use_ik_limit_y = True
+        link_pb.use_ik_limit_z = True
+        link_pb.ik_min_x = new_min[0]
+        link_pb.ik_max_x = new_max[0]
+        link_pb.ik_min_y = new_min[1]
+        link_pb.ik_max_y = new_max[1]
+        link_pb.ik_min_z = new_min[2]
+        link_pb.ik_max_z = new_max[2]
 
     log.debug(
-        "IK: %s → %s (chain=%d, iter=%d, links=%d)",
-        pose_bone.name, target_name,
-        len(pmx_bone.ik_links),
+        "IK: %s → %s (constraint on %s, chain=%d, iter=%d)",
+        pose_bone.name, target_name, ik_constraint_pb.name,
+        len(ik_links),
         pmx_bone.ik_loop_count or 40,
-        len(pmx_bone.ik_links),
     )
