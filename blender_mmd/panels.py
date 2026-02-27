@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 
 import bpy
@@ -14,6 +15,22 @@ def _is_mmd_armature(obj) -> bool:
         and obj.type == "ARMATURE"
         and obj.get("import_scale") is not None
     )
+
+
+def _find_mmd_armature_for_panel(context) -> bpy.types.Object | None:
+    """Find the relevant MMD armature for the panel.
+
+    Works when active object is the armature itself, or a cage mesh
+    parented to the armature.
+    """
+    obj = context.active_object
+    if obj is None:
+        return None
+    if _is_mmd_armature(obj):
+        return obj
+    if obj.type == "MESH" and obj.parent and _is_mmd_armature(obj.parent):
+        return obj.parent
+    return None
 
 
 def validate_bone_chain(pose_bones) -> tuple[bool, list, str]:
@@ -144,6 +161,25 @@ def _collision_mesh_poll(self, obj):
     return obj.type == "MESH"
 
 
+def _get_panel_cage_list(armature_obj) -> list[dict]:
+    """Get cage metadata list from armature for panel display."""
+    raw = armature_obj.get("mmd_softbody_cages") if armature_obj else None
+    if raw:
+        return json.loads(raw)
+    return []
+
+
+def _count_vg_members(obj, vg_index: int) -> int:
+    """Count vertices that belong to a vertex group."""
+    count = 0
+    for v in obj.data.vertices:
+        for g in v.groups:
+            if g.group == vg_index and g.weight > 0.001:
+                count += 1
+                break
+    return count
+
+
 class BLENDER_MMD_PT_softbody(bpy.types.Panel):
     """MMD4B — Soft body deformation panel."""
 
@@ -155,10 +191,11 @@ class BLENDER_MMD_PT_softbody(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        return _is_mmd_armature(context.active_object)
+        return _find_mmd_armature_for_panel(context) is not None
 
     def draw(self, context):
         layout = self.layout
+        armature_obj = _find_mmd_armature_for_panel(context)
         obj = context.active_object
 
         # --- Convert Section (Pose Mode + selection) ---
@@ -171,22 +208,32 @@ class BLENDER_MMD_PT_softbody(bpy.types.Panel):
             group_ok, chains, struts, group_msg = (
                 (False, [], [], "")
                 if chain_ok
-                else validate_bone_group(selected, obj)
+                else validate_bone_group(selected, armature_obj)
             )
 
             box = layout.box()
             if chain_ok:
                 first = sorted_bones[0].name
                 last = sorted_bones[-1].name
+                pin_bone = (
+                    sorted_bones[0].parent.name
+                    if sorted_bones[0].parent
+                    else sorted_bones[0].name
+                )
                 box.label(
                     text=f"Chain: {len(sorted_bones)} bones "
                     f"({first} \u2192 {last})"
                 )
+                box.label(text=f"Pin bone: {pin_bone}", icon="PINNED")
                 box.prop(context.scene, "mmd4b_stiffness", text="Stiffness")
                 box.prop(
                     context.scene, "mmd4b_collision_mesh", text="Collision"
                 )
-                box.label(text="(Soft body operators pending)", icon="INFO")
+                box.operator(
+                    "blender_mmd.generate_cage",
+                    text="Generate Cage",
+                    icon="MESH_CYLINDER",
+                )
             elif group_ok:
                 total = sum(len(c) for c in chains)
                 depths = ", ".join(str(len(c)) for c in chains)
@@ -201,7 +248,7 @@ class BLENDER_MMD_PT_softbody(bpy.types.Panel):
                 box.prop(
                     context.scene, "mmd4b_collision_mesh", text="Collision"
                 )
-                box.label(text="(Soft body operators pending)", icon="INFO")
+                box.label(text="Group mode: Phase 2", icon="INFO")
             else:
                 box.label(
                     text=f"Selected: {len(selected)} bones", icon="ERROR"
@@ -209,8 +256,79 @@ class BLENDER_MMD_PT_softbody(bpy.types.Panel):
                 box.label(text=chain_msg or group_msg)
         elif context.mode == "POSE":
             layout.label(text="Select bones to convert", icon="INFO")
+        elif (
+            context.mode == "EDIT_MESH"
+            and obj
+            and obj.type == "MESH"
+            and obj.name.startswith("SB_Cage_")
+        ):
+            # Cage is in Edit Mode — show pin/unpin controls
+            box = layout.box()
+            box.label(text=f"Editing: {obj.name}", icon="MESH_CYLINDER")
+            row = box.row(align=True)
+            row.operator(
+                "blender_mmd.pin_vertices", text="Pin", icon="PINNED"
+            )
+            row.operator(
+                "blender_mmd.unpin_vertices", text="Unpin", icon="UNPINNED"
+            )
+            # Show pin count
+            goal_vg = obj.vertex_groups.get("goal")
+            if goal_vg:
+                pin_count = _count_vg_members(obj, goal_vg.index)
+                box.label(text=f"Pinned: {pin_count} vertices")
         else:
             layout.label(text="Enter Pose Mode to convert", icon="INFO")
+
+        # --- Active Cages Section ---
+        cages = _get_panel_cage_list(armature_obj)
+        if cages:
+            box = layout.box()
+            box.label(text="Active Cages", icon="PHYSICS")
+            for cage_info in cages:
+                cage_name = cage_info["cage_name"]
+                row = box.row(align=True)
+                # Clickable label to select bones
+                op = row.operator(
+                    "blender_mmd.select_cage_bones",
+                    text=cage_name,
+                    icon="BONE_DATA",
+                )
+                op.cage_name = cage_name
+                # Rebind button
+                op = row.operator(
+                    "blender_mmd.rebind_surface_deform",
+                    text="",
+                    icon="FILE_REFRESH",
+                )
+                op.cage_name = cage_name
+                # Remove button
+                op = row.operator(
+                    "blender_mmd.remove_cage",
+                    text="",
+                    icon="X",
+                )
+                op.cage_name = cage_name
+                # Info sub-row
+                sub = box.row()
+                n_bones = len(cage_info.get("bone_names", []))
+                n_verts = cage_info.get("affected_verts", 0)
+                sub.label(
+                    text=f"  {n_bones} bones, {n_verts} affected verts",
+                )
+
+            # Bottom buttons
+            row = box.row(align=True)
+            row.operator(
+                "blender_mmd.reset_soft_body",
+                text="Reset Sims",
+                icon="FILE_REFRESH",
+            )
+            row.operator(
+                "blender_mmd.clear_all_cages",
+                text="Clear All",
+                icon="TRASH",
+            )
 
 
 _classes = (BLENDER_MMD_PT_softbody,)
