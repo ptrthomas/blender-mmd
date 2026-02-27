@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 import bpy
-from bpy.props import EnumProperty, FloatProperty, StringProperty
+from bpy.props import EnumProperty, FloatProperty, IntProperty, StringProperty
 from bpy_extras.io_utils import ImportHelper
 
 log = logging.getLogger("blender_mmd")
@@ -184,6 +184,112 @@ class BLENDER_MMD_OT_clear_physics(bpy.types.Operator):
             return {"CANCELLED"}
 
 
+class BLENDER_MMD_OT_convert_chain_to_cloth(bpy.types.Operator):
+    """Convert a physics chain to cloth simulation"""
+
+    bl_idname = "blender_mmd.convert_chain_to_cloth"
+    bl_label = "Convert Chain to Cloth"
+    bl_options = {"REGISTER", "UNDO"}
+
+    chain_index: IntProperty(
+        name="Chain Index",
+        description="Index of the chain to convert",
+        default=0,
+        min=0,
+    )
+
+    preset: EnumProperty(
+        name="Preset",
+        description="Cloth preset",
+        items=[
+            ("cotton", "Cotton", "General purpose (skirts, general)"),
+            ("silk", "Silk", "Flowing fabric"),
+            ("hair", "Hair", "Hair strands"),
+        ],
+        default="cotton",
+    )
+
+    collision_mesh: StringProperty(
+        name="Collision Mesh",
+        description="Name of mesh object for collision (e.g. body mesh)",
+        default="",
+    )
+
+    def execute(self, context):
+        import json
+        from .chains import Chain
+        from .cloth import convert_chain_to_cloth
+        from .pmx import parse
+
+        armature_obj = _find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        chains_json = armature_obj.get("mmd_physics_chains")
+        if not chains_json:
+            self.report({"ERROR"}, "No chains detected. Run build_physics with mode='cloth' first.")
+            return {"CANCELLED"}
+
+        chains_data = json.loads(chains_json)
+        if self.chain_index >= len(chains_data):
+            self.report({"ERROR"}, f"Chain index {self.chain_index} out of range (0-{len(chains_data)-1}).")
+            return {"CANCELLED"}
+
+        cd = chains_data[self.chain_index]
+        chain = Chain(**cd)
+
+        filepath = armature_obj.get("pmx_filepath")
+        if not filepath:
+            self.report({"ERROR"}, "No PMX filepath stored on armature.")
+            return {"CANCELLED"}
+
+        scale = armature_obj.get("import_scale", 0.08)
+        model = parse(filepath)
+
+        collision_obj = None
+        if self.collision_mesh:
+            collision_obj = bpy.data.objects.get(self.collision_mesh)
+
+        try:
+            cloth_obj = convert_chain_to_cloth(
+                armature_obj, chain, model, scale,
+                collision_mesh_obj=collision_obj,
+                preset=self.preset,
+            )
+            self.report({"INFO"}, f"Cloth created: {cloth_obj.name}")
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("Cloth conversion failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
+class BLENDER_MMD_OT_clear_cloth(bpy.types.Operator):
+    """Remove cloth simulation objects for an MMD model"""
+
+    bl_idname = "blender_mmd.clear_cloth"
+    bl_label = "Clear MMD Cloth"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        from .cloth import clear_cloth
+
+        armature_obj = _find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        try:
+            clear_cloth(armature_obj)
+            self.report({"INFO"}, "Cloth cleared.")
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("Cloth clear failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
 def menu_func_import(self, context):
     self.layout.operator(
         BLENDER_MMD_OT_import_pmx.bl_idname,
@@ -200,6 +306,8 @@ _classes = (
     BLENDER_MMD_OT_import_vmd,
     BLENDER_MMD_OT_build_physics,
     BLENDER_MMD_OT_clear_physics,
+    BLENDER_MMD_OT_convert_chain_to_cloth,
+    BLENDER_MMD_OT_clear_cloth,
 )
 
 

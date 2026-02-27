@@ -78,6 +78,39 @@ def get_ik_chains() -> list[dict]:
     return chains
 
 
+def get_physics_mode(armature_name: str | None = None) -> str | None:
+    """Return the current physics mode for an MMD armature."""
+    obj = _get_armature(armature_name)
+    if not obj:
+        return None
+    return obj.get("physics_mode")
+
+
+def get_physics_chains(armature_name: str | None = None) -> list[dict] | None:
+    """Return detected physics chains from armature metadata."""
+    import json
+    obj = _get_armature(armature_name)
+    if not obj:
+        return None
+    chains_json = obj.get("mmd_physics_chains")
+    if not chains_json:
+        return None
+    return json.loads(chains_json)
+
+
+def _get_armature(armature_name: str | None = None):
+    """Get armature object by name or active object."""
+    if armature_name:
+        arm_obj = bpy.data.objects.get(armature_name)
+    else:
+        arm_obj = bpy.context.active_object
+        if arm_obj and arm_obj.type != "ARMATURE":
+            arm_obj = None
+    if not arm_obj or arm_obj.type != "ARMATURE":
+        return None
+    return arm_obj
+
+
 def get_physics_objects() -> dict:
     """Return rigid body and joint objects related to the active armature."""
     rigid_bodies = []
