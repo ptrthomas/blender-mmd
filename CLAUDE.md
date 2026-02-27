@@ -10,12 +10,8 @@ Read `docs/SPEC.md` first. It is the single source of truth for architecture, de
 - **Milestone 3** (done): VMD motion import (bone keyframes, morph keyframes, bone roll)
 - **Milestone 3.5** (done): IK fix — correct constraint placement, native limits, VMD IK toggle
 - **Milestone 4** (done): Rigid body physics — functional but limited by Blender's RB solver
-- **Milestone 4b** (next, PRIMARY): Physics rework — three modes:
-  - **Phase 1**: Restructure into modes + default-off (`mode="none"`, store metadata only)
-  - **Phase 2**: Simplify rigid body mode (`mode="rigid_body"`, mmd_tools-quality, no overengineering)
-  - **Phase 3**: Interactive cloth conversion (`mode="cloth"`, chain detection + guided setup)
-- **Milestone 5**: Materials & textures
-- **Primary motivation**: Replace mmd_tools' broken rigid body physics with Blender-native cloth sim
+- **Milestone 4b** (done): Physics rework — three modes (none/rigid_body/cloth), chain detection, cloth conversion
+- **Milestone 5** (next): Materials & textures
 
 ## Reference repos (siblings in ../  )
 
