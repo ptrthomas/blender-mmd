@@ -776,7 +776,7 @@ What we learned from implementing and testing M4 rigid body physics. This inform
 
 **What to simplify in Phase 2:**
 - Drop `_apply_soft_constraints()` — the lower>upper trick is unreliable. Keep DOFs hard-locked as MMD defines them. This matches mmd_tools behavior and is more stable.
-- Drop spring complexity — keep springs enabled (they're the critical fix over mmd_tools) but don't try to tune or transform them. Raw PMX values, pass-through.
+- **Disable springs initially** — mmd_tools doesn't apply them and still gets usable physics. Start with no springs (easier to debug), get basic hair/skirt working stably first, then re-enable springs as a later tuning pass once the baseline is solid.
 - Don't try to match MMD physics perfectly — the goal is "mmd_tools quality" which is itself imperfect. Users who want good physics should use cloth mode.
 - Keep non-collision constraints — they're correct and prevent false collisions.
 - Consider adding auto-bake after build (bake the first N frames so user sees immediate results).
@@ -786,7 +786,7 @@ What we learned from implementing and testing M4 rigid body physics. This inform
 - Don't implement SPRING2 — it has known angular spring bugs in Blender
 - Don't try to match MMD's CCDIK-based physics solver — fundamentally different architecture
 - Don't over-optimize non-collision constraints — the O(n²) issue is theoretical; real models have <50 rigid bodies
-- Don't disable springs to "simplify" — applying springs is the #1 fix over mmd_tools
+- Springs are a future enhancement — get stable physics without them first, add back later
 
 ### Milestone 5: Materials & Textures
 
