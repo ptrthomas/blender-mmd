@@ -570,7 +570,7 @@ Let parsing exceptions propagate. The import operator catches exceptions at the 
 - Normals render correctly (smooth shading matches mmd_tools)
 - UVs are present and correct (visible in UV editor)
 
-### Milestone 2: Morphs & Shape Keys (current)
+### Milestone 2: Morphs & Shape Keys ✅
 
 Morphs are needed before VMD import, since VMD files contain morph keyframes for facial animation. Without shape keys, VMD playback would be body-only with no facial expressions.
 
@@ -586,7 +586,7 @@ Morphs are needed before VMD import, since VMD files contain morph keyframes for
 - Activate a facial morph shape key, verify mesh deformation is correct
 - Compare shape key count and names against mmd_tools import of the same model
 
-### Milestone 3: VMD Motion Import
+### Milestone 3: VMD Motion Import ✅
 
 VMD import follows morphs so we can see both body motion AND facial animation during playback.
 
@@ -605,7 +605,7 @@ VMD import follows morphs so we can see both body motion AND facial animation du
 - Character moves according to VMD with facial expressions animating
 - Compare playback side-by-side with mmd_tools on the same model + motion
 
-### Milestone 4: Physics
+### Milestone 4: Physics (current)
 
 Physics follows VMD so we can validate with actual motion playing — a static model with physics proves nothing.
 

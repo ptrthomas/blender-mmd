@@ -6,8 +6,10 @@ Read `docs/SPEC.md` first. It is the single source of truth for architecture, de
 
 - **This project**: PMX/VMD importer addon for Blender 5.0+, driven by Claude Code
 - **Milestone 1** (done): PMX parser + armature + mesh import
-- **Milestone 2** (current): Morphs / shape keys
-- **Primary motivation**: Fix mmd_tools' broken rigid body physics (milestones 2–3)
+- **Milestone 2** (done): Morphs / shape keys
+- **Milestone 3** (done): VMD motion import (bone keyframes, morph keyframes, bone roll)
+- **Milestone 4** (next): Physics — rigid bodies, joints, springs
+- **Primary motivation**: Fix mmd_tools' broken rigid body physics
 
 ## Reference repos (siblings in ../  )
 
