@@ -264,20 +264,29 @@ No MMD-specific PropertyGroups. Use Blender custom properties where needed.
 
 PMX bones have a `displayConnection` field whose meaning depends on a flag bit:
 
-- **Flag bit set → bone index**: The bone's tail points at the position of the referenced bone. If the referenced bone index is -1 or invalid, use a minimum-length offset.
-- **Flag bit unset → position offset**: The bone's tail is at `head + offset`. If the offset is zero (tail == head), use a minimum-length offset along the bone's local Y axis to prevent Blender from deleting the zero-length bone.
+- **Flag bit set → bone index**: The bone's tail points at the position of the referenced bone. If the referenced bone index is -1 or invalid, use the default tail offset.
+- **Flag bit unset → position offset**: The bone's tail is at `head + offset`. If the offset is zero (tail == head), use the default tail offset.
 
-The minimum length offset should be small (e.g. 0.001 in Blender units) — just enough to keep the bone alive.
+**Default tail offset for zero-length bones: `(0, 0, 1) * scale`** (along +Z, length = import scale). This matches mmd_tools' behavior. The direction matters because it determines the bone's local coordinate frame (y_axis = head→tail direction), which propagates through additional transform shadow bones.
+
+**Bug found and fixed**: Originally used `(0, MIN_BONE_LENGTH, 0)` — along +Y with length 0.001. This caused 90° rotation errors on all additional transform bones (D bones, cancel bones, toe) because the shadow bone system copies the source bone's roll and tail offset. With the wrong tail direction, the shadow bone's local frame was rotated 90° relative to the target bone's frame, making TRANSFORM constraints produce wrong results.
 
 ### Bone roll / local axes
 
-**Critical for VMD motion import.** Bone roll determines the bone's local coordinate frame (`matrix_local`), which the per-bone VMD converter uses. Without correct roll, VMD keyframes produce visually wrong poses even though the math is correct.
+**Critical for both VMD motion import and additional transforms.** Bone roll determines the bone's local coordinate frame (`matrix_local`). This affects:
+1. **VMD conversion**: The per-bone `_BoneConverter` uses `bone.matrix_local` to transform keyframes
+2. **Additional transforms**: Shadow bones copy the source bone's roll — if the source bone has wrong roll (from wrong tail direction), the entire TRANSFORM constraint chain produces wrong output
+3. **IK limits**: `_convert_ik_limits()` transforms limits through `bone.matrix_local`
+
+Bone roll depends on the **tail direction** — Blender derives `y_axis` from head→tail, then computes `x_axis`/`z_axis` from roll angle around that direction. So getting the tail right (see above) is a prerequisite for correct roll.
 
 MMD bones have specific local axis orientations defined in two ways:
 
-1. **Explicit local axes** (`localCoordinate` in PMX, flag bit 0x0800): The PMX bone stores X-axis and Z-axis vectors. Only ~14 bones in a typical model use this (thumbs, fingertips).
+1. **Explicit local axes** (`localCoordinate` in PMX, flag bit 0x0800): The PMX bone stores X-axis and Z-axis vectors. Only ~14 bones in a typical model use this (thumbs, fingertips). These vectors are in MMD coordinates and get Y↔Z swapped by the parser.
 
-2. **Auto-computed axes** for arm/finger bones: Shoulder, arm, elbow, wrist, and finger bones get their local axes computed geometrically from head/tail positions in the XZ plane. This covers ~50+ bones.
+2. **Auto-computed axes** for arm/finger bones: Shoulder, arm, elbow, wrist, and finger bones get their local axes computed geometrically from head/tail positions in the XZ plane. This covers ~50+ bones. Bones covered: `左肩/右肩`, `左腕/右腕`, `左ひじ/右ひじ`, `左手首/右手首`, plus semi-standard (`腕捩`, `手捩`, `肩P`, `ダミー`), plus all finger bones containing `親指/人指/中指/薬指/小指`.
+
+3. **All other bones**: No explicit roll computation. Roll defaults to Blender's automatic calculation from tail direction. This is why the tail direction for zero-length bones is critical — it determines the default roll for D bones, cancel bones, toe bones, etc.
 
 **Why this matters for retargeting**: Standard Blender rig animation (Mixamo, Rigify, motion capture) fails on MMD armatures because the bone rolls don't match. A "rotate arm 45° around X" keyframe means different physical rotations when the bone's local X-axis points in different directions. This is why direct animation mapping between standard rigs and MMD models produces broken poses.
 
@@ -285,6 +294,9 @@ MMD bones have specific local axis orientations defined in two ways:
 - `_set_bone_roll_from_axes()`: Sets roll from PMX local axis data using `EditBone.align_roll()`
 - `_set_auto_bone_roll()`: Geometrically computes axes for arm/finger bones, matching mmd_tools' `FnBone.update_auto_bone_roll()`
 - Applied after setting bone tails, before leaving edit mode
+- Bones shorter than `MIN_BONE_LENGTH` are skipped (no meaningful direction to derive roll from)
+
+**Verification**: At rest pose, all bone axes (x/y/z) match mmd_tools with dot product = 1.0000 for all tested bones including D bones, cancel bones, and toe bones.
 
 ### IK setup
 
