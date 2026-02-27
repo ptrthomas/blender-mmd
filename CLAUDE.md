@@ -10,8 +10,9 @@ Read `docs/SPEC.md` first. It is the single source of truth for architecture, de
 - **Milestone 3** (done): VMD motion import (bone keyframes, morph keyframes, bone roll)
 - **Milestone 3.5** (done): IK fix — correct constraint placement, native limits, VMD IK toggle
 - **Milestone 4** (done): Rigid body physics — functional but limited by Blender's RB solver
-- **Milestone 4b** (in progress): Soft Body cage + Surface Deform for hair/skirt/tie. Three physics modes coexist: none, rigid_body, soft_body.
-- **Milestone 5** (next): Materials & textures
+- **Milestone 4b** (done): Cloth on cage tube + Surface Deform for hair/skirt/tie. Three physics modes coexist: none, rigid_body, soft_body.
+- **Milestone 5** (done): Materials & textures — two shader modes (mmd/simple), texture loading, per-face assignment
+- **Milestone 6** (next): Animation polish
 
 ## Reference repos (siblings in ../  )
 
@@ -32,6 +33,14 @@ curl -s localhost:5656 --data-binary @- <<< 'bpy.app.version_string'
 
 # Use blender-agent (port 5656) for execution, screenshots, and log monitoring
 # Module reloading is unreliable — restart Blender for code changes
+
+# Screenshots: two-step process (NEVER use curl -o to save screenshots)
+# Step 1: Tell Blender to save screenshot to disk
+curl -s localhost:5656 --data-binary @- <<'PYEOF'
+bpy.ops.screen.screenshot(filepath="/tmp/blender_screenshot.png")
+PYEOF
+# Step 2: Read the saved PNG file with the Read tool
+# The curl response is JSON, NOT an image. Never pipe/save it as a PNG.
 ```
 
 ## Cross-project contributions
@@ -48,8 +57,8 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
 - **Physics**: Three modes, can coexist (rigid_body provides collision surfaces for soft_body cages):
   - `none` (default): metadata only, no physics objects. Clean import.
   - `rigid_body`: M4 implementation. RBW disabled during build, collision layers, non-collision constraints, margin 1e-6, dynamic body repositioning, depsgraph flushes. "Good enough" mmd_tools-quality.
-  - `soft_body`: MMD4B panel. User selects target mesh (hair/skirt/tie), algorithm generates low-poly cage, Soft Body on cage + Surface Deform on visible mesh. Internal trusses preserve cross-section for thick volumes.
-- **MMD4B panel**: N-panel (tab "MMD4B") for soft body deformation. Select mesh → generate cage → play. Cloth sim approach abandoned (unstable for stiff structures like hair).
+  - `soft_body`: MMD4B panel. User selects bone chain, algorithm generates octagonal cage tube with gradient density (more rings near root), Cloth modifier on cage + Surface Deform on visible mesh. Gradient pinning `[1.0, 0.8, 0.5]` for smooth transition.
+- **MMD4B panel**: N-panel (tab "MMD4B") for soft body deformation. Select bones in Pose Mode → generate cage → play. Uses Cloth modifier (not Soft Body) because Cloth respects Armature modifier output for pinned vertices.
 - **No export**: One-way import only. No PMX/VMD/PMD export.
 - **Logging**: Use blender-agent's session log. Python `logging` to stderr for diagnostics.
 
