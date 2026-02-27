@@ -1,11 +1,11 @@
-"""MMD4B UI panel — cloth conversion controls in the 3D Viewport N-panel."""
+"""MMD4B UI panel — soft body deformation controls in the 3D Viewport N-panel."""
 
 from __future__ import annotations
 
 import math
 
 import bpy
-from bpy.props import EnumProperty, PointerProperty
+from bpy.props import FloatProperty, PointerProperty
 
 
 def _is_mmd_armature(obj) -> bool:
@@ -144,11 +144,11 @@ def _collision_mesh_poll(self, obj):
     return obj.type == "MESH"
 
 
-class BLENDER_MMD_PT_cloth(bpy.types.Panel):
-    """MMD4B — Cloth conversion panel."""
+class BLENDER_MMD_PT_softbody(bpy.types.Panel):
+    """MMD4B — Soft body deformation panel."""
 
     bl_label = "MMD4B"
-    bl_idname = "BLENDER_MMD_PT_cloth"
+    bl_idname = "BLENDER_MMD_PT_softbody"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "MMD4B"
@@ -165,9 +165,9 @@ class BLENDER_MMD_PT_cloth(bpy.types.Panel):
         if context.mode == "POSE" and context.selected_pose_bones:
             selected = list(context.selected_pose_bones)
 
-            # Try single chain first (Phase 1)
+            # Try single chain first
             chain_ok, sorted_bones, chain_msg = validate_bone_chain(selected)
-            # Try group (Phase 2) if single chain fails
+            # Try group if single chain fails
             group_ok, chains, struts, group_msg = (
                 (False, [], [], "")
                 if chain_ok
@@ -182,13 +182,11 @@ class BLENDER_MMD_PT_cloth(bpy.types.Panel):
                     text=f"Chain: {len(sorted_bones)} bones "
                     f"({first} \u2192 {last})"
                 )
-                box.prop(context.scene, "mmd4b_preset", text="Preset")
-                box.prop(context.scene, "mmd4b_collision_mesh", text="Collision")
-                box.operator(
-                    "blender_mmd.convert_selection_to_cloth",
-                    text="Convert to Cloth",
-                    icon="MOD_CLOTH",
+                box.prop(context.scene, "mmd4b_stiffness", text="Stiffness")
+                box.prop(
+                    context.scene, "mmd4b_collision_mesh", text="Collision"
                 )
+                box.label(text="(Soft body operators pending)", icon="INFO")
             elif group_ok:
                 total = sum(len(c) for c in chains)
                 depths = ", ".join(str(len(c)) for c in chains)
@@ -199,13 +197,11 @@ class BLENDER_MMD_PT_cloth(bpy.types.Panel):
                 box.label(text=f"Depths: {depths}")
                 if struts:
                     box.label(text=f"Struts: {len(struts)}")
-                box.prop(context.scene, "mmd4b_preset", text="Preset")
-                box.prop(context.scene, "mmd4b_collision_mesh", text="Collision")
-                box.operator(
-                    "blender_mmd.convert_group_to_cloth",
-                    text="Convert Group to Cloth",
-                    icon="MOD_CLOTH",
+                box.prop(context.scene, "mmd4b_stiffness", text="Stiffness")
+                box.prop(
+                    context.scene, "mmd4b_collision_mesh", text="Collision"
                 )
+                box.label(text="(Soft body operators pending)", icon="INFO")
             else:
                 box.label(
                     text=f"Selected: {len(selected)} bones", icon="ERROR"
@@ -216,64 +212,18 @@ class BLENDER_MMD_PT_cloth(bpy.types.Panel):
         else:
             layout.label(text="Enter Pose Mode to convert", icon="INFO")
 
-        # --- Active Cloth Sims ---
-        layout.separator()
-        layout.label(text="Active Cloth Sims", icon="MOD_CLOTH")
 
-        col_name = obj.get("cloth_collection")
-        has_cloths = False
-        if col_name:
-            collection = bpy.data.collections.get(col_name)
-            if collection and collection.objects:
-                has_cloths = True
-                for cloth_obj in collection.objects:
-                    row = layout.row(align=True)
-                    bone_names = cloth_obj.get("mmd_bone_names", "")
-                    count = len(bone_names.split(",")) if bone_names else "?"
-                    # Clickable label to select bones
-                    sel_op = row.operator(
-                        "blender_mmd.select_cloth_bones",
-                        text=f"{cloth_obj.name}  ({count} bones)",
-                        icon="BONE_DATA",
-                    )
-                    sel_op.cloth_object_name = cloth_obj.name
-                    op = row.operator(
-                        "blender_mmd.remove_cloth_sim",
-                        text="",
-                        icon="X",
-                    )
-                    op.cloth_object_name = cloth_obj.name
-
-        if not has_cloths:
-            layout.label(text="None")
-
-        # Reset / Clear buttons
-        if has_cloths:
-            row = layout.row(align=True)
-            row.operator(
-                "blender_mmd.reset_cloth_sims",
-                text="Reset Sims",
-                icon="FILE_REFRESH",
-            )
-            row.operator(
-                "blender_mmd.clear_cloth",
-                text="Clear All",
-                icon="TRASH",
-            )
-
-
-_classes = (BLENDER_MMD_PT_cloth,)
+_classes = (BLENDER_MMD_PT_softbody,)
 
 
 def register():
-    bpy.types.Scene.mmd4b_preset = EnumProperty(
-        name="Preset",
-        items=[
-            ("hair", "Hair", "Stiff strands (hair, ties)"),
-            ("cotton", "Cotton", "General fabric (skirts, capes)"),
-            ("silk", "Silk", "Light flowing fabric"),
-        ],
-        default="hair",
+    bpy.types.Scene.mmd4b_stiffness = FloatProperty(
+        name="Stiffness",
+        description="Soft body stiffness (0=floppy, 1=stiff)",
+        default=0.7,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
     )
     bpy.types.Scene.mmd4b_collision_mesh = PointerProperty(
         name="Collision Mesh",
@@ -288,4 +238,4 @@ def unregister():
     for cls in reversed(_classes):
         bpy.utils.unregister_class(cls)
     del bpy.types.Scene.mmd4b_collision_mesh
-    del bpy.types.Scene.mmd4b_preset
+    del bpy.types.Scene.mmd4b_stiffness

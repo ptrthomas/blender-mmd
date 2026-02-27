@@ -807,26 +807,30 @@ Systematic audit of rigid body build pattern against mmd_tools. Fixes applied to
 
 **N-panel**: Tab "MMD4B" in 3D Viewport sidebar. Visible when active object is an MMD armature.
 
-#### Workflow
+#### Workflow — bone-driven (same selection UI as cloth, but better outcome)
 
-1. User selects a **mesh** in the viewport (e.g. hair mesh, skirt mesh, tie mesh)
-2. Algorithm generates a low-poly **cage** that encloses the selected mesh
-3. Soft Body modifier on cage, with goal vertices pinned to parent bone
-4. Surface Deform modifier on the original mesh → bound to cage
-5. Optional: collision mesh (body) for the cage to collide with
-6. Play animation — cage deforms under soft body physics, visible mesh follows
-7. User can edit cage mesh density for finer stiffness control (more verts = more springs = stiffer)
+**Why bones, not meshes:** MMD models have one big mesh — you can't "select the hair mesh." Bones define which part of the mesh moves, which direction the cage should follow, and which bone to pin to. The bone chain gives us everything.
+
+1. User selects **bones** in Pose Mode (e.g. hair1.L → hair6.L, or skirt bones)
+2. We find mesh vertices weighted to those bones → defines what the cage encloses
+3. Algorithm generates a low-poly **cage** tube following the bone chain direction
+4. Pin bone = parent of root selected bone (Head for hair, Hips for skirt) — always unambiguous
+5. Soft Body modifier on cage, top ring pinned to pin bone via goal vertex group
+6. Surface Deform modifier on the mesh → bound to cage, limited to affected vertices via `vertex_group`
+7. Optional: collision mesh (body) for the cage to collide with
+8. Play animation — cage deforms under soft body physics, mesh vertices follow
+9. User can edit cage mesh (add loop cuts, adjust shape) for fine control
 
 #### Cage generation algorithm
 
-Given a target mesh, build a minimal enclosing cage:
+Given selected bones and the mesh they deform:
 
-1. **Bounding analysis:** Compute oriented bounding box or principal axis of the mesh via PCA or bone chain direction
-2. **Tube/slab creation:** Generate a simple tube (for elongated shapes like hair) or slab (for flat shapes like skirts) with enough loop cuts for smooth deformation. Cross-section: hexagonal (6 sides) by default, configurable.
-3. **Internal trusses:** If the enclosed cross-sectional area exceeds a threshold, add internal edges/faces to preserve cross-section shape under deformation. This prevents the cage from collapsing flat.
-   - Hair: cylindrical cage with internal cross-bracing keeps round cross-section
-   - Skirt: open-ended cone/cylinder, no internal trusses needed (flat panels)
-4. **Auto-pinning:** Top ring of cage vertices get `goal` vertex group at weight 1.0, bound to the parent bone (e.g. Head for hair, Hips for skirt). Soft Body goal=1.0 means those vertices are fully controlled by the armature.
+1. **Find affected vertices:** For each selected bone, collect mesh vertices with non-zero weight in that bone's vertex group. Union of all = the region to enclose.
+2. **Cage axis from bones:** The bone chain head→tail positions define the cage centerline. No PCA needed.
+3. **Tube generation:** Build a tube (hexagonal cross-section, 6 sides) following the bone chain centerline. Radius = max perpendicular distance from any affected vertex to the centerline, plus margin. One ring of vertices per bone joint.
+4. **Internal trusses:** If cross-sectional area exceeds a threshold, add internal cross-bracing faces to preserve the round cross-section under deformation.
+5. **Auto-pinning:** Top ring (at root bone head) gets `goal` vertex group at weight 1.0. An Armature modifier + pin bone vertex group makes pinned verts follow the parent bone.
+6. **Affected vertex group:** Create a vertex group on the mesh containing only the affected vertices. Surface Deform uses this to limit its influence.
 
 #### Pinning — binary, no vertex painting
 
@@ -870,22 +874,24 @@ The panel shows pin count and highlights pinned verts (e.g. via display overlay 
 #### Surface Deform binding
 
 The visible mesh gets a Surface Deform modifier targeting the cage:
-1. Cage must fully enclose the target mesh at bind time (cage is generated slightly oversized)
+1. Cage is generated slightly oversized to fully enclose the affected vertices at bind time
 2. `bpy.ops.object.surfacedeform_bind(modifier="SurfaceDeform")` with context override on target mesh
-3. At runtime, cage deformation drives visible mesh — no bone constraints needed
-4. If user edits cage geometry, rebind via panel button
+3. `sd_mod.vertex_group` = name of the affected-vertices group (limits binding to hair/skirt verts only)
+4. At runtime, cage deformation drives only the affected mesh vertices — rest of mesh unaffected
+5. If user edits cage geometry, rebind via panel button
 
 #### Panel layout
 
-**Convert section (Object Mode, mesh selected):**
-- Target mesh info (name, vertex count)
+**Convert section (Pose Mode, bones selected):**
+- Bone selection info (count, chain range, pin bone)
 - Collision mesh picker (PointerProperty)
 - Stiffness slider (0.0–1.0, default 0.5)
 - "Generate Cage" button
+- Reuses existing `validate_bone_chain` / `validate_bone_group` from cloth code
 
 **Active Cages section (always visible):**
 - List of active soft body cages, clickable to select cage mesh
-- Per cage: name, target mesh, vertex count
+- Per cage: name, bone count, affected vertex count
 - Pin/Unpin buttons (visible when cage is in Edit Mode)
 - Rebind button (rebinds Surface Deform after cage edits)
 - Remove (X) button per cage
@@ -934,6 +940,30 @@ goal_vg.add(pin_vertex_indices, 1.0, "REPLACE")
 - **No bone binding:** Deformation is mesh-to-mesh, eliminating constraint artifacts
 - **Editable:** User can modify cage geometry in Edit Mode for fine control
 - **Coexists with rigid body:** Cage collides against rigid body collision surfaces
+
+#### Phase 2 (deferred): Group mode for skirts
+
+Single chain cage (tube along one bone chain) is Phase 1. Group mode handles parallel bone chains (skirts, capes) with a cylindrical wrap cage.
+
+`validate_bone_group()` in `panels.py` already detects the pattern: multiple chains sharing a common parent, sorted by angle around the armature center.
+
+**Algorithm:**
+1. Each chain gives a "column" of bone joint positions at increasing depth levels
+2. At each depth level, connect columns into a ring (already angle-sorted by validation)
+3. Hull the affected vertices at each ring level to determine radius — produces a hollow cylinder/cone shape
+4. Top ring pinned to common parent bone (e.g. Lower Body for skirt)
+5. Bottom ring open (or closed, depending on geometry)
+
+**Handles common skirt types:**
+- **Simple skirts:** Uniform ring of chains, straightforward cylinder
+- **Frills/layered:** Wider radius at bottom levels, same algorithm (radius adapts per ring)
+- **Split skirts** (front/back panels): Chains cluster into angular groups with gaps — detectable as separate half-cylinders
+
+**User editing after generation:**
+- Add loop cuts to cage for localized stiffness
+- Adjust cage vertices where auto-shape doesn't fit
+- Pin extra vertices at waistband or belt line
+- All the same pin/unpin/rebind workflow as single chain
 
 ### Milestone 5: Materials & Textures
 
