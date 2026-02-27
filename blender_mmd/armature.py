@@ -362,6 +362,9 @@ def create_armature(
         if pmx_bone.parent >= 0 and pmx_bone.parent < len(edit_bones):
             edit_bones[i].parent = edit_bones[pmx_bone.parent]
 
+    # Default tail for zero-length bones: +Z * scale (matches mmd_tools)
+    default_tail_offset = Vector((0, 0, 1)) * scale
+
     # Set bone tails from display_connection
     for i, pmx_bone in enumerate(pmx_bones):
         eb = edit_bones[i]
@@ -373,9 +376,9 @@ def create_armature(
                 if (target_pos - eb.head).length > MIN_BONE_LENGTH:
                     eb.tail = target_pos
                 else:
-                    eb.tail = eb.head + Vector((0, MIN_BONE_LENGTH, 0))
+                    eb.tail = eb.head + default_tail_offset
             else:
-                eb.tail = eb.head + Vector((0, MIN_BONE_LENGTH, 0))
+                eb.tail = eb.head + default_tail_offset
         else:
             # display_connection is a position offset
             offset = pmx_bone.display_connection
@@ -384,9 +387,9 @@ def create_armature(
                 if offset_vec.length > MIN_BONE_LENGTH:
                     eb.tail = eb.head + offset_vec
                 else:
-                    eb.tail = eb.head + Vector((0, MIN_BONE_LENGTH, 0))
+                    eb.tail = eb.head + default_tail_offset
             else:
-                eb.tail = eb.head + Vector((0, MIN_BONE_LENGTH, 0))
+                eb.tail = eb.head + default_tail_offset
 
     # Set bone roll from PMX local axis data or auto-compute for arm/finger bones
     for i, pmx_bone in enumerate(pmx_bones):
