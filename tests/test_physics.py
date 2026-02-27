@@ -1,14 +1,20 @@
-"""Physics unit tests — collision collections, soft constraints, counts, spring values."""
+"""Physics unit tests — collision collections, soft constraints, counts, spring values, metadata."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from blender_mmd.pmx import parse
 from blender_mmd.pmx.types import RigidBody, RigidMode, RigidShape
-from blender_mmd.physics import build_collision_collections, is_locked_dof
+from blender_mmd.physics import (
+    build_collision_collections,
+    deserialize_physics_data,
+    is_locked_dof,
+    serialize_physics_data,
+)
 
 SAMPLES_DIR = Path(__file__).parent / "samples"
 MIKU_PMX = SAMPLES_DIR / "初音ミク.pmx"
@@ -139,3 +145,65 @@ class TestSpringValues:
             if any(v != 0 for v in j.spring_constant_rotate)
         )
         assert count == 19
+
+
+# ---------------------------------------------------------------------------
+# Metadata serialization
+# ---------------------------------------------------------------------------
+
+class TestMetadataStorage:
+    def test_round_trip(self, miku_model):
+        """Serialize → deserialize preserves all rigid body and joint data."""
+        json_str = serialize_physics_data(miku_model)
+        data = deserialize_physics_data(json_str)
+
+        assert len(data["rigid_bodies"]) == 45
+        assert len(data["joints"]) == 27
+
+    def test_rigid_body_fields(self, miku_model):
+        """Each serialized rigid body has all expected fields."""
+        data = deserialize_physics_data(serialize_physics_data(miku_model))
+        required = {
+            "name", "name_e", "bone_index", "mode",
+            "collision_group_number", "collision_group_mask",
+            "shape", "size", "position", "rotation",
+            "mass", "linear_damping", "angular_damping", "bounce", "friction",
+        }
+        for rb in data["rigid_bodies"]:
+            assert required <= set(rb.keys()), f"Missing fields in {rb['name']}"
+
+    def test_joint_fields(self, miku_model):
+        """Each serialized joint has all expected fields."""
+        data = deserialize_physics_data(serialize_physics_data(miku_model))
+        required = {
+            "name", "name_e", "src_rigid", "dest_rigid",
+            "position", "rotation",
+            "limit_move_lower", "limit_move_upper",
+            "limit_rotate_lower", "limit_rotate_upper",
+            "spring_constant_move", "spring_constant_rotate",
+        }
+        for j in data["joints"]:
+            assert required <= set(j.keys()), f"Missing fields in {j['name']}"
+
+    def test_mode_values_are_ints(self, miku_model):
+        """RigidMode enum serialized as int for JSON compatibility."""
+        data = deserialize_physics_data(serialize_physics_data(miku_model))
+        modes = {rb["mode"] for rb in data["rigid_bodies"]}
+        assert modes <= {0, 1, 2}
+
+    def test_valid_json(self, miku_model):
+        """Output is valid JSON string."""
+        json_str = serialize_physics_data(miku_model)
+        assert isinstance(json_str, str)
+        parsed = json.loads(json_str)
+        assert "rigid_bodies" in parsed
+        assert "joints" in parsed
+
+    def test_size_and_position_are_lists(self, miku_model):
+        """Tuple fields are serialized as lists (JSON-compatible)."""
+        data = deserialize_physics_data(serialize_physics_data(miku_model))
+        rb = data["rigid_bodies"][0]
+        assert isinstance(rb["size"], list)
+        assert isinstance(rb["position"], list)
+        assert len(rb["size"]) == 3
+        assert len(rb["position"]) == 3

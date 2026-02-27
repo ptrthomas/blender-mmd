@@ -6,6 +6,7 @@ so that pure-Python utility functions remain importable for unit tests.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING
 
@@ -25,7 +26,58 @@ _SHAPE_MAP = {
 }
 
 
-def build_physics(armature_obj, model, scale: float) -> None:
+def build_physics(armature_obj, model, scale: float, mode: str = "none") -> None:
+    """Build physics for an MMD model.
+
+    Args:
+        mode: "none" (metadata only), "rigid_body" (Blender RB), or "cloth" (detect chains).
+    """
+    log.info(
+        "Building physics (mode=%s): %d rigid bodies, %d joints",
+        mode, len(model.rigid_bodies), len(model.joints),
+    )
+
+    # Clean up any existing physics first
+    clear_physics(armature_obj)
+
+    # Always store metadata — available for all modes
+    armature_obj["mmd_physics_data"] = serialize_physics_data(model)
+    armature_obj["physics_mode"] = mode
+
+    if mode == "none":
+        log.info("Physics mode 'none': metadata stored, no Blender objects created")
+        return
+
+    if mode == "cloth":
+        from .chains import detect_chains
+        chains = detect_chains(model)
+        armature_obj["mmd_physics_chains"] = json.dumps(
+            [_chain_to_dict(c) for c in chains]
+        )
+        log.info("Physics mode 'cloth': %d chains detected, metadata stored", len(chains))
+        return
+
+    if mode == "rigid_body":
+        _build_rigid_body_physics(armature_obj, model, scale)
+        return
+
+    raise ValueError(f"Unknown physics mode: {mode!r}")
+
+
+def _chain_to_dict(chain) -> dict:
+    """Serialize a Chain dataclass to a JSON-compatible dict."""
+    return {
+        "name": chain.name,
+        "group": chain.group,
+        "root_rigid_index": chain.root_rigid_index,
+        "root_bone_index": chain.root_bone_index,
+        "rigid_indices": chain.rigid_indices,
+        "bone_indices": chain.bone_indices,
+        "joint_indices": chain.joint_indices,
+    }
+
+
+def _build_rigid_body_physics(armature_obj, model, scale: float) -> None:
     """Create rigid bodies, joints, bone coupling, and configure physics world.
 
     The rigid body world is disabled during setup (following mmd_tools' approach)
@@ -34,18 +86,7 @@ def build_physics(armature_obj, model, scale: float) -> None:
     """
     import bpy
 
-    log.info(
-        "Building physics: %d rigid bodies, %d joints",
-        len(model.rigid_bodies),
-        len(model.joints),
-    )
-
-    # Clean up any existing physics first
-    clear_physics(armature_obj)
-
     # Disable rigid body world during setup to prevent solver interference.
-    # mmd_tools does this — without it, the solver runs partial computations
-    # as bodies are added one by one, corrupting initial state.
     rbw_was_enabled = _set_rigid_body_world_enabled(bpy.context.scene, False)
 
     try:
@@ -94,8 +135,7 @@ def build_physics(armature_obj, model, scale: float) -> None:
 
     finally:
         # Always enable rigid body world after build — we just created physics,
-        # so it should be active. (Don't restore previous state because if the
-        # RBW was newly created during build, the saved state would be False.)
+        # so it should be active.
         _set_rigid_body_world_enabled(bpy.context.scene, True)
 
     log.info("Physics build complete: %d rigid bodies, %d joints",
@@ -103,37 +143,91 @@ def build_physics(armature_obj, model, scale: float) -> None:
 
 
 def clear_physics(armature_obj) -> None:
-    """Remove all physics objects for this armature."""
+    """Remove all physics objects and metadata for this armature."""
     import bpy
 
     col_name = armature_obj.get("physics_collection")
-    if not col_name:
-        return
+    if col_name:
+        collection = bpy.data.collections.get(col_name)
+        if collection:
+            # Remove COPY_TRANSFORMS / COPY_ROTATION constraints from pose bones
+            if armature_obj.pose:
+                for pb in armature_obj.pose.bones:
+                    to_remove = [
+                        c for c in pb.constraints
+                        if c.type in ("COPY_TRANSFORMS", "COPY_ROTATION")
+                        and c.name.startswith("mmd_")
+                    ]
+                    for c in to_remove:
+                        pb.constraints.remove(c)
 
-    collection = bpy.data.collections.get(col_name)
-    if collection:
-        # Remove COPY_TRANSFORMS / COPY_ROTATION constraints from pose bones
-        if armature_obj.pose:
-            for pb in armature_obj.pose.bones:
-                to_remove = [
-                    c for c in pb.constraints
-                    if c.type in ("COPY_TRANSFORMS", "COPY_ROTATION")
-                    and c.name.startswith("mmd_")
-                ]
-                for c in to_remove:
-                    pb.constraints.remove(c)
+            # Delete all objects in collection and subcollections
+            def _remove_collection_recursive(col):
+                for child in list(col.children):
+                    _remove_collection_recursive(child)
+                for obj in list(col.objects):
+                    bpy.data.objects.remove(obj, do_unlink=True)
+                bpy.data.collections.remove(col)
 
-        # Delete all objects in collection and subcollections
-        def _remove_collection_recursive(col):
-            for child in list(col.children):
-                _remove_collection_recursive(child)
-            for obj in list(col.objects):
-                bpy.data.objects.remove(obj, do_unlink=True)
-            bpy.data.collections.remove(col)
+            _remove_collection_recursive(collection)
 
-        _remove_collection_recursive(collection)
+        if "physics_collection" in armature_obj:
+            del armature_obj["physics_collection"]
 
-    del armature_obj["physics_collection"]
+    # Clean metadata keys
+    for key in ("mmd_physics_data", "physics_mode", "mmd_physics_chains"):
+        if key in armature_obj:
+            del armature_obj[key]
+
+
+def serialize_physics_data(model) -> str:
+    """Serialize rigid body + joint data from a PMX model to JSON string.
+
+    Pure Python — no Blender imports needed.
+    """
+    rigid_bodies = []
+    for rb in model.rigid_bodies:
+        rigid_bodies.append({
+            "name": rb.name,
+            "name_e": rb.name_e,
+            "bone_index": rb.bone_index,
+            "mode": rb.mode.value,
+            "collision_group_number": rb.collision_group_number,
+            "collision_group_mask": rb.collision_group_mask,
+            "shape": rb.shape.value,
+            "size": list(rb.size),
+            "position": list(rb.position),
+            "rotation": list(rb.rotation),
+            "mass": rb.mass,
+            "linear_damping": rb.linear_damping,
+            "angular_damping": rb.angular_damping,
+            "bounce": rb.bounce,
+            "friction": rb.friction,
+        })
+
+    joints = []
+    for j in model.joints:
+        joints.append({
+            "name": j.name,
+            "name_e": j.name_e,
+            "src_rigid": j.src_rigid,
+            "dest_rigid": j.dest_rigid,
+            "position": list(j.position),
+            "rotation": list(j.rotation),
+            "limit_move_lower": list(j.limit_move_lower),
+            "limit_move_upper": list(j.limit_move_upper),
+            "limit_rotate_lower": list(j.limit_rotate_lower),
+            "limit_rotate_upper": list(j.limit_rotate_upper),
+            "spring_constant_move": list(j.spring_constant_move),
+            "spring_constant_rotate": list(j.spring_constant_rotate),
+        })
+
+    return json.dumps({"rigid_bodies": rigid_bodies, "joints": joints})
+
+
+def deserialize_physics_data(json_str: str) -> dict:
+    """Deserialize physics JSON back to dict. Pure Python."""
+    return json.loads(json_str)
 
 
 def _build_bone_name_map(armature_obj) -> dict[int, str]:

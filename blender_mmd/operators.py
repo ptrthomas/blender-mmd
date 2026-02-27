@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 import bpy
-from bpy.props import FloatProperty, StringProperty
+from bpy.props import EnumProperty, FloatProperty, StringProperty
 from bpy_extras.io_utils import ImportHelper
 
 log = logging.getLogger("blender_mmd")
@@ -110,11 +110,22 @@ class BLENDER_MMD_OT_import_vmd(bpy.types.Operator, ImportHelper):
 
 
 class BLENDER_MMD_OT_build_physics(bpy.types.Operator):
-    """Build rigid body physics for an MMD model"""
+    """Build physics for an MMD model"""
 
     bl_idname = "blender_mmd.build_physics"
     bl_label = "Build MMD Physics"
     bl_options = {"REGISTER", "UNDO"}
+
+    mode: EnumProperty(
+        name="Mode",
+        description="Physics mode",
+        items=[
+            ("none", "None", "Store metadata only, no Blender objects"),
+            ("rigid_body", "Rigid Body", "Blender rigid body physics"),
+            ("cloth", "Cloth", "Detect chains for cloth conversion"),
+        ],
+        default="none",
+    )
 
     def execute(self, context):
         from .physics import build_physics
@@ -134,10 +145,11 @@ class BLENDER_MMD_OT_build_physics(bpy.types.Operator):
 
         try:
             model = parse(filepath)
-            build_physics(armature_obj, model, scale)
+            build_physics(armature_obj, model, scale, mode=self.mode)
             self.report(
                 {"INFO"},
-                f"Physics built: {len(model.rigid_bodies)} rigid bodies, "
+                f"Physics built (mode={self.mode}): "
+                f"{len(model.rigid_bodies)} rigid bodies, "
                 f"{len(model.joints)} joints",
             )
             return {"FINISHED"}
