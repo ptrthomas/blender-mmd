@@ -106,6 +106,10 @@ def _build_rigid_body_physics(armature_obj, model, scale: float) -> None:
         # Build bone name lookup: bone_index → Blender bone name
         bone_names = _build_bone_name_map(armature_obj)
 
+        # Pre-build: mute IK constraints on physics bones to prevent
+        # IK solver from fighting during depsgraph flushes (mmd_tools pattern)
+        _mute_physics_ik_constraints(armature_obj, model, bone_names, mute=True)
+
         # Step 1: Rigid bodies (with collision margin fix)
         rigid_objects = _create_rigid_bodies(model, armature_obj, scale, rb_col)
 
@@ -124,11 +128,29 @@ def _build_rigid_body_physics(armature_obj, model, scale: float) -> None:
         # Flush depsgraph before bone coupling (tracking empties need correct matrix_world)
         bpy.context.scene.frame_set(bpy.context.scene.frame_current)
 
-        # Step 5: Bone↔rigid body coupling
-        _setup_bone_coupling(armature_obj, model, rigid_objects, bone_names, scale, track_col)
+        # Step 5: Bone↔rigid body coupling (constraints created muted,
+        # tracking empties NOT yet parented to rigid bodies)
+        empty_parent_map = _setup_bone_coupling(
+            armature_obj, model, rigid_objects, bone_names, scale, track_col,
+        )
 
-        # Flush depsgraph after all parenting/constraints are set
+        # Flush depsgraph so tracking empties have correct matrix_world
         bpy.context.scene.frame_set(bpy.context.scene.frame_current)
+
+        # Post-build: reparent tracking empties to rigid bodies in batch
+        # (preserving matrix_world through reparenting, mmd_tools pattern)
+        _reparent_tracking_empties(empty_parent_map)
+
+        # Flush depsgraph after reparenting
+        bpy.context.scene.frame_set(bpy.context.scene.frame_current)
+
+        # Post-build: unmute tracking constraints now that empties are parented
+        _unmute_tracking_constraints(armature_obj)
+
+        # IK stays muted while physics is active — IK solver fights
+        # COPY_TRANSFORMS on chain bones (e.g. hair IK with chain_count=5
+        # overrides physics positions on hair2-hair6). Matches mmd_tools:
+        # IK muted in preBuild, only unmuted in clean().
 
         # Step 6: Physics world settings
         _setup_physics_world(bpy.context.scene, scale)
@@ -150,7 +172,7 @@ def clear_physics(armature_obj) -> None:
     if col_name:
         collection = bpy.data.collections.get(col_name)
         if collection:
-            # Remove COPY_TRANSFORMS / COPY_ROTATION constraints from pose bones
+            # Remove tracking constraints and unmute IK constraints
             if armature_obj.pose:
                 for pb in armature_obj.pose.bones:
                     to_remove = [
@@ -160,6 +182,10 @@ def clear_physics(armature_obj) -> None:
                     ]
                     for c in to_remove:
                         pb.constraints.remove(c)
+                    # Unmute any IK constraints that were muted during build
+                    for c in pb.constraints:
+                        if c.type == "IK" and c.mute:
+                            c.mute = False
 
             # Delete all objects in collection and subcollections
             def _remove_collection_recursive(col):
@@ -715,8 +741,14 @@ def _create_non_collision_empty(bpy, obj_a, obj_b, collection) -> None:
 def _setup_bone_coupling(
     armature_obj, model, rigid_objects: list,
     bone_names: dict[int, str], scale: float, collection,
-) -> None:
-    """Wire up bone↔rigid body for STATIC/DYNAMIC/DYNAMIC_BONE modes."""
+) -> dict:
+    """Wire up bone↔rigid body for STATIC/DYNAMIC/DYNAMIC_BONE modes.
+
+    Returns dict mapping tracking empties → rigid body objects for
+    deferred reparenting in _reparent_tracking_empties().
+    """
+    empty_parent_map: dict = {}
+
     # Track which bones already have a dynamic rigid body assigned.
     # If multiple target the same bone, use the heaviest.
     bone_assignments: dict[str, tuple[float, int]] = {}  # bone_name → (mass, rigid_index)
@@ -740,9 +772,12 @@ def _setup_bone_coupling(
         rigid = model.rigid_bodies[rigid_idx]
         rb_obj = rigid_objects[rigid_idx]
         if rigid.mode == RigidMode.DYNAMIC:
-            _setup_dynamic_coupling(armature_obj, rb_obj, bone_name, collection)
+            pair = _setup_dynamic_coupling(armature_obj, rb_obj, bone_name, collection)
         else:
-            _setup_dynamic_bone_coupling(armature_obj, rb_obj, bone_name, collection)
+            pair = _setup_dynamic_bone_coupling(armature_obj, rb_obj, bone_name, collection)
+        empty_parent_map[pair[0]] = pair[1]
+
+    return empty_parent_map
 
 
 def _setup_static_coupling(armature_obj, rb_obj, bone_name: str) -> None:
@@ -764,48 +799,115 @@ def _setup_static_coupling(armature_obj, rb_obj, bone_name: str) -> None:
     rb_obj.matrix_parent_inverse = parent_matrix.inverted()
 
 
-def _setup_dynamic_coupling(armature_obj, rb_obj, bone_name: str, collection) -> None:
-    """DYNAMIC: physics drives bone rotation via tracking empty + COPY_ROTATION.
+def _setup_dynamic_coupling(armature_obj, rb_obj, bone_name: str, collection) -> tuple:
+    """DYNAMIC: physics drives bone via tracking empty + COPY_TRANSFORMS.
 
-    Uses COPY_ROTATION (not COPY_TRANSFORMS) because bone position is determined
-    by the armature hierarchy. Physics only drives rotation.
+    Uses COPY_TRANSFORMS (location + rotation) — matching mmd_tools.
+    DYNAMIC bodies need full transform from physics, not just rotation.
+    Constraint is created muted; unmuted in post-build after reparenting.
     """
-    empty = _create_tracking_empty(armature_obj, rb_obj, bone_name, collection)
+    empty = _create_tracking_empty(armature_obj, bone_name, collection)
     pb = armature_obj.pose.bones[bone_name]
-    c = pb.constraints.new("COPY_ROTATION")
+    c = pb.constraints.new("COPY_TRANSFORMS")
     c.name = "mmd_dynamic"
     c.target = empty
+    c.mute = True
+    return (empty, rb_obj)
 
 
-def _setup_dynamic_bone_coupling(armature_obj, rb_obj, bone_name: str, collection) -> None:
-    """DYNAMIC_BONE: physics drives bone rotation via tracking empty + COPY_ROTATION."""
-    empty = _create_tracking_empty(armature_obj, rb_obj, bone_name, collection)
+def _setup_dynamic_bone_coupling(armature_obj, rb_obj, bone_name: str, collection) -> tuple:
+    """DYNAMIC_BONE: physics drives bone rotation via tracking empty + COPY_ROTATION.
+
+    Constraint is created muted; unmuted in post-build after reparenting.
+    """
+    empty = _create_tracking_empty(armature_obj, bone_name, collection)
     pb = armature_obj.pose.bones[bone_name]
     c = pb.constraints.new("COPY_ROTATION")
     c.name = "mmd_dynamic_bone"
     c.target = empty
+    c.mute = True
+    return (empty, rb_obj)
 
 
-def _create_tracking_empty(armature_obj, rb_obj, bone_name: str, collection):
-    """Create an empty at the bone's world position, parented to the rigid body.
+def _create_tracking_empty(armature_obj, bone_name: str, collection):
+    """Create an empty at the bone's world position.
 
-    The empty inherits the bone's current world matrix so it tracks properly.
-    When the rigid body moves (physics), the empty follows (parenting),
-    and the bone follows (COPY_ROTATION constraint).
+    Sets matrix_world from bone pose. Parenting to the rigid body is
+    deferred to _reparent_tracking_empties() (after depsgraph flush)
+    to match mmd_tools' two-phase pattern.
     """
     import bpy
 
     empty = bpy.data.objects.new(f"Track_{bone_name}", None)
     empty.empty_display_size = 0.01
+    empty.empty_display_type = "ARROWS"
     collection.objects.link(empty)
 
-    # Set empty to bone's current world transform, then parent to rigid body.
-    # matrix_parent_inverse preserves the world position after parenting.
     pb = armature_obj.pose.bones[bone_name]
     bone_world = armature_obj.matrix_world @ pb.matrix
-    empty.parent = rb_obj
-    empty.matrix_parent_inverse = rb_obj.matrix_world.inverted() @ bone_world
+    empty.matrix_world = bone_world
     return empty
+
+
+def _mute_physics_ik_constraints(armature_obj, model, bone_names: dict, mute: bool = True) -> None:
+    """Mute or unmute IK constraints on bones linked to DYNAMIC/DYNAMIC_BONE rigid bodies.
+
+    During physics build, IK constraints fight the depsgraph flushes (frame_set)
+    by moving bones while we're trying to position rigid bodies at bone locations.
+    mmd_tools mutes IK in __preBuild and unmutes after build is complete.
+    """
+    if not armature_obj.pose:
+        return
+
+    for rigid in model.rigid_bodies:
+        if rigid.mode not in (RigidMode.DYNAMIC, RigidMode.DYNAMIC_BONE):
+            continue
+        if rigid.bone_index < 0:
+            continue
+        bone_name = bone_names.get(rigid.bone_index)
+        if not bone_name or bone_name not in armature_obj.pose.bones:
+            continue
+
+        pb = armature_obj.pose.bones[bone_name]
+        for c in pb.constraints:
+            if c.type == "IK":
+                c.mute = mute
+                c.influence = c.influence  # trigger Blender update
+
+    log.debug("IK constraints %s for physics bones", "muted" if mute else "unmuted")
+
+
+def _reparent_tracking_empties(empty_parent_map: dict) -> None:
+    """Reparent tracking empties to rigid bodies in batch, preserving matrix_world.
+
+    This is the mmd_tools __postBuild pattern: empties are created with correct
+    matrix_world, then reparented to their rigid bodies after the depsgraph has
+    flushed. Saving and restoring matrix_world through the reparenting ensures
+    the empty stays at the bone's world position.
+    """
+    for empty, rb_obj in empty_parent_map.items():
+        world = empty.matrix_world.copy()
+        empty.parent = rb_obj
+        empty.matrix_world = world
+
+    log.debug("Reparented %d tracking empties to rigid bodies", len(empty_parent_map))
+
+
+def _unmute_tracking_constraints(armature_obj) -> None:
+    """Unmute mmd_dynamic / mmd_dynamic_bone constraints on pose bones.
+
+    Called in post-build after tracking empties are reparented and depsgraph
+    has flushed. Matches mmd_tools' __postBuild unmuting pattern.
+    """
+    if not armature_obj.pose:
+        return
+
+    for pb in armature_obj.pose.bones:
+        for c in pb.constraints:
+            if c.name in ("mmd_dynamic", "mmd_dynamic_bone"):
+                c.mute = False
+
+    log.debug("Unmuted tracking constraints")
 
 
 def _setup_physics_world(scene, scale: float = 0.08) -> None:
@@ -817,6 +919,10 @@ def _setup_physics_world(scene, scale: float = 0.08) -> None:
     # Match mmd_tools defaults
     rbw.substeps_per_frame = 6
     rbw.solver_iterations = 10
+
+    # Match cache end to scene frame range
+    if rbw.point_cache:
+        rbw.point_cache.frame_end = scene.frame_end
 
 
 def _set_rigid_body_world_enabled(scene, enable: bool) -> bool:

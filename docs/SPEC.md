@@ -371,14 +371,14 @@ For each PMX rigid body:
 | PMX Mode | Behavior | Blender Implementation |
 |----------|----------|----------------------|
 | STATIC (0) | Bone-driven, no physics | Kinematic rigid body, parented to bone |
-| DYNAMIC (1) | Free physics simulation | Active rigid body, bone reads physics via COPY_ROTATION |
+| DYNAMIC (1) | Free physics simulation | Active rigid body, bone reads physics via COPY_TRANSFORMS |
 | DYNAMIC_BONE (2) | Physics with bone tracking | Active rigid body, bone reads rotation via COPY_ROTATION |
 
 **STATIC**: The rigid body follows the bone. It pushes other active bodies but is not affected by physics. Implemented as kinematic rigid body parented directly to the bone (BONE parent type). Bone parenting origin is at bone TAIL with rest matrix: `parent_matrix = armature.matrix_world @ bone.matrix_local @ Translation(0, bone.length, 0)`.
 
-**DYNAMIC**: Physics drives the rigid body. A tracking empty is parented to the rigid body (with `matrix_parent_inverse` set from bone's world matrix), and the bone has a COPY_ROTATION constraint targeting the empty. Uses COPY_ROTATION (not COPY_TRANSFORMS) because bone position is determined by armature hierarchy — matching mmd_tools' approach.
+**DYNAMIC**: Physics drives the rigid body. A tracking empty is parented to the rigid body, and the bone has a COPY_TRANSFORMS constraint targeting the empty. Uses COPY_TRANSFORMS (location + rotation) — matching mmd_tools. DYNAMIC bodies need full transform from physics to prevent chain divergence at hair tips.
 
-**DYNAMIC_BONE**: Same as DYNAMIC — COPY_ROTATION constraint. Translation comes from the bone's parent. This is the typical mode for hair and clothing — the strand rotates with physics but stays attached to the head/body.
+**DYNAMIC_BONE**: Physics drives bone rotation only. A tracking empty is parented to the rigid body, and the bone has a COPY_ROTATION constraint targeting the empty. Translation comes from the bone's parent. This is the typical mode for hair and clothing — the strand rotates with physics but stays attached to the head/body.
 
 **Multiple rigid bodies on same bone**: The heaviest one (highest mass) wins.
 
@@ -745,10 +745,14 @@ What we learned from implementing and testing M4 rigid body physics. This inform
 - Collision layers: shared layer 0 + own group, with GENERIC constraints for non-collision pairs
 - Dynamic body repositioning to match bone pose before creating joints
 - Joint empty repositioning using src_rigid's bone delta
-- Bone coupling: STATIC → bone parent, DYNAMIC/DYNAMIC_BONE → COPY_ROTATION via tracking empty
+- Bone coupling: STATIC → bone parent, DYNAMIC → COPY_TRANSFORMS, DYNAMIC_BONE → COPY_ROTATION via tracking empty
 - CAPSULE/SPHERE/BOX mesh geometry for collision shapes (empty mesh = zero-size collision)
 - Rotation negation `(-x,-y,-z)` beyond parser's Y↔Z swap
 - Joint rotation limits: negate AND swap min/max
+- IK muting on physics bones (prevents IK solver from fighting COPY_TRANSFORMS on chain bones)
+- Deferred tracking empty reparenting (mmd_tools two-phase pattern: build muted → depsgraph flush → reparent → unmute)
+- Tracking constraint muting during build (create muted, unmute after reparenting)
+- Physics cache end matches scene frame range
 
 **What doesn't work well (known compromises):**
 - **Soft constraints (lower > upper trick)**: Meant to make locked DOFs elastic. In practice, can cause oscillation or explosion with typical MMD spring stiffness. Currently enabled but may need per-model tuning or disabling.
@@ -756,7 +760,6 @@ What we learned from implementing and testing M4 rigid body physics. This inform
 - **Scrubbing/rewinding**: Resets baked simulation. Must re-bake after rewind. This is a Blender limitation, not a bug.
 - **`frame_set()` doesn't run physics**: Only timeline playback or explicit baking advances the simulation. No way to "preview" physics at a specific frame.
 - **One-frame lag**: Inherent to Blender's dependency graph. Physics always trails bone motion by one frame.
-- **Hair/skirt stiffness**: Even with soft constraints and springs, chain physics through rigid bodies is fundamentally different from cloth. Hair tends to be too stiff or wobbles unrealistically.
 - **Physics explosion on rewind**: Baked cache gets cleared, dynamic bodies may be in wrong positions. Mitigation: always bake before playback, re-bake after rewind.
 
 **What to simplify in Phase 2:**
@@ -772,6 +775,22 @@ What we learned from implementing and testing M4 rigid body physics. This inform
 - Don't try to match MMD's CCDIK-based physics solver — fundamentally different architecture
 - Don't over-optimize non-collision constraints — the O(n²) issue is theoretical; real models have <50 rigid bodies
 - Springs are a future enhancement — get stable physics without them first, add back later
+
+#### Rigid Body Parity Audit (mmd_tools alignment) ✅
+
+Systematic audit of rigid body build pattern against mmd_tools. Fixes applied to match mmd_tools' proven build order and constraint types.
+
+**Fixed:**
+- [x] DYNAMIC bodies use COPY_TRANSFORMS (location + rotation from RB), not COPY_ROTATION. Prevents chain divergence at hair tips.
+- [x] IK constraints muted on DYNAMIC/DYNAMIC_BONE bones during physics build AND playback. Without this, IK solver (e.g. hair IK chain_count=5) overrides COPY_TRANSFORMS positions on chain bones.
+- [x] Tracking constraints (COPY_TRANSFORMS/COPY_ROTATION) created muted during build, unmuted in post-build after tracking empties are reparented.
+- [x] Tracking empty reparenting deferred to post-build: empties created with matrix_world from bone pose, reparented to RBs in batch after depsgraph flush (preserving matrix_world).
+- [x] Physics cache frame_end synced to scene frame_end (both on VMD import and physics build).
+- [x] IK unmuted in `clear_physics()` when physics is removed.
+
+**Not changed (investigated, no fix needed):**
+- Bone disconnection: all hair chain bones already have `use_connect=False` from PMX data.
+- Soft constraints: mmd_tools doesn't implement inverted-limits workaround either. Springs enabled, soft constraints disabled — matches mmd_tools.
 
 ### Milestone 5: Materials & Textures
 

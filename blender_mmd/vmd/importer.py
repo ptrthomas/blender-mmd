@@ -134,6 +134,10 @@ def _setup_scene_settings(armature_obj: bpy.types.Object) -> None:
         scene.frame_end = frame_end
         log.info("Scene frame range set to %d–%d at 30fps", scene.frame_start, frame_end)
 
+    # Match rigid body cache end to animation length
+    if scene.rigidbody_world and scene.rigidbody_world.point_cache:
+        scene.rigidbody_world.point_cache.frame_end = frame_end
+
 
 def _build_bone_lookup(armature_obj: bpy.types.Object) -> dict[str, str]:
     """Build a mapping from Japanese bone name → Blender bone name.
