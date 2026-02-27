@@ -25,8 +25,13 @@ Read `docs/SPEC.md` first. It is the single source of truth for architecture, de
 # Symlink addon into Blender extensions
 scripts/setup.sh
 
-# Restart Blender to reload after code changes
+# ALWAYS check if Blender is already running before launching:
+curl -s localhost:5656 --data-binary @- <<< 'bpy.app.version_string'
+# Only launch if the check above fails (connection refused):
+/Applications/Blender.app/Contents/MacOS/Blender --python ../blender-agent/start_server.py &
+
 # Use blender-agent (port 5656) for execution, screenshots, and log monitoring
+# Module reloading is unreliable — restart Blender for code changes
 ```
 
 ## Cross-project contributions
