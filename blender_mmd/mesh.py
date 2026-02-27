@@ -130,21 +130,9 @@ def create_mesh(
 
 
 def _resolve_morph_name(morph: "Morph") -> str:
-    """Choose English shape key name for a morph.
-
-    Resolution order (same logic as bone names):
-    1. PMX English name (name_e) — if non-empty
-    2. Translation table lookup of Japanese name
-    3. Japanese name as-is — fallback
-    """
-    from .translations import translate_morph
-
-    if morph.name_e:
-        return morph.name_e
-    translated = translate_morph(morph.name)
-    if translated:
-        return translated
-    return morph.name
+    """Choose English shape key name for a morph."""
+    from .translations import resolve_morph_name
+    return resolve_morph_name(morph.name, morph.name_e)
 
 
 def _create_shape_keys(

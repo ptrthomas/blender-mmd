@@ -100,6 +100,23 @@ class TestGroupMorphOffsets:
                     assert 0 <= offset.morph_index < n_morphs
 
 
+class TestMorphNameResolution:
+    def test_resolve_uses_english_name(self):
+        """If PMX provides name_e, it should be used."""
+        from blender_mmd.translations import resolve_morph_name
+        assert resolve_morph_name("あ", "A_from_pmx") == "A_from_pmx"
+
+    def test_resolve_uses_translation_table(self):
+        """If no name_e, fall back to translation table."""
+        from blender_mmd.translations import resolve_morph_name
+        assert resolve_morph_name("まばたき", "") == "Blink"
+
+    def test_resolve_falls_back_to_japanese(self):
+        """If no name_e and no translation, use Japanese name."""
+        from blender_mmd.translations import resolve_morph_name
+        assert resolve_morph_name("カスタムモーフ", "") == "カスタムモーフ"
+
+
 class TestMorphCoverage:
     def test_all_sample_files(self, pmx_files):
         """Parse all sample files and verify morph structure."""

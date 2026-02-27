@@ -368,3 +368,19 @@ MORPH_NAMES: dict[str, str] = {
 def translate_morph(name_j: str) -> str | None:
     """Look up English name for a Japanese morph name. Returns None if not found."""
     return MORPH_NAMES.get(name_j)
+
+
+def resolve_morph_name(name_j: str, name_e: str) -> str:
+    """Choose English display name for a morph.
+
+    Resolution order (same logic as bone names):
+    1. PMX English name (name_e) — if non-empty
+    2. Translation table lookup of Japanese name
+    3. Japanese name as-is — fallback
+    """
+    if name_e:
+        return name_e
+    translated = translate_morph(name_j)
+    if translated:
+        return translated
+    return name_j

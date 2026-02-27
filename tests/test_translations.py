@@ -1,8 +1,11 @@
-"""Unit tests for the bone name translation table."""
+"""Unit tests for bone and morph name translation tables."""
 
 from __future__ import annotations
 
-from blender_mmd.translations import translate, normalize_lr, BONE_NAMES
+from blender_mmd.translations import (
+    translate, normalize_lr, BONE_NAMES,
+    translate_morph, MORPH_NAMES,
+)
 
 
 class TestTranslate:
@@ -41,6 +44,61 @@ class TestTranslate:
                    "_D." in name_e or "EX." in name_e or \
                    not name_e.endswith(("_L", "_R")), \
                 f"{name_j} -> {name_e} uses _L/_R instead of .L/.R"
+
+
+class TestTranslateMorph:
+    def test_known_morphs(self):
+        assert translate_morph("まばたき") == "Blink"
+        assert translate_morph("あ") == "A"
+        assert translate_morph("笑い") == "Smile"
+        assert translate_morph("ウィンク") == "Wink.L"
+
+    def test_unknown_returns_none(self):
+        assert translate_morph("存在しないモーフ") is None
+        assert translate_morph("") is None
+
+    def test_standard_morphs_present(self):
+        """Common MMD morphs every model should have translations for."""
+        required = [
+            # Vowels
+            "あ", "い", "う", "え", "お",
+            # Eyes
+            "まばたき", "笑い", "ウィンク", "ウィンク右",
+            # Eyebrows
+            "真面目", "困る", "にこり", "怒り",
+            # Effects
+            "照れ",
+        ]
+        for name_j in required:
+            assert translate_morph(name_j) is not None, (
+                f"Missing morph translation for {name_j}"
+            )
+
+    def test_no_empty_values(self):
+        for name_j, name_e in MORPH_NAMES.items():
+            assert name_j, "Empty Japanese key in MORPH_NAMES"
+            assert name_e, f"Empty English value for morph {name_j}"
+
+    def test_lr_convention(self):
+        """L/R morphs use Blender's .L/.R suffix."""
+        for name_j, name_e in MORPH_NAMES.items():
+            if name_e.endswith((".L", ".R")):
+                # Good — uses Blender convention
+                continue
+            assert not name_e.endswith(("_L", "_R")), (
+                f"Morph {name_j} -> {name_e} uses _L/_R instead of .L/.R"
+            )
+
+    def test_no_duplicates(self):
+        """No two Japanese names map to the same English name."""
+        seen: dict[str, str] = {}
+        for name_j, name_e in MORPH_NAMES.items():
+            if name_e in seen:
+                assert False, (
+                    f"Duplicate English morph name '{name_e}': "
+                    f"'{seen[name_e]}' and '{name_j}'"
+                )
+            seen[name_e] = name_j
 
 
 class TestNormalizeLR:
