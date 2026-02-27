@@ -339,46 +339,46 @@ The physics system is the primary motivation for bmmd. Blender's rigid body phys
 
 Use Blender's `collision_collections` property (20-element boolean array on `RigidBodyObject`). This is a stable, documented API.
 
-MMD uses 16 collision groups with a "non-collision mask" (bit set = don't collide). Blender uses "collision collections" (bit set = do collide). Conversion:
+MMD uses 16 collision groups with a bilateral "non-collision mask" (bit set = don't collide). Blender uses "collision collections" where objects sharing ANY layer collide (symmetric). This asymmetry means PMX's bilateral mask system cannot be directly mapped — adding mask-based layers causes false cross-group collisions.
+
+**Current approach: own-group-only.** Each body is placed only in its own collision group layer. This preserves within-group self-collision and avoids aggressive false positives (e.g., hair colliding with skirt when only body↔hair was intended). The tradeoff is that some intended cross-group collisions are lost.
 
 ```python
-# MMD: collision_group_number (0-15), collision_group_mask (16-bit, 1=don't collide)
-# Blender: collision_collections (20-bool, True=do collide)
-
 blender_collections = [False] * 20
-blender_collections[pmx_rigid.collision_group_number] = True  # own group
-
-for i in range(16):
-    if not (pmx_rigid.collision_group_mask & (1 << i)):  # bit NOT set = DO collide
-        blender_collections[i] = True
+blender_collections[pmx_rigid.collision_group_number] = True  # own group only
 ```
 
 This eliminates all non-collision constraint objects entirely. For a typical model this removes 100–300 Blender objects.
+
+**Future improvement**: A more accurate approach would analyze the collision graph to find groups that mutually want to collide and merge them onto shared layers, while keeping non-colliding groups separated. This is complex but would recover cross-group collisions without false positives.
 
 ### Rigid body creation
 
 For each PMX rigid body:
 
-1. Create empty mesh object
+1. Create mesh object with **actual collision geometry** via bmesh (sphere, box, or capsule). Empty mesh objects give zero-size collision shapes because Blender derives bounds from bounding box.
 2. Add Blender rigid body (`bpy.ops.rigidbody.object_add`)
 3. Set collision shape (SPHERE, BOX, CAPSULE)
 4. Set physics properties (mass, friction, bounce, linear/angular damping)
-5. Set `collision_collections` from inverted MMD mask
+5. Set `collision_collections` (own group only — see collision groups section)
 6. Set kinematic flag based on mode (STATIC = kinematic)
+7. **Negate rotation**: Parser does Y↔Z swap `(x,z,y)` but physics rotation also needs negation `(-x,-y,-z)` for correct handedness. This matches mmd_tools' `.xzy * -1` pattern.
 
 ### Rigid body modes
 
 | PMX Mode | Behavior | Blender Implementation |
 |----------|----------|----------------------|
 | STATIC (0) | Bone-driven, no physics | Kinematic rigid body, parented to bone |
-| DYNAMIC (1) | Free physics simulation | Active rigid body, bone reads physics via COPY_TRANSFORMS |
+| DYNAMIC (1) | Free physics simulation | Active rigid body, bone reads physics via COPY_ROTATION |
 | DYNAMIC_BONE (2) | Physics with bone tracking | Active rigid body, bone reads rotation via COPY_ROTATION |
 
-**STATIC**: The rigid body follows the bone. It pushes other active bodies but is not affected by physics. Implemented as kinematic rigid body parented directly to the bone (BONE parent type).
+**STATIC**: The rigid body follows the bone. It pushes other active bodies but is not affected by physics. Implemented as kinematic rigid body parented directly to the bone (BONE parent type). Bone parenting origin is at bone TAIL with rest matrix: `parent_matrix = armature.matrix_world @ bone.matrix_local @ Translation(0, bone.length, 0)`.
 
-**DYNAMIC**: Physics drives the rigid body freely. A tracking empty is parented to the rigid body, and the bone has a COPY_TRANSFORMS constraint targeting the empty. The bone follows the physics body.
+**DYNAMIC**: Physics drives the rigid body. A tracking empty is parented to the rigid body (with `matrix_parent_inverse` set from bone's world matrix), and the bone has a COPY_ROTATION constraint targeting the empty. Uses COPY_ROTATION (not COPY_TRANSFORMS) because bone position is determined by armature hierarchy — matching mmd_tools' approach.
 
-**DYNAMIC_BONE**: Like DYNAMIC, but the bone only copies rotation (not translation) from the physics body. Translation comes from the bone's parent. This is the typical mode for hair and clothing — the strand rotates with physics but stays attached to the head/body.
+**DYNAMIC_BONE**: Same as DYNAMIC — COPY_ROTATION constraint. Translation comes from the bone's parent. This is the typical mode for hair and clothing — the strand rotates with physics but stays attached to the head/body.
+
+**Multiple rigid bodies on same bone**: The heaviest one (highest mass) wins.
 
 ### Joints
 
@@ -392,8 +392,9 @@ For each PMX joint:
 2. Set type to `GENERIC_SPRING`, `spring_type` to `SPRING1`
 3. Connect source and destination rigid bodies (`object1`, `object2`)
 4. Enable all 6 DOF limits (`use_limit_lin_x/y/z`, `use_limit_ang_x/y/z`)
-5. Set translation limits from PMX `limit_move_lower/upper` (with coordinate conversion)
-6. Set rotation limits from PMX `limit_rotate_lower/upper` (with coordinate conversion)
+5. Set translation limits from PMX `limit_move_lower/upper` (scaled by import scale)
+6. Set rotation limits: **swap min/max AND negate** — `limit_ang_x_lower = -joint.limit_rotate_upper[0]`, etc. This matches mmd_tools' pattern: `minimum_rotation = joint.maximum_rotation.xzy * -1`
+7. Set `disable_collisions = False` on joint constraints (connected bodies should still collide)
 7. Enable all 6 spring axes (`use_spring_x/y/z`, `use_spring_ang_x/y/z`)
 8. **Actually set spring stiffness and damping values** from PMX `spring_constant_move` and `spring_constant_rotate`
 
@@ -403,22 +404,12 @@ Step 8 is the critical fix — mmd_tools stores these values but never applies t
 
 MMD's constraints are "soft" — even when a DOF is locked (`limit_min == limit_max`), bodies can move elastically past the limit with a spring restoring force. Blender's constraints are "hard" — locked DOFs are frozen.
 
-Workaround using a Bullet trick:
+**Status: disabled.** The Bullet trick (setting `lower > upper` to unlock DOFs) was implemented but caused instability in practice:
 
-```python
-# When PMX has limit_min == limit_max (locked DOF):
-# Set lower > upper to "unlock" the DOF in Bullet
-constraint.limit_lin_x_lower = 1.0
-constraint.limit_lin_x_upper = 0.0
-# Then let spring forces provide the restoring behavior
-constraint.use_spring_x = True
-constraint.spring_stiffness_x = pmx_spring_value  # or tuned default
-constraint.spring_damping_x = pmx_damping_value
-```
+- Unlocking **translation** DOFs (e.g., `[0,0]` → unlocked) broke joint pivots — bodies separated and flew apart
+- Unlocking **angular** DOFs with spring restoring forces caused oscillation/explosion at typical MMD spring stiffness values
 
-When `lower > upper`, Bullet treats the axis as unconstrained but the spring pulls the body back toward the rest position. This approximates MMD's elastic behavior.
-
-This won't match MMD's solver exactly, but it should produce natural-looking hair and clothing motion rather than the stiff/frozen behavior in mmd_tools.
+The function `_apply_soft_constraints()` exists in `physics.py` but is not called. The locked DOFs remain hard-locked, which makes hair/clothing slightly stiffer than MMD but stable. This is a known compromise — future work may find better parameters or alternative approaches (e.g., only unlocking specific DOFs that have non-zero spring constants).
 
 ### Physics world settings
 
@@ -625,17 +616,33 @@ VMD import follows morphs so we can see both body motion AND facial animation du
 - Baseline comparison: 21 bones × 11 frames all within <0.05 tolerance
 - Floor penetration comparable to mmd_tools reference (Blender IK solver limitation)
 
-### Milestone 4: Physics (current)
+### Milestone 4: Physics (in progress)
 
 Physics follows VMD so we can validate with actual motion playing — a static model with physics proves nothing.
 
 **Deliverables:**
-- Rigid body creation with `collision_collections` (no non-collision constraint objects)
-- Joint setup with `GENERIC_SPRING` / `SPRING1` — **spring values actually applied**
-- Soft constraint workaround for locked DOFs
-- Bone ↔ rigid body coupling for all three modes (STATIC, DYNAMIC, DYNAMIC_BONE)
-- Physics build/clear operators
-- Physics world setup with recommended defaults
+- ✅ Rigid body creation with `collision_collections` (no non-collision constraint objects)
+- ✅ Joint setup with `GENERIC_SPRING` / `SPRING1` — **spring values actually applied**
+- ⚠️ Soft constraint workaround — implemented but disabled (causes instability)
+- ✅ Bone ↔ rigid body coupling for all three modes (STATIC, DYNAMIC, DYNAMIC_BONE)
+- ✅ Physics build/clear operators
+- ✅ Physics world setup with recommended defaults
+- ✅ 13 pure-Python unit tests
+
+**Implementation notes:**
+- Rotation needs negation beyond parser's Y↔Z swap: `(-x, -y, -z)` matching mmd_tools' `.xzy * -1`
+- Joint rotation limits must be swapped AND negated: `lower = -upper_pmx`, `upper = -lower_pmx`
+- Rigid bodies need actual mesh geometry (bmesh sphere/box/capsule) — empty mesh = zero-size collision
+- Bone parenting: origin at bone TAIL with rest matrix, not just head position
+- Tracking empties: `matrix_parent_inverse = rb.matrix_world.inverted() @ bone_world`
+- Collision: own-group-only avoids Blender's symmetric layer false positives
+- Gravity: normal (-9.81), not scaled — collision shapes already sized at import scale
+
+**Remaining work:**
+- Blender integration testing: verify hair/skirt physics look natural during VMD playback
+- Collision tuning: own-group-only may be too conservative (no cross-group body↔hair collision)
+- Soft constraints: find stable parameters or alternative approach for elastic locked DOFs
+- Gravity tuning: may need adjustment if bodies fall too fast at 0.08 scale
 
 **Validation:**
 - Import model + VMD motion, build physics, play timeline

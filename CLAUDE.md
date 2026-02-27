@@ -9,7 +9,8 @@ Read `docs/SPEC.md` first. It is the single source of truth for architecture, de
 - **Milestone 2** (done): Morphs / shape keys
 - **Milestone 3** (done): VMD motion import (bone keyframes, morph keyframes, bone roll)
 - **Milestone 3.5** (done): IK fix — correct constraint placement, native limits, VMD IK toggle
-- **Milestone 4** (next): Physics — rigid bodies, joints, springs
+- **Milestone 4** (in progress): Physics — rigid bodies, joints, springs. Core implemented, needs Blender testing.
+- **Milestone 5** (next): Materials & textures
 - **Primary motivation**: Fix mmd_tools' broken rigid body physics
 
 ## Reference repos (siblings in ../  )
@@ -38,7 +39,7 @@ When working on bmmd and encountering opportunities to improve blender-agent (e.
 - **IK constraints**: Placed on first link bone (e.g. knee), NOT the end effector (ankle). Uses Blender-native `ik_min_x/max_x` properties instead of `LIMIT_ROTATION` constraints. `ik_loop_factor` param (default 1) multiplies PMX iteration count for better convergence.
 - **IK toggle**: VMD property section parsed and applied as IK constraint `influence` keyframes (0.0/1.0 with CONSTANT interpolation). More Blender-native than mmd_tools' custom property + callback approach.
 - **Scene settings**: VMD import sets FPS to 30 (MMD standard) and extends frame range to fit animation.
-- **Physics**: SPRING1 only (SPRING2 has angular spring bugs). Actually apply spring values to constraints (mmd_tools doesn't).
+- **Physics**: SPRING1 only (SPRING2 has angular spring bugs). Actually apply spring values to constraints (mmd_tools doesn't). Rotation negation required beyond parser's Y↔Z swap. Joint limits must be swapped AND negated. Collision uses own-group-only (Blender's symmetric layers can't represent PMX bilateral masks). Both DYNAMIC and DYNAMIC_BONE use COPY_ROTATION (not COPY_TRANSFORMS). Soft constraint workaround (lower>upper) caused instability — currently disabled.
 - **No export**: One-way import only. No PMX/VMD/PMD export.
 - **No UI panels**: Claude Code is the interface.
 - **Logging**: Use blender-agent's session log. Python `logging` to stderr for diagnostics.
