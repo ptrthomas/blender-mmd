@@ -30,7 +30,7 @@ def import_vmd(
 ) -> None:
     """Apply VMD motion to an armature and its child mesh.
 
-    The armature must have been imported with bmmd (bones have ``mmd_name_j``
+    The armature must have been imported with blender_mmd (bones have ``mmd_name_j``
     custom properties).  The child mesh must have an ``mmd_morph_map`` custom
     property (JSON dict mapping Japanese morph names to shape key names).
     """

@@ -1,4 +1,4 @@
-# BMMD — Blender MMD Importer
+# Blender MMD Importer
 
 Read `docs/SPEC.md` first. It is the single source of truth for architecture, decisions, and milestones.
 
@@ -16,7 +16,7 @@ Read `docs/SPEC.md` first. It is the single source of truth for architecture, de
 ## Reference repos (siblings in ../  )
 
 - `../blender_mmd_tools/` — Original mmd_tools addon. Use `mmd_tools/core/pmx/__init__.py` as parser reference. Do NOT fork — clean rewrite.
-- `../blender-agent/` — HTTP bridge for controlling Blender. Read its `CLAUDE.md` for usage. bmmd has no import dependency on it.
+- `../blender-agent/` — HTTP bridge for controlling Blender. Read its `CLAUDE.md` for usage. blender-mmd has no import dependency on it.
 
 ## Development
 
@@ -30,7 +30,7 @@ scripts/setup.sh
 
 ## Cross-project contributions
 
-When working on bmmd and encountering opportunities to improve blender-agent (e.g. Blender 5.0 API hints, common 3D workflow helpers, better error messages), note them and contribute upstream to `../blender-agent/`.
+When working on blender-mmd and encountering opportunities to improve blender-agent (e.g. Blender 5.0 API hints, common 3D workflow helpers, better error messages), note them and contribute upstream to `../blender-agent/`.
 
 ## Key decisions
 

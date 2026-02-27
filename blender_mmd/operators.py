@@ -43,11 +43,11 @@ class BLENDER_MMD_OT_import_pmx(bpy.types.Operator, ImportHelper):
 
 
 def _find_mmd_armature(context) -> bpy.types.Object | None:
-    """Find a bmmd-imported armature to apply VMD motion to.
+    """Find a blender_mmd-imported armature to apply VMD motion to.
 
     Priority:
-    1. Active object if it's a bmmd armature
-    2. Only bmmd armature in the scene (auto-detect)
+    1. Active object if it's a blender_mmd armature
+    2. Only blender_mmd armature in the scene (auto-detect)
     Returns None if no armature found or multiple ambiguous choices.
     """
     active = context.active_object
@@ -64,7 +64,7 @@ def _find_mmd_armature(context) -> bpy.types.Object | None:
 
 
 def _is_mmd_armature(obj: bpy.types.Object) -> bool:
-    """Check if an armature was imported by bmmd (has import_scale property)."""
+    """Check if an armature was imported by blender_mmd (has import_scale property)."""
     return obj.get("import_scale") is not None
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare bmmd parser output against mmd_tools for correctness.
+"""Compare blender_mmd parser output against mmd_tools for correctness.
 
 Usage:
     python scripts/compare_parsers.py [pmx_file ...]
@@ -18,7 +18,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from blender_mmd.pmx.parser import parse as bmmd_parse
+from blender_mmd.pmx.parser import parse as blender_mmd_parse
 
 
 def load_mmd_tools_parser():
@@ -41,7 +41,7 @@ def compare(filepath: Path, mmd_load):
     print(f"{'='*60}")
 
     mmd = mmd_load(str(filepath))
-    ours = bmmd_parse(filepath)
+    ours = blender_mmd_parse(filepath)
 
     # Counts
     checks = [

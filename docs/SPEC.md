@@ -1,4 +1,4 @@
-# BMMD Specification
+# Blender MMD Specification
 
 A ground-up rewrite of [blender_mmd_tools](../../../blender_mmd_tools) targeting **Blender 5.0+**, designed to be driven by **Claude Code** via [blender-agent](../../../blender-agent).
 
@@ -26,7 +26,7 @@ A ground-up rewrite of [blender_mmd_tools](../../../blender_mmd_tools) targeting
 
 | Field | Value |
 |-------|-------|
-| Project name | `bmmd` |
+| Project name | `blender-mmd` |
 | Blender addon ID | `blender_mmd` |
 | Display name | `Blender MMD` |
 | Target Blender | 5.0+ |
@@ -35,7 +35,7 @@ A ground-up rewrite of [blender_mmd_tools](../../../blender_mmd_tools) targeting
 
 ### Dependency on blender-agent
 
-bmmd expects blender-agent to be installed and running. This is documented, not enforced via `blender_manifest.toml`. Claude Code communicates with Blender through blender-agent's HTTP bridge and calls bmmd's operators and helper functions.
+blender-mmd expects blender-agent to be installed and running. This is documented, not enforced via `blender_manifest.toml`. Claude Code communicates with Blender through blender-agent's HTTP bridge and calls blender_mmd's operators and helper functions.
 
 The addon should be designed so Claude can debug and compare output against the original mmd_tools addon when both are installed simultaneously.
 
@@ -88,14 +88,14 @@ ln -sf $(pwd)/blender_mmd ~/Library/Application\ Support/Blender/5.0/extensions/
 
 Claude Code drives development through blender-agent (separate repo, pure HTTP transport layer). The workflow:
 
-1. Edit bmmd source files
+1. Edit blender_mmd source files
 2. Restart Blender to reload the addon (blender-agent supports quit + relaunch from shell)
 3. Execute test code via blender-agent (`POST http://localhost:5656`)
 4. Read results from blender-agent's session log (`output/<timestamp>/agent.log`)
 5. Take screenshots for visual validation (`bpy.ops.screen.screenshot(filepath=f"{SESSION}/screenshot.png")`)
 6. Repeat
 
-blender-agent provides: code execution, session-scoped output directory, logging, screenshots, and Blender lifecycle control. bmmd has no Python import dependency on blender-agent — they are independent Blender extensions that communicate only through Claude Code.
+blender-agent provides: code execution, session-scoped output directory, logging, screenshots, and Blender lifecycle control. blender-mmd has no Python import dependency on blender-agent — they are independent Blender extensions that communicate only through Claude Code.
 
 ### Extension manifest
 
@@ -108,7 +108,7 @@ id = "blender_mmd"
 version = "0.1.0"
 name = "Blender MMD"
 tagline = "Import MMD (PMX) models into Blender"
-maintainer = "bmmd contributors"
+maintainer = "blender-mmd contributors"
 type = "add-on"
 blender_version_min = "5.0.0"
 license = ["SPDX:GPL-3.0-or-later"]
@@ -133,7 +133,7 @@ license = ["SPDX:GPL-3.0-or-later"]
 The rewrite is validated against the battle-tested mmd_tools parser:
 
 - **Batch parse test**: Parse all PMX files in a configurable test directory, assert no exceptions
-- **Comparison test**: For each test file, parse with both bmmd and mmd_tools parsers, compare output field-by-field (vertex positions, bone data, materials, etc.)
+- **Comparison test**: For each test file, parse with both blender_mmd and mmd_tools parsers, compare output field-by-field (vertex positions, bone data, materials, etc.)
 - Test PMX file directory is configured at test time (not hardcoded)
 
 ### PMX binary format
@@ -317,7 +317,7 @@ Default import scale: **0.08** (matching mmd_tools). Configurable at import time
 
 ### Overview
 
-The physics system is the primary motivation for bmmd. Blender's rigid body physics (Bullet engine) is fundamentally capable but mmd_tools has three bugs/limitations that cause most of the problems users experience:
+The physics system is the primary motivation for blender-mmd. Blender's rigid body physics (Bullet engine) is fundamentally capable but mmd_tools has three bugs/limitations that cause most of the problems users experience:
 
 1. **Spring values never applied** — mmd_tools stores PMX spring stiffness/damping in custom properties but never sets them on the actual `GENERIC_SPRING` constraints. This is the main reason rigid bodies fly apart.
 2. **O(n²) non-collision constraint objects** — mmd_tools creates an EMPTY with `disable_collisions=True` for every non-colliding pair. A model with 100 rigid bodies can generate 200+ extra objects. Blender's `collision_collections` API eliminates all of these.
@@ -532,7 +532,7 @@ These helpers evolve over time. Start minimal, add as needed.
 
 ## Logging
 
-bmmd relies on **blender-agent's existing logging infrastructure**. blender-agent already logs every code execution request and response to a session-scoped `agent.log` file (in `output/<timestamp>/agent.log`). Since Claude Code drives all operations through blender-agent, import results, errors, and tracebacks are captured there automatically.
+blender-mmd relies on **blender-agent's existing logging infrastructure**. blender-agent already logs every code execution request and response to a session-scoped `agent.log` file (in `output/<timestamp>/agent.log`). Since Claude Code drives all operations through blender-agent, import results, errors, and tracebacks are captured there automatically.
 
 Within addon code, use Python's `logging` module with a `blender_mmd` logger for structured diagnostics:
 
