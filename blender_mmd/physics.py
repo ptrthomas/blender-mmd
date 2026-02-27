@@ -809,25 +809,14 @@ def _create_tracking_empty(armature_obj, rb_obj, bone_name: str, collection):
 
 
 def _setup_physics_world(scene, scale: float = 0.08) -> None:
-    """Configure physics world: substeps, solver iterations, and gravity.
-
-    At 0.08 import scale, models are ~1.3m in Blender representing ~160cm.
-    Default gravity (-9.81) is effectively too strong for this scale, tearing
-    joints apart. Scale gravity proportionally.
-    """
-    from mathutils import Vector
-
+    """Configure physics world: substeps and solver iterations."""
     rbw = scene.rigidbody_world
     if rbw is None:
         return
 
-    # Higher substeps + iterations = tighter constraint enforcement.
-    # At small scale, the solver needs more passes to maintain zero-translation joints.
-    rbw.substeps_per_frame = 60
-    rbw.solver_iterations = 60
-
-    # Scale gravity to match model scale
-    scene.gravity = Vector((0, 0, -9.81 * scale))
+    # Match mmd_tools defaults
+    rbw.substeps_per_frame = 6
+    rbw.solver_iterations = 10
 
 
 def _set_rigid_body_world_enabled(scene, enable: bool) -> bool:
