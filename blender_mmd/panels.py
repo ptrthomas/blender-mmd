@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import bpy
 from bpy.props import EnumProperty, PointerProperty
 
@@ -54,6 +56,90 @@ def validate_bone_chain(pose_bones) -> tuple[bool, list, str]:
     return True, sorted_bones, ""
 
 
+def validate_bone_group(
+    pose_bones, armature_obj
+) -> tuple[bool, list[list[str]], list[str], str]:
+    """Validate that selected bones form parallel chains for connected group cloth.
+
+    Returns:
+        (valid, chains, strut_names, message)
+        chains: list of bone name lists, each root→tip, sorted by angle.
+        strut_names: bone names belonging to the "Struts" bone collection.
+    """
+    if len(pose_bones) < 2:
+        return False, [], [], "Need at least 2 bones"
+
+    names = {pb.name for pb in pose_bones}
+    pb_lookup = {pb.name: pb for pb in pose_bones}
+
+    # Separate strut bones (members of "Struts" bone collection)
+    strut_names: set[str] = set()
+    struts_col = armature_obj.data.collections.get("Struts")
+    if struts_col:
+        for pb in pose_bones:
+            if struts_col in pb.bone.collections.values():
+                strut_names.add(pb.name)
+    chain_names = names - strut_names
+
+    if len(chain_names) < 2:
+        return False, [], [], "Need at least 2 chain bones"
+
+    # Find roots: chain bones whose parent is NOT in the chain selection
+    roots = []
+    for name in chain_names:
+        pb = pb_lookup[name]
+        if pb.parent is None or pb.parent.name not in chain_names:
+            roots.append(pb)
+
+    if len(roots) < 2:
+        return False, [], [], "Need at least 2 chain roots for group mode"
+
+    # Build chains from each root following children within the selection
+    chains: list[list[str]] = []
+    accounted: set[str] = set()
+    for root in roots:
+        chain = [root.name]
+        accounted.add(root.name)
+        current = root
+        while True:
+            children_in_sel = [
+                c for c in current.children if c.name in chain_names
+            ]
+            if len(children_in_sel) == 0:
+                break
+            if len(children_in_sel) > 1:
+                return (
+                    False,
+                    [],
+                    [],
+                    f"'{current.name}' branches in selection",
+                )
+            current = children_in_sel[0]
+            chain.append(current.name)
+            accounted.add(current.name)
+        chains.append(chain)
+
+    unaccounted = chain_names - accounted
+    if unaccounted:
+        return (
+            False,
+            [],
+            [],
+            f"Orphan bones: {', '.join(sorted(unaccounted))}",
+        )
+
+    # Sort chains by angle of root bone around armature center (XY plane)
+    bones = armature_obj.data.bones
+
+    def _root_angle(chain: list[str]) -> float:
+        head = bones[chain[0]].head_local
+        return math.atan2(head.x, -head.y)
+
+    chains.sort(key=_root_angle)
+
+    return True, chains, sorted(strut_names), ""
+
+
 def _collision_mesh_poll(self, obj):
     return obj.type == "MESH"
 
@@ -78,30 +164,53 @@ class BLENDER_MMD_PT_cloth(bpy.types.Panel):
         # --- Convert Section (Pose Mode + selection) ---
         if context.mode == "POSE" and context.selected_pose_bones:
             selected = list(context.selected_pose_bones)
-            valid, sorted_bones, message = validate_bone_chain(selected)
+
+            # Try single chain first (Phase 1)
+            chain_ok, sorted_bones, chain_msg = validate_bone_chain(selected)
+            # Try group (Phase 2) if single chain fails
+            group_ok, chains, struts, group_msg = (
+                (False, [], [], "")
+                if chain_ok
+                else validate_bone_group(selected, obj)
+            )
 
             box = layout.box()
-            if valid:
+            if chain_ok:
                 first = sorted_bones[0].name
                 last = sorted_bones[-1].name
                 box.label(
-                    text=f"Selected: {len(sorted_bones)} bones "
+                    text=f"Chain: {len(sorted_bones)} bones "
                     f"({first} \u2192 {last})"
                 )
-
                 box.prop(context.scene, "mmd4b_preset", text="Preset")
                 box.prop(context.scene, "mmd4b_collision_mesh", text="Collision")
-
                 box.operator(
                     "blender_mmd.convert_selection_to_cloth",
                     text="Convert to Cloth",
+                    icon="MOD_CLOTH",
+                )
+            elif group_ok:
+                total = sum(len(c) for c in chains)
+                depths = ", ".join(str(len(c)) for c in chains)
+                box.label(
+                    text=f"Group: {len(chains)} chains, {total} bones",
+                    icon="MESH_CYLINDER",
+                )
+                box.label(text=f"Depths: {depths}")
+                if struts:
+                    box.label(text=f"Struts: {len(struts)}")
+                box.prop(context.scene, "mmd4b_preset", text="Preset")
+                box.prop(context.scene, "mmd4b_collision_mesh", text="Collision")
+                box.operator(
+                    "blender_mmd.convert_group_to_cloth",
+                    text="Convert Group to Cloth",
                     icon="MOD_CLOTH",
                 )
             else:
                 box.label(
                     text=f"Selected: {len(selected)} bones", icon="ERROR"
                 )
-                box.label(text=message)
+                box.label(text=chain_msg or group_msg)
         elif context.mode == "POSE":
             layout.label(text="Select bones to convert", icon="INFO")
         else:
@@ -121,7 +230,13 @@ class BLENDER_MMD_PT_cloth(bpy.types.Panel):
                     row = layout.row(align=True)
                     bone_names = cloth_obj.get("mmd_bone_names", "")
                     count = len(bone_names.split(",")) if bone_names else "?"
-                    row.label(text=f"{cloth_obj.name}  ({count} bones)")
+                    # Clickable label to select bones
+                    sel_op = row.operator(
+                        "blender_mmd.select_cloth_bones",
+                        text=f"{cloth_obj.name}  ({count} bones)",
+                        icon="BONE_DATA",
+                    )
+                    sel_op.cloth_object_name = cloth_obj.name
                     op = row.operator(
                         "blender_mmd.remove_cloth_sim",
                         text="",
@@ -132,11 +247,17 @@ class BLENDER_MMD_PT_cloth(bpy.types.Panel):
         if not has_cloths:
             layout.label(text="None")
 
-        # Clear All button
+        # Reset / Clear buttons
         if has_cloths:
-            layout.operator(
+            row = layout.row(align=True)
+            row.operator(
+                "blender_mmd.reset_cloth_sims",
+                text="Reset Sims",
+                icon="FILE_REFRESH",
+            )
+            row.operator(
                 "blender_mmd.clear_cloth",
-                text="Clear All Cloth",
+                text="Clear All",
                 icon="TRASH",
             )
 

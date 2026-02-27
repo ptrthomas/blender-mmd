@@ -797,108 +797,143 @@ Systematic audit of rigid body build pattern against mmd_tools. Fixes applied to
 - Bone disconnection: all hair chain bones already have `use_connect=False` from PMX data.
 - Soft constraints: mmd_tools doesn't implement inverted-limits workaround either. Springs enabled, soft constraints disabled — matches mmd_tools.
 
-### MMD4B — Cloth Conversion UI Panel
+### MMD4B — Soft Body Deformation Panel
 
-Manual bone-selection-based cloth conversion. The user selects bones in Pose Mode, picks a preset, and clicks Convert. No PMX re-parse needed — everything works from Blender bone positions.
+**Previous approach (cloth sim) abandoned.** Cloth simulation was tested for hair/tie/skirt deformation but proved fundamentally unstable — Blender's cloth solver cannot produce stiff-enough behaviour for hair strands regardless of parameter tuning (even at max stiffness 10000). The ribbon-mesh + bone-binding (STRETCH_TO/DAMPED_TRACK) approach also caused stretching or rotation artifacts.
+
+**New approach: Soft Body cage + Surface Deform.** A hidden low-poly cage mesh gets Soft Body physics. The visible mesh inherits deformation via Surface Deform. This is stable, predictable, and supports both stiff (hair) and flowing (skirt) behaviour.
+
+**Coexists with rigid_body mode.** Rigid body provides collision surfaces (body parts). Soft body cages collide against them. Both can be active simultaneously on the same armature.
 
 **N-panel**: Tab "MMD4B" in 3D Viewport sidebar. Visible when active object is an MMD armature.
 
-#### Phase 1: Single Chain (hair, ties, accessories) ✅
+#### Workflow
 
-**Workflow:** Select bones forming one chain → pick preset + collision mesh → Convert to Cloth → repeat per chain.
+1. User selects a **mesh** in the viewport (e.g. hair mesh, skirt mesh, tie mesh)
+2. Algorithm generates a low-poly **cage** that encloses the selected mesh
+3. Soft Body modifier on cage, with goal vertices pinned to parent bone
+4. Surface Deform modifier on the original mesh → bound to cage
+5. Optional: collision mesh (body) for the cage to collide with
+6. Play animation — cage deforms under soft body physics, visible mesh follows
+7. User can edit cage mesh density for finer stiffness control (more verts = more springs = stiffer)
 
-**Panel layout:**
-- Selection info: bone count, chain range (first → last)
-- Preset picker: Hair (stiff strands), Cotton (general), Silk (flowing)
-- Collision mesh picker (PointerProperty, filtered to meshes)
-- Convert button (enabled only with valid chain selection)
-- Active Cloth Sims list with per-item remove (X) buttons
-- Clear All button
+#### Cage generation algorithm
 
-**Selection validation:** Minimum 2 bones, all forming a connected parent→child chain sorted by hierarchy depth. First bone's parent must NOT be in the selection (it's the anchor).
+Given a target mesh, build a minimal enclosing cage:
 
-**Ribbon mesh** (built from bone positions, not RB positions):
-- Vertex 0 = first bone's head (pinned)
-- Vertices 1–N = each bone's tail
-- Extruded perpendicular for ribbon width (30% of avg bone length)
-- Quad faces between center and extruded edges
+1. **Bounding analysis:** Compute oriented bounding box or principal axis of the mesh via PCA or bone chain direction
+2. **Tube/slab creation:** Generate a simple tube (for elongated shapes like hair) or slab (for flat shapes like skirts) with enough loop cuts for smooth deformation. Cross-section: hexagonal (6 sides) by default, configurable.
+3. **Internal trusses:** If the enclosed cross-sectional area exceeds a threshold, add internal edges/faces to preserve cross-section shape under deformation. This prevents the cage from collapsing flat.
+   - Hair: cylindrical cage with internal cross-bracing keeps round cross-section
+   - Skirt: open-ended cone/cylinder, no internal trusses needed (flat panels)
+4. **Auto-pinning:** Top ring of cage vertices get `goal` vertex group at weight 1.0, bound to the parent bone (e.g. Head for hair, Hips for skirt). Soft Body goal=1.0 means those vertices are fully controlled by the armature.
 
-**Vertex groups:**
-- `pin`: root vertices at weight 1.0
-- Parent bone name: root vertices (Armature modifier moves pin with parent)
-- Per-bone: tail vertex pair (STRETCH_TO target)
+#### Pinning — binary, no vertex painting
 
-**Modifier stack:** Armature → Cloth → Corrective Smooth
+Pins are binary: a vertex is either pinned (goal=1.0) or free (goal=0.0). No gradient weights, no vertex painting.
 
-**Bone binding:** STRETCH_TO constraints on each bone → cloth vertex group
+**Auto-pin:** Cage generator pins the top ring (nearest to parent bone). This covers most cases.
 
-**Files:** `panels.py` (NEW), `cloth.py` (added `convert_selection_to_cloth`, `remove_cloth_sim`), `operators.py` (added 2 operators), `__init__.py` (registers panels)
+**Manual pin/unpin:** In Edit Mode on the cage, user selects vertices and clicks Pin/Unpin in the MMD4B panel. This adds/removes them from the `goal` vertex group. Use cases:
+- Pin extra vertices where hair meets the head to prevent separation
+- Unpin vertices to allow more movement at specific points
+- Pin a ring in the middle of a skirt cage to create a belt-like constraint
 
-**Verification (Blender integration test):**
-1. Import sample PMX (`初音ミク.pmx`), enter Pose Mode
-2. Verify MMD4B tab appears in N-panel
-3. Select 2+ hair chain bones (e.g. hair1.L → hair6.L) → panel shows bone count, Convert enabled
-4. Select non-chain bones (e.g. two unrelated bones) → panel shows validation error
-5. Set preset to Hair, pick body mesh as collision → click Convert
-6. Verify: cloth ribbon mesh appears in `{armature}_Cloth` collection, STRETCH_TO constraints on bones, Armature+Cloth+Corrective Smooth modifiers on ribbon
-7. Play timeline → hair bones follow cloth sim under gravity
-8. Frame 1: cloth at rest matches bone positions
-9. Repeat for a second chain (e.g. hair.R) → both appear in Active Cloth Sims list
-10. Click X on one sim → that cloth removed, bones freed, other sim unaffected
-11. Click Clear All → everything cleaned up, collection removed
-12. With VMD motion loaded: cloth reacts to head/body movement
+The panel shows pin count and highlights pinned verts (e.g. via display overlay or selection).
 
-#### Phase 2: Connected Group (skirts, belts, straps) — planned
+#### Stiffness — one slider + mesh density
 
-For groups where multiple parallel chains need lateral connectivity (e.g. skirt panels).
+**UI slider: "Stiffness" (0.0–1.0).** Maps to Soft Body edge spring settings:
+- `pull` = 0.1 + stiffness × 0.89 (tension: 0.1–0.99)
+- `push` = 0.1 + stiffness × 0.89 (compression: 0.1–0.99)
+- `bend` = stiffness × 10.0 (bending resistance: 0–10)
+- `damping` = 5.0 + stiffness × 45.0 (oscillation damping: 5–50)
 
-**Key insight: no PMX re-parse.** Instead of reading PMX joint topology for lateral connections, the connectivity comes from two sources:
+**Mesh density as stiffness control:** More vertices in the cage = more edge springs = inherently stiffer structure. The user can add loop cuts to the cage in Edit Mode. This is more intuitive than parameter tuning — "make it denser where you want it stiffer."
 
-1. **Spatial auto-connect:** User selects ALL bones in the group. System groups them into parallel chains by ancestry, sorts chain roots by angle around the armature center, and auto-connects adjacent chains at matching depth levels to build a tube/cylinder mesh.
+**No vertex painting.** Stiffness is uniform across the cage (set by the slider). Spatial stiffness variation comes from mesh density instead.
 
-2. **Manual strut bones (override):** User can add short bones bridging adjacent strands at specific levels. These are selected alongside the chain bones and treated as explicit lateral edges, overriding auto-connect at that point. More struts = stiffer mesh between panels.
+#### Soft Body settings (derived from stiffness slider)
 
-**Struts replace self-collision.** Each lateral face in the cloth mesh has compression stiffness. When adjacent panels try to collapse into each other, the shared faces resist it structurally — the cloth solver prevents compression before geometry intersects. This is superior to `use_self_collision`:
-- Zero extra cost (compression stiffness is already computed by the solver)
-- Spatially controllable (more struts where clipping happens, fewer where you want flow)
-- Stable (no O(n²) collision detection, no jitter)
+- `use_goal`: True
+- `vertex_group_goal`: "goal"
+- `goal_default`: 0.0 (free vertices get no goal pull)
+- `goal_spring`: 0.5 + stiffness × 0.499 (how quickly pinned verts follow bone)
+- `goal_friction`: 5.0 + stiffness × 45.0 (damping on goal springs)
+- `use_edges`: True
+- `pull`, `push`, `bend`, `damping`: see stiffness mapping above
+- `use_self_collision`: False (internal trusses handle shape preservation)
+- `mass`: 0.3 (fixed, reasonable default)
+- `gravity`: 9.8 (Blender default)
+- `speed`: 1.0
 
-**Pinning:** Auto-pin bones whose parent is NOT in the selection (boundary detection). Covers most cases: skirt waistband bones (parent = hips) auto-pinned.
+#### Surface Deform binding
 
-**Mesh construction:**
-1. Detect parallel chains from selected bones
-2. Sort chain roots by angle around armature center → ring topology
-3. Connect adjacent chains at matching depth → quad grid
-4. Strut bones add explicit lateral edges where auto-connect is insufficient
-5. Pin top row, per-bone vertex groups, same modifier stack as Phase 1
+The visible mesh gets a Surface Deform modifier targeting the cage:
+1. Cage must fully enclose the target mesh at bind time (cage is generated slightly oversized)
+2. `bpy.ops.object.surfacedeform_bind(modifier="SurfaceDeform")` with context override on target mesh
+3. At runtime, cage deformation drives visible mesh — no bone constraints needed
+4. If user edits cage geometry, rebind via panel button
 
-#### Struts as First-Class Citizens — design direction
+#### Panel layout
 
-Struts and pins are the same concept: invisible structural elements that encode user intent as cloth mesh topology. Pins anchor to world/bone space; struts anchor to other parts of the mesh. Both should be first-class primitives in the model.
+**Convert section (Object Mode, mesh selected):**
+- Target mesh info (name, vertex count)
+- Collision mesh picker (PointerProperty)
+- Stiffness slider (0.0–1.0, default 0.5)
+- "Generate Cage" button
 
-**Use cases beyond lateral connectivity:**
+**Active Cages section (always visible):**
+- List of active soft body cages, clickable to select cage mesh
+- Per cage: name, target mesh, vertex count
+- Pin/Unpin buttons (visible when cage is in Edit Mode)
+- Rebind button (rebinds Surface Deform after cage edits)
+- Remove (X) button per cage
+- Reset Sims / Clear All buttons
 
-- **Hair deflectors:** Strut from a hair chain to a shoulder/collar bone. The cloth mesh gets a face there, compression stiffness keeps hair from clipping through the shoulder — no collision modifier needed on the body mesh for that zone.
-- **Directional bias:** Asymmetric strut placement. More struts on the front of a skirt = stiffer front panel, fewer on the back = more flow. A cape pinned at shoulders with a single strut to a spine bone preventing torso clip-through.
-- **Weighted struts:** Strut bones with a stiffness weight (mapped to vertex group weight on connecting faces). Light strut = gentle bias. Heavy strut = hard wall. Gives per-edge control over cloth behavior.
-
-**Design principle:** The user builds a "constraint skeleton" from pins (anchors) and struts (connections). The cloth mesh is derived from this skeleton. Tuning physics means editing the skeleton — adding, removing, or reweighting struts — not tweaking solver parameters. This is more intuitive and more powerful than parameter-driven workflows.
-
-**Implementation:** Struts are regular Blender bones in the armature. They participate in mesh construction (adding lateral edges/faces) but don't get STRETCH_TO binding — they're structural only.
-
-**Identification — bone collection membership:** A bone collection named "Struts" on the armature holds all strut bones. The cloth converter checks collection membership:
+#### Blender API reference (tested in 5.0.1)
 
 ```python
-"Struts" in [col.name for col in bone.collections]
+# Soft Body modifier
+sb_mod = cage_obj.modifiers.new("Softbody", "SOFT_BODY")
+sb = sb_mod.settings
+sb.use_goal = True
+sb.vertex_group_goal = "goal"
+sb.goal_default = 0.0      # free verts
+sb.goal_spring = 0.8       # pin tracking speed
+sb.goal_friction = 10.0    # pin damping
+sb.use_edges = True
+sb.pull = 0.9              # structural tension
+sb.push = 0.9              # structural compression
+sb.bend = 5.0              # bending resistance (0-10)
+sb.damping = 10.0          # edge spring damping
+sb.mass = 0.3
+
+# Surface Deform modifier (on visible mesh)
+sd_mod = target_mesh.modifiers.new("SurfaceDeform", "SURFACE_DEFORM")
+sd_mod.target = cage_obj
+# Bind: requires context override with target_mesh as active object
+with bpy.context.temp_override(active_object=target_mesh):
+    bpy.ops.object.surfacedeform_bind(modifier="SurfaceDeform")
+
+# Goal vertex group (binary pinning)
+goal_vg = cage_obj.vertex_groups.new(name="goal")
+goal_vg.add(pin_vertex_indices, 1.0, "REPLACE")
+
+# IMPORTANT: Soft body requires sequential frame evaluation.
+# Jumping frames produces wrong results. Always evaluate from frame_start.
 ```
 
-No naming convention to enforce, no custom property to manage. The user creates a strut bone in Edit Mode, drags it into the Struts collection, and it becomes structural. Bone collections also support visibility toggling — hide struts when not editing physics, show them when tuning.
+#### Advantages over cloth approach
 
-**Display:** Armature display type set to STICK on MMD4B cloth build. All bones render as lines — clean, lightweight, standard for MMD work. Struts are visually distinguished by bone collection color (e.g. cyan for struts vs default for chain bones). If finer distinction is needed later, per-bone custom shapes (a simple 2-vertex wire mesh) can override STICK for strut bones only.
-
-#### Future: Soft Body (research)
-
-Tubular low-poly hidden mesh approximating hair volume, Blender soft body simulation, Surface Deform to bind visible mesh. Research phase — not part of initial MMD4B.
+- **Stability:** Soft body solver is inherently stable for semi-rigid shapes
+- **No stretching:** Surface Deform preserves mesh topology perfectly
+- **Cross-section preservation:** Internal trusses prevent collapse without self-collision
+- **Intuitive control:** One stiffness slider + mesh density. No vertex painting.
+- **Predictable pinning:** Binary pin/unpin on vertices. No weight gradients.
+- **No bone binding:** Deformation is mesh-to-mesh, eliminating constraint artifacts
+- **Editable:** User can modify cage geometry in Edit Mode for fine control
+- **Coexists with rigid body:** Cage collides against rigid body collision surfaces
 
 ### Milestone 5: Materials & Textures
 

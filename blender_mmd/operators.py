@@ -336,6 +336,148 @@ class BLENDER_MMD_OT_convert_selection_to_cloth(bpy.types.Operator):
             return {"CANCELLED"}
 
 
+class BLENDER_MMD_OT_convert_group_to_cloth(bpy.types.Operator):
+    """Convert selected parallel bone chains to a group cloth simulation"""
+
+    bl_idname = "blender_mmd.convert_group_to_cloth"
+    bl_label = "Convert Group to Cloth"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return (
+            context.mode == "POSE"
+            and context.active_object is not None
+            and _is_mmd_armature(context.active_object)
+            and context.selected_pose_bones
+        )
+
+    def execute(self, context):
+        from .cloth import convert_group_to_cloth
+        from .panels import validate_bone_group
+
+        armature_obj = context.active_object
+        selected = list(context.selected_pose_bones)
+        valid, chains, struts, message = validate_bone_group(
+            selected, armature_obj
+        )
+        if not valid:
+            self.report({"ERROR"}, message)
+            return {"CANCELLED"}
+
+        preset = context.scene.mmd4b_preset
+        collision_obj = context.scene.mmd4b_collision_mesh
+
+        try:
+            cloth_obj = convert_group_to_cloth(
+                armature_obj,
+                chains,
+                strut_names=struts if struts else None,
+                collision_mesh_obj=collision_obj,
+                preset=preset,
+            )
+            self.report(
+                {"INFO"},
+                f"Group cloth: {cloth_obj.name} "
+                f"({len(chains)} chains)",
+            )
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("Group cloth conversion failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
+class BLENDER_MMD_OT_reset_cloth_sims(bpy.types.Operator):
+    """Reset all cloth simulation caches and return to frame 1"""
+
+    bl_idname = "blender_mmd.reset_cloth_sims"
+    bl_label = "Reset Cloth Sims"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        armature_obj = _find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        col_name = armature_obj.get("cloth_collection")
+        if not col_name:
+            self.report({"INFO"}, "No cloth sims to reset.")
+            return {"FINISHED"}
+
+        collection = bpy.data.collections.get(col_name)
+        if not collection:
+            return {"FINISHED"}
+
+        # Mute cloth constraints so rest pose is clean
+        cloth_constraints = []
+        for pb in armature_obj.pose.bones:
+            for c in pb.constraints:
+                if c.name.startswith("mmd_cloth") and not c.mute:
+                    c.mute = True
+                    cloth_constraints.append(c)
+
+        # Toggle cloth modifiers off/on to force cache reset
+        for obj in collection.objects:
+            cloth_mod = obj.modifiers.get("Cloth")
+            if cloth_mod:
+                cloth_mod.show_viewport = False
+                cloth_mod.show_viewport = True
+
+        # Go to frame start with rest pose (constraints muted)
+        context.scene.frame_set(context.scene.frame_start)
+        context.view_layer.update()
+
+        # Unmute cloth constraints — sim starts fresh from rest
+        for c in cloth_constraints:
+            c.mute = False
+
+        # Evaluate once at frame start so cloth initialises cleanly
+        context.scene.frame_set(context.scene.frame_start)
+
+        self.report({"INFO"}, "Cloth sims reset.")
+        return {"FINISHED"}
+
+
+class BLENDER_MMD_OT_select_cloth_bones(bpy.types.Operator):
+    """Select the bones belonging to a cloth simulation"""
+
+    bl_idname = "blender_mmd.select_cloth_bones"
+    bl_label = "Select Cloth Bones"
+
+    cloth_object_name: StringProperty(
+        name="Cloth Object",
+        description="Name of the cloth object whose bones to select",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == "POSE"
+
+    def execute(self, context):
+        cloth_obj = bpy.data.objects.get(self.cloth_object_name)
+        if not cloth_obj:
+            self.report({"ERROR"}, f"Cloth object '{self.cloth_object_name}' not found.")
+            return {"CANCELLED"}
+
+        bone_names_str = cloth_obj.get("mmd_bone_names", "")
+        if not bone_names_str:
+            return {"CANCELLED"}
+
+        armature_obj = context.active_object
+        bpy.ops.pose.select_all(action="DESELECT")
+        count = 0
+        for name in bone_names_str.split(","):
+            pb = armature_obj.pose.bones.get(name)
+            if pb:
+                pb.select = True
+                count += 1
+
+        self.report({"INFO"}, f"Selected {count} bones")
+        return {"FINISHED"}
+
+
 class BLENDER_MMD_OT_remove_cloth_sim(bpy.types.Operator):
     """Remove a specific cloth simulation"""
 
@@ -385,6 +527,9 @@ _classes = (
     BLENDER_MMD_OT_convert_chain_to_cloth,
     BLENDER_MMD_OT_clear_cloth,
     BLENDER_MMD_OT_convert_selection_to_cloth,
+    BLENDER_MMD_OT_convert_group_to_cloth,
+    BLENDER_MMD_OT_reset_cloth_sims,
+    BLENDER_MMD_OT_select_cloth_bones,
     BLENDER_MMD_OT_remove_cloth_sim,
 )
 

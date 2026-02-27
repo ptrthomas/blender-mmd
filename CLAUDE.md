@@ -10,8 +10,7 @@ Read `docs/SPEC.md` first. It is the single source of truth for architecture, de
 - **Milestone 3** (done): VMD motion import (bone keyframes, morph keyframes, bone roll)
 - **Milestone 3.5** (done): IK fix — correct constraint placement, native limits, VMD IK toggle
 - **Milestone 4** (done): Rigid body physics — functional but limited by Blender's RB solver
-- **Milestone 4b** (done): Physics rework — three modes (none/rigid_body/cloth), chain detection, cloth conversion
-- **MMD4B** (in progress): Cloth UI panel — manual bone selection, Phase 1 (single chain) done, Phase 2 (connected group) planned
+- **Milestone 4b** (in progress): Soft Body cage + Surface Deform for hair/skirt/tie. Three physics modes coexist: none, rigid_body, soft_body.
 - **Milestone 5** (next): Materials & textures
 
 ## Reference repos (siblings in ../  )
@@ -46,11 +45,11 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
 - **IK constraints**: Placed on first link bone (e.g. knee), NOT the end effector (ankle). Uses Blender-native `ik_min_x/max_x` properties instead of `LIMIT_ROTATION` constraints. `ik_loop_factor` param (default 1) multiplies PMX iteration count for better convergence.
 - **IK toggle**: VMD property section parsed and applied as IK constraint `influence` keyframes (0.0/1.0 with CONSTANT interpolation). More Blender-native than mmd_tools' custom property + callback approach.
 - **Scene settings**: VMD import sets FPS to 30 (MMD standard) and extends frame range to fit animation.
-- **Physics**: Three modes (see SPEC.md Milestone 4b for full plan):
+- **Physics**: Three modes, can coexist (rigid_body provides collision surfaces for soft_body cages):
   - `none` (default): metadata only, no physics objects. Clean import.
   - `rigid_body`: M4 implementation. RBW disabled during build, collision layers, non-collision constraints, margin 1e-6, dynamic body repositioning, depsgraph flushes. "Good enough" mmd_tools-quality.
-  - `cloth`: Interactive chain-by-chain conversion to Blender cloth sim. Claude guides user through selecting chains and collision surfaces. Reference: `../blender_mmd_tools_append/`.
-- **MMD4B panel**: N-panel (tab "MMD4B") for cloth conversion. Select bones in Pose Mode, pick preset + collision mesh, click Convert. Phase 2 uses spatial auto-connect + manual strut bones for skirt tube mesh (struts replace self-collision via compression stiffness).
+  - `soft_body`: MMD4B panel. User selects target mesh (hair/skirt/tie), algorithm generates low-poly cage, Soft Body on cage + Surface Deform on visible mesh. Internal trusses preserve cross-section for thick volumes.
+- **MMD4B panel**: N-panel (tab "MMD4B") for soft body deformation. Select mesh → generate cage → play. Cloth sim approach abandoned (unstable for stiff structures like hair).
 - **No export**: One-way import only. No PMX/VMD/PMD export.
 - **Logging**: Use blender-agent's session log. Python `logging` to stderr for diagnostics.
 
