@@ -523,7 +523,7 @@ Let parsing exceptions propagate. The import operator catches exceptions at the 
 
 ## Milestones
 
-### Milestone 1: Import PMX — Armature + Mesh (current)
+### Milestone 1: Import PMX — Armature + Mesh ✅
 
 **Deliverables:**
 - PMX parser (clean rewrite, Blender-coord output, full PMX 2.0/2.1 support)
@@ -544,9 +544,44 @@ Let parsing exceptions propagate. The import operator catches exceptions at the 
 - Normals render correctly (smooth shading matches mmd_tools)
 - UVs are present and correct (visible in UV editor)
 
-### Milestone 2: Physics
+### Milestone 2: Morphs & Shape Keys (current)
 
-Physics comes early because it's the primary motivation for bmmd. We need to prove the improvements work before investing in materials, morphs, etc.
+Morphs are needed before VMD import, since VMD files contain morph keyframes for facial animation. Without shape keys, VMD playback would be body-only with no facial expressions.
+
+**Deliverables:**
+- Vertex morph import as Blender shape keys
+- UV morph support (stored as shape key layers or custom data)
+- Bone morph support (stored for VMD application)
+- Material morph support (stored for future material milestone)
+- Shape key management helpers for Claude
+
+**Validation:**
+- Import PMX model, verify shape keys appear in Properties > Object Data > Shape Keys
+- Activate a facial morph shape key, verify mesh deformation is correct
+- Compare shape key count and names against mmd_tools import of the same model
+
+### Milestone 3: VMD Motion Import
+
+VMD import follows morphs so we can see both body motion AND facial animation during playback.
+
+**Deliverables:**
+- VMD parser (bone keyframes + morph keyframes)
+- Apply bone keyframes to armature as Blender actions/F-curves
+- Apply morph keyframes to shape key F-curves
+- VMD import operator
+- Japanese → English bone name matching via `mmd_name_j` custom properties
+- Translation table (`translations.py`) seeded by scanning user's PMX/VMD collection
+- `scripts/scan_translations.py` tool
+
+**Validation:**
+- Import PMX model + VMD motion, play timeline
+- All VMD bone keyframes map to the correct English-named Blender bones
+- Character moves according to VMD with facial expressions animating
+- Compare playback side-by-side with mmd_tools on the same model + motion
+
+### Milestone 4: Physics
+
+Physics follows VMD so we can validate with actual motion playing — a static model with physics proves nothing.
 
 **Deliverables:**
 - Rigid body creation with `collision_collections` (no non-collision constraint objects)
@@ -557,32 +592,13 @@ Physics comes early because it's the primary motivation for bmmd. We need to pro
 - Physics world setup with recommended defaults
 
 **Validation:**
-- Import a model with hair/skirt physics, build physics, play timeline
+- Import model + VMD motion, build physics, play timeline
 - Hair and clothing move naturally and don't fly apart
 - Rigid bodies stay connected to their constraints
 - Compare object count vs mmd_tools (should be 100–300 fewer objects)
-- Compare side-by-side with mmd_tools physics on the same model
-
-### Milestone 3: VMD Motion Import
-
-VMD import is pulled forward to milestone 3 because physics validation requires motion. A static model with physics proves nothing — we need to see hair and clothing respond to body movement during playback.
-
-**Deliverables:**
-- VMD parser (bone keyframes at minimum)
-- Apply bone keyframes to armature as Blender actions/F-curves
-- VMD import operator
-- Japanese → English bone name matching via `mmd_name_j` custom properties
-- Translation table (`translations.py`) seeded by scanning user's PMX/VMD collection
-- `scripts/scan_translations.py` tool
-
-**Validation:**
-- Import PMX model + VMD motion, build physics, play timeline
-- All VMD bone keyframes map to the correct English-named Blender bones
-- Character moves according to VMD, hair/clothing follows with physics
 - This is the key end-to-end test: does our physics actually work better than mmd_tools?
-- Compare playback side-by-side with mmd_tools on the same model + motion
 
-### Milestone 4: Materials & Textures
+### Milestone 5: Materials & Textures
 
 **Deliverables:**
 - Material creation from PMX data
@@ -590,19 +606,10 @@ VMD import is pulled forward to milestone 3 because physics validation requires 
 - Basic EEVEE material setup
 - Per-material mesh split operation (for outline support)
 
-### Milestone 5: Morphs & Shape Keys
-
-**Deliverables:**
-- Vertex morph import as shape keys
-- Bone morph support
-- Material morph support
-- Shape key management helpers for Claude
-
 ### Milestone 6: Animation Polish
 
 **Deliverables:**
 - VMD camera motion import
-- VMD morph keyframe import (requires milestone 5)
 - CCD IK solver (matching MMD output more closely)
 - Keyframe management helpers
 
