@@ -11,8 +11,9 @@ Read `docs/SPEC.md` first. It is the single source of truth for architecture, de
 - **Milestone 3.5** (done): IK fix — correct constraint placement, native limits, VMD IK toggle
 - **Milestone 4** (done): Rigid body physics — functional but limited by Blender's RB solver
 - **Milestone 4b** (done): Cloth on cage tube + Surface Deform for hair/skirt/tie. Three physics modes coexist: none, rigid_body, soft_body.
-- **Milestone 5** (done): Materials & textures — two shader modes (mmd/simple), texture loading, per-face assignment
-- **Milestone 6** (next): Animation polish
+- **Milestone 5** (done): Materials & textures — two shader modes (mmd/simple), texture loading, per-face assignment, UV V-flip, overlapping face blend_method fix. Visually matches mmd_tools baseline.
+- **Milestone 6** (in progress): Animation polish — additional transforms done (grant parent, shadow bones). Remaining: VMD camera, CCD IK
+- **Milestone 7** (planned): Custom shader & creative tools — independent of MMD compatibility
 
 ## Reference repos (siblings in ../  )
 
@@ -61,6 +62,20 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
 - **MMD4B panel**: N-panel (tab "MMD4B") for soft body deformation. Select bones in Pose Mode → generate cage → play. Uses Cloth modifier (not Soft Body) because Cloth respects Armature modifier output for pinned vertices.
 - **No export**: One-way import only. No PMX/VMD/PMD export.
 - **Logging**: Use blender-agent's session log. Python `logging` to stderr for diagnostics.
+
+## API usage (inside Blender via blender-agent)
+
+```python
+# PMX import
+import bl_ext.user_default.blender_mmd.importer as importer
+arm = importer.import_pmx("/path/to/model.pmx", shader_mode="mmd")
+
+# VMD import — TWO steps: parse first, then apply to armature
+import bl_ext.user_default.blender_mmd.vmd.parser as vmd_parser
+import bl_ext.user_default.blender_mmd.vmd.importer as vmd_importer
+motion = vmd_parser.parse("/path/to/motion.vmd")
+vmd_importer.import_vmd(motion, arm)
+```
 
 ## Testing
 

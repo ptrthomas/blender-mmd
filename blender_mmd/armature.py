@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass, field
 
 import bpy
 from mathutils import Matrix, Vector
@@ -27,6 +28,14 @@ _AUTO_AXIS_SEMI = frozenset({
     "右腕捩", "右手捩", "右肩P", "右ダミー",
 })
 _AUTO_AXIS_FINGERS = ("親指", "人指", "中指", "薬指", "小指")
+
+
+@dataclass
+class _ShadowBoneSpec:
+    """Tracks a bone that needs additional transform shadow bones."""
+    bone_name: str
+    target_bone_name: str
+    constraints: list = field(default_factory=list)  # TRANSFORM constraints to update subtarget
 
 
 def _resolve_bone_name(bone: Bone) -> str:
@@ -121,6 +130,192 @@ def _set_auto_bone_roll(edit_bone: bpy.types.EditBone) -> None:
     # Effective result of mmd_tools' double .xzy cancellation:
     # align_roll with face_normal × bone_dir
     edit_bone.align_roll(face_normal.cross(bone_dir))
+
+
+def _setup_additional_transforms(
+    arm_obj: bpy.types.Object,
+    pmx_bones: list[Bone],
+    bone_names: list[str],
+) -> list[_ShadowBoneSpec]:
+    """Create TRANSFORM constraints for bones with additional transform (grant parent).
+
+    Must be called in POSE mode. Returns a list of _ShadowBoneSpec for shadow bone
+    creation in a subsequent EDIT mode pass.
+    """
+    specs: list[_ShadowBoneSpec] = []
+    num_bones = len(pmx_bones)
+
+    for i, pmx_bone in enumerate(pmx_bones):
+        if pmx_bone.additional_transform is None:
+            continue
+        if not pmx_bone.has_additional_rotation and not pmx_bone.has_additional_location:
+            continue
+
+        target_idx, factor = pmx_bone.additional_transform
+        if target_idx < 0 or target_idx >= num_bones:
+            log.warning("Additional transform: bone %d target %d out of range", i, target_idx)
+            continue
+        if target_idx == i:
+            log.warning("Additional transform: bone %d references itself", i)
+            continue
+        if factor == 0:
+            continue
+
+        bone_name = bone_names[i]
+        target_name = bone_names[target_idx]
+        pose_bone = arm_obj.pose.bones.get(bone_name)
+        if not pose_bone:
+            continue
+
+        spec = _ShadowBoneSpec(bone_name, target_name)
+
+        def _add_constraint(pb, name, map_type, value, influence):
+            c = pb.constraints.new("TRANSFORM")
+            c.name = name
+            c.use_motion_extrapolate = True
+            c.target = arm_obj
+            # subtarget set later after shadow bone decision
+            c.target_space = "LOCAL"
+            c.owner_space = "LOCAL"
+            c.map_from = map_type
+            c.map_to = map_type
+            c.map_to_x_from = "X"
+            c.map_to_y_from = "Y"
+            c.map_to_z_from = "Z"
+            if influence < 0:
+                c.from_rotation_mode = "ZYX"
+            else:
+                c.from_rotation_mode = "XYZ"
+            c.to_euler_order = "XYZ"
+            c.mix_mode_rot = "AFTER"
+            # Set from min/max
+            if map_type == "ROTATION":
+                for attr in ("from_min_x_rot", "from_min_y_rot", "from_min_z_rot"):
+                    setattr(c, attr, -value)
+                for attr in ("from_max_x_rot", "from_max_y_rot", "from_max_z_rot"):
+                    setattr(c, attr, value)
+                for attr in ("to_min_x_rot", "to_min_y_rot", "to_min_z_rot"):
+                    setattr(c, attr, -value * influence)
+                for attr in ("to_max_x_rot", "to_max_y_rot", "to_max_z_rot"):
+                    setattr(c, attr, value * influence)
+            else:  # LOCATION
+                for attr in ("from_min_x", "from_min_y", "from_min_z"):
+                    setattr(c, attr, -value)
+                for attr in ("from_max_x", "from_max_y", "from_max_z"):
+                    setattr(c, attr, value)
+                for attr in ("to_min_x", "to_min_y", "to_min_z"):
+                    setattr(c, attr, -value * influence)
+                for attr in ("to_max_x", "to_max_y", "to_max_z"):
+                    setattr(c, attr, value * influence)
+            spec.constraints.append(c)
+
+        if pmx_bone.has_additional_rotation:
+            _add_constraint(pose_bone, "mmd_additional_rotation", "ROTATION", math.pi, factor)
+        if pmx_bone.has_additional_location:
+            _add_constraint(pose_bone, "mmd_additional_location", "LOCATION", 100, factor)
+
+        specs.append(spec)
+
+    log.info("Additional transforms: %d bones with constraints", len(specs))
+    return specs
+
+
+def _create_shadow_edit_bones(
+    arm_data: bpy.types.Armature,
+    specs: list[_ShadowBoneSpec],
+) -> set[str]:
+    """Create shadow/dummy edit bones for non-aligned additional transform pairs.
+
+    Must be called in EDIT mode. Returns set of bone names that got shadow bones.
+    Well-aligned bones (dot > 0.99) skip shadow creation — their constraint subtargets
+    will point directly at the target bone.
+    """
+    edit_bones = arm_data.edit_bones
+    shadow_names: set[str] = set()
+
+    # Ensure mmd_shadow bone collection exists
+    shadow_coll = arm_data.collections.get("mmd_shadow")
+    if not shadow_coll:
+        shadow_coll = arm_data.collections.new("mmd_shadow")
+        shadow_coll.is_visible = False
+
+    for spec in specs:
+        bone = edit_bones.get(spec.bone_name)
+        target = edit_bones.get(spec.target_bone_name)
+        if not bone or not target:
+            continue
+
+        # Well-aligned optimization: skip shadow bones
+        if bone != target:
+            x_dot = bone.x_axis.dot(target.x_axis)
+            y_dot = bone.y_axis.dot(target.y_axis)
+            if x_dot > 0.99 and y_dot > 0.99:
+                continue
+
+        # Create dummy bone: parented to target, same orientation as source bone
+        dummy_name = "_dummy_" + spec.bone_name
+        dummy = edit_bones.get(dummy_name) or edit_bones.new(name=dummy_name)
+        dummy.parent = target
+        dummy.head = target.head.copy()
+        dummy.tail = dummy.head + (bone.tail - bone.head)
+        dummy.roll = bone.roll
+        dummy.use_deform = False
+        shadow_coll.assign(dummy)
+
+        # Create shadow bone: parented to target's parent, same shape as dummy
+        shadow_name = "_shadow_" + spec.bone_name
+        shadow = edit_bones.get(shadow_name) or edit_bones.new(name=shadow_name)
+        shadow.parent = target.parent
+        shadow.head = dummy.head.copy()
+        shadow.tail = dummy.tail.copy()
+        shadow.roll = bone.roll
+        shadow.use_deform = False
+        shadow_coll.assign(shadow)
+
+        shadow_names.add(spec.bone_name)
+
+    log.info("Shadow bones: %d pairs created", len(shadow_names))
+    return shadow_names
+
+
+def _finalize_shadow_constraints(
+    arm_obj: bpy.types.Object,
+    specs: list[_ShadowBoneSpec],
+    shadow_names: set[str],
+) -> None:
+    """Set constraint subtargets after shadow bones are created.
+
+    Must be called in POSE mode. For bones with shadow pairs, adds COPY_TRANSFORMS
+    on the shadow bone and points TRANSFORM constraints at the shadow. For well-aligned
+    bones, points directly at the target.
+    """
+    pose_bones = arm_obj.pose.bones
+
+    for spec in specs:
+        if spec.bone_name in shadow_names:
+            shadow_name = "_shadow_" + spec.bone_name
+            dummy_name = "_dummy_" + spec.bone_name
+
+            shadow_pb = pose_bones.get(shadow_name)
+            dummy_pb = pose_bones.get(dummy_name)
+            if not shadow_pb or not dummy_pb:
+                continue
+
+            # COPY_TRANSFORMS on shadow bone targeting dummy bone
+            c = shadow_pb.constraints.new("COPY_TRANSFORMS")
+            c.name = "mmd_at_dummy"
+            c.target = arm_obj
+            c.subtarget = dummy_name
+            c.target_space = "POSE"
+            c.owner_space = "POSE"
+
+            # Point TRANSFORM constraints at shadow bone
+            for tc in spec.constraints:
+                tc.subtarget = shadow_name
+        else:
+            # Well-aligned: point directly at target bone
+            for tc in spec.constraints:
+                tc.subtarget = spec.target_bone_name
 
 
 def create_armature(
@@ -220,7 +415,21 @@ def create_armature(
         if pmx_bone.is_ik and pmx_bone.ik_links:
             _setup_ik(arm_obj, pose_bone, pmx_bone, bone_names, ik_loop_factor)
 
+    # Additional transform (grant parent) constraints
+    shadow_specs = _setup_additional_transforms(arm_obj, pmx_bones, bone_names)
+
     bpy.ops.object.mode_set(mode="OBJECT")
+
+    # --- Edit mode pass 2: create shadow bones if needed ---
+    if shadow_specs:
+        bpy.ops.object.mode_set(mode="EDIT")
+        shadow_names = _create_shadow_edit_bones(arm_data, shadow_specs)
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+        # Finalize constraint subtargets (needs POSE mode)
+        bpy.ops.object.mode_set(mode="POSE")
+        _finalize_shadow_constraints(arm_obj, shadow_specs, shadow_names)
+        bpy.ops.object.mode_set(mode="OBJECT")
 
     log.info("Created armature '%s' with %d bones", arm_name, len(pmx_bones))
     return arm_obj

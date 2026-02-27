@@ -10,13 +10,16 @@ import bpy
 from .pmx import parse
 from .armature import create_armature
 from .mesh import create_mesh
+from .materials import create_materials
 
 log = logging.getLogger("blender_mmd")
 
 DEFAULT_SCALE = 0.08
 
 
-def import_pmx(filepath: str, scale: float = DEFAULT_SCALE) -> bpy.types.Object:
+def import_pmx(
+    filepath: str, scale: float = DEFAULT_SCALE, shader_mode: str = "mmd"
+) -> bpy.types.Object:
     """Import a PMX file into the current scene.
 
     Returns the armature object.
@@ -35,6 +38,9 @@ def import_pmx(filepath: str, scale: float = DEFAULT_SCALE) -> bpy.types.Object:
 
     # Build mesh
     mesh_obj = create_mesh(model, armature_obj, scale)
+
+    # Create materials and assign to faces
+    create_materials(model, mesh_obj, filepath, shader_mode=shader_mode)
 
     # Store filepath for deferred physics build
     armature_obj["pmx_filepath"] = filepath

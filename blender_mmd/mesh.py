@@ -90,12 +90,14 @@ def create_mesh(
                 )
 
     # --- UV coordinates ---
+    # PMX uses DirectX convention (V=0 at top), Blender uses OpenGL (V=0 at bottom)
     uv_layer = mesh_data.uv_layers.new(name="UV")
     for face in mesh_data.polygons:
         for li in face.loop_indices:
             loop = mesh_data.loops[li]
             vi = loop.vertex_index
-            uv_layer.data[li].uv = pmx_verts[vi].uv
+            u, v = pmx_verts[vi].uv
+            uv_layer.data[li].uv = (u, 1.0 - v)
 
     # Additional UV layers
     for uv_idx in range(model.header.additional_uv_count):
@@ -106,7 +108,7 @@ def create_mesh(
                 vi = loop.vertex_index
                 if uv_idx < len(pmx_verts[vi].additional_uvs):
                     auv = pmx_verts[vi].additional_uvs[uv_idx]
-                    extra_uv.data[li].uv = (auv[0], auv[1])
+                    extra_uv.data[li].uv = (auv[0], 1.0 - auv[1])
 
     # --- Custom split normals ---
     normals = [pmx_verts[v.vertex_index].normal for v in mesh_data.loops]

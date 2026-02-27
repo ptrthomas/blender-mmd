@@ -59,8 +59,9 @@ blender-mmd/
 │   ├── physics.py            # Rigid body and joint setup (mode routing, metadata)
 │   ├── chains.py             # Chain detection from RB/joint topology (pure Python)
 │   ├── cloth.py              # Cloth conversion for physics chains
-│   ├── armature.py           # Bone creation, IK setup, limit conversion
+│   ├── armature.py           # Bone creation, IK setup, additional transforms, shadow bones
 │   ├── mesh.py               # Mesh creation and vertex weights
+│   ├── materials.py          # Material/shader creation, texture loading
 │   ├── operators.py          # Thin Blender operator layer
 │   ├── panels.py             # MMD4B N-panel for cloth conversion
 │   ├── helpers.py            # Introspection and query helpers for Claude
@@ -302,9 +303,38 @@ Uses **Blender's native IK solver** with correct constraint placement:
 
 CCD IK solver is a future enhancement for VMD motion fidelity.
 
+### Additional transform (grant parent / 付与親)
+
+Bones can inherit rotation and/or location from another bone, scaled by a factor. This powers D bones (leg deformation doubles), shoulder cancel, arm twist, and eye tracking. Without it, VMD animation shows visibly wrong legs/arms because keyframes assume the constraint system is in place.
+
+**Approach**: TRANSFORM constraints + shadow bones (matching mmd_tools):
+
+- **TRANSFORM constraint** (not COPY_ROTATION) — avoids ±180° euler discontinuities
+- Constraint settings: `use_motion_extrapolate=True`, `target_space=LOCAL`, `owner_space=LOCAL`, `map_to_x/y/z_from=X/Y/Z`, `to_euler_order=XYZ`, `mix_mode_rot=AFTER`
+- Rotation: `from_min/max = ±π`, `to_min/max = ±π×factor`
+- Location: `from_min/max = ±100`, `to_min/max = ±100×factor`
+- **Negative factor** (cancel bones like 肩C, 腰キャンセル, 目戻): `from_rotation_mode=ZYX` produces correct inverse rotation via ZYX→XYZ euler inversion
+- **Positive factor**: `from_rotation_mode=XYZ`
+
+**Shadow bones** for non-aligned bone pairs:
+- `_dummy_<name>`: parent=target, head=target.head, tail offset=bone.tail-bone.head, roll=bone.roll
+- `_shadow_<name>`: parent=target.parent, same head/tail/roll as dummy
+- COPY_TRANSFORMS on shadow targeting dummy (POSE space)
+- Both hidden in `mmd_shadow` bone collection, `use_deform=False`
+- **Well-aligned optimization**: if `bone.x_axis·target.x_axis > 0.99` AND `bone.y_axis·target.y_axis > 0.99`, skip shadow bones — constraint points directly at target
+
+**Implementation** (in `armature.py`):
+- `_setup_additional_transforms()`: Creates TRANSFORM constraints in POSE mode, returns `_ShadowBoneSpec` list
+- `_create_shadow_edit_bones()`: Creates dummy/shadow pairs in EDIT mode (second pass)
+- `_finalize_shadow_constraints()`: Wires up COPY_TRANSFORMS and subtargets in POSE mode
+- Chain dependencies (A→B→C) handled automatically by Blender's depsgraph
+- Validation: skip self-reference, out-of-range targets, zero factor
+
+**Results** (YYB Miku, 461 bones): 64 rotation + 46 location = 110 TRANSFORM constraints, 53 shadow bone pairs, 6 negative-factor cancel bones, 57 well-aligned optimizations.
+
 ### Transform order
 
-Ignored for milestone 1. Blender's dependency graph handles evaluation order based on constraint dependencies. When additional transforms are implemented, transform_order will be used to set up correct constraint evaluation.
+Blender's dependency graph handles evaluation order based on constraint dependencies. The additional transform constraints create implicit dependency chains that the depsgraph resolves automatically.
 
 ### SDEF
 
@@ -799,9 +829,9 @@ Systematic audit of rigid body build pattern against mmd_tools. Fixes applied to
 
 ### MMD4B — Soft Body Deformation Panel
 
-**Previous approach (cloth sim) abandoned.** Cloth simulation was tested for hair/tie/skirt deformation but proved fundamentally unstable — Blender's cloth solver cannot produce stiff-enough behaviour for hair strands regardless of parameter tuning (even at max stiffness 10000). The ribbon-mesh + bone-binding (STRETCH_TO/DAMPED_TRACK) approach also caused stretching or rotation artifacts.
+**Previous approach (cloth on ribbon mesh) abandoned.** Cloth simulation on thin ribbon meshes was tested for hair/tie/skirt deformation but proved fundamentally unstable — ribbon geometry gives the solver too little to work with, and STRETCH_TO/DAMPED_TRACK bone binding caused stretching/rotation artifacts.
 
-**New approach: Soft Body cage + Surface Deform.** A hidden low-poly cage mesh gets Soft Body physics. The visible mesh inherits deformation via Surface Deform. This is stable, predictable, and supports both stiff (hair) and flowing (skirt) behaviour.
+**Current approach: Cloth on cage tube + Surface Deform.** A hidden low-poly cage tube (8-sided, following the bone chain centerline) gets a Cloth modifier. The visible mesh inherits deformation via Surface Deform. The cage provides enough geometry for stable cloth simulation. Cloth is used instead of Soft Body because Cloth respects Armature modifier output for pinned vertices (Soft Body only anchors to rest shape).
 
 **Coexists with rigid_body mode.** Rigid body provides collision surfaces (body parts). Soft body cages collide against them. Both can be active simultaneously on the same armature.
 
@@ -827,16 +857,14 @@ Given selected bones and the mesh they deform:
 
 1. **Find affected vertices:** For each selected bone, collect mesh vertices with non-zero weight in that bone's vertex group. Union of all = the region to enclose.
 2. **Cage axis from bones:** The bone chain head→tail positions define the cage centerline. No PCA needed.
-3. **Tube generation:** Build a tube (hexagonal cross-section, 6 sides) following the bone chain centerline. Radius = max perpendicular distance from any affected vertex to the centerline, plus margin. One ring of vertices per bone joint.
-4. **Internal trusses:** If cross-sectional area exceeds a threshold, add internal cross-bracing faces to preserve the round cross-section under deformation.
-5. **Auto-pinning:** Top ring (at root bone head) gets `goal` vertex group at weight 1.0. An Armature modifier + pin bone vertex group makes pinned verts follow the parent bone.
+3. **Tube generation:** Build a tube (octagonal cross-section, 8 sides) following the bone chain centerline with **gradient density** — more rings near the pinned root (stability), fewer toward the free tip (freedom). `subdivs_base=3` inserts extra rings per segment: root segments get 3 extra, tip segments get 1. Example for 6-bone chain: `[3,3,2,2,1,1]` extra rings → 19 total rings (vs. 7 without subdivision). Positions and radii interpolated linearly between bone joints. Per-ring radius = max perpendicular distance from affected vertices to centerline, plus 15% margin.
+4. **Triangulation:** Tube quads are triangulated (curved tube produces non-planar quads that prevent Surface Deform binding). Normals recalculated. End caps close the mesh.
+5. **Gradient pinning:** First 3 rings get goal weights `[1.0, 0.8, 0.5]` for smooth transition from pinned to free. An Armature modifier + pin bone vertex group makes pinned verts follow the parent bone.
 6. **Affected vertex group:** Create a vertex group on the mesh containing only the affected vertices. Surface Deform uses this to limit its influence.
 
-#### Pinning — binary, no vertex painting
+#### Pinning — gradient auto-pin, manual override
 
-Pins are binary: a vertex is either pinned (goal=1.0) or free (goal=0.0). No gradient weights, no vertex painting.
-
-**Auto-pin:** Cage generator pins the top ring (nearest to parent bone). This covers most cases.
+**Auto-pin:** Cage generator applies gradient weights to the first 3 rings: `[1.0, 0.8, 0.5]`. Ring 0 (at root bone head) is fully pinned, rings 1–2 provide smooth transition, remaining rings are free (0.0). This prevents hard cutoff artifacts at the pin boundary.
 
 **Manual pin/unpin:** In Edit Mode on the cage, user selects vertices and clicks Pin/Unpin in the MMD4B panel. This adds/removes them from the `goal` vertex group. Use cases:
 - Pin extra vertices where hair meets the head to prevent separation
@@ -847,29 +875,28 @@ The panel shows pin count and highlights pinned verts (e.g. via display overlay 
 
 #### Stiffness — one slider + mesh density
 
-**UI slider: "Stiffness" (0.0–1.0).** Maps to Soft Body edge spring settings:
-- `pull` = 0.1 + stiffness × 0.89 (tension: 0.1–0.99)
-- `push` = 0.1 + stiffness × 0.89 (compression: 0.1–0.99)
-- `bend` = stiffness × 10.0 (bending resistance: 0–10)
-- `damping` = 5.0 + stiffness × 45.0 (oscillation damping: 5–50)
+**UI slider: "Stiffness" (0.0–1.0, default 0.7).** Maps to Cloth modifier parameters:
+- `tension_stiffness` / `compression_stiffness`: `5 + stiffness × 45` (range 5–50)
+- `bending_stiffness`: `0.1 + stiffness × 4.9` (range 0.1–5)
+- `tension_damping` / `compression_damping`: `2 + stiffness × 13` (range 2–15)
+- `bending_damping`: 0.5 (fixed)
+- `quality`: 10, `mass`: 0.3
 
-**Mesh density as stiffness control:** More vertices in the cage = more edge springs = inherently stiffer structure. The user can add loop cuts to the cage in Edit Mode. This is more intuitive than parameter tuning — "make it denser where you want it stiffer."
+At default stiffness 0.7: tension=36.5, bending=3.5, damping=11.1. These are intentionally soft — the gradient-density cage provides structural stiffness via geometry (more rings near root = more springs = stiffer).
+
+**Mesh density as stiffness control:** More vertices in the cage = more cloth springs = inherently stiffer structure. The gradient subdivision already provides this near the root. The user can add loop cuts to the cage in Edit Mode for localized stiffening.
 
 **No vertex painting.** Stiffness is uniform across the cage (set by the slider). Spatial stiffness variation comes from mesh density instead.
 
-#### Soft Body settings (derived from stiffness slider)
+#### Cloth settings (derived from stiffness slider)
 
-- `use_goal`: True
-- `vertex_group_goal`: "goal"
-- `goal_default`: 0.0 (free vertices get no goal pull)
-- `goal_spring`: 0.5 + stiffness × 0.499 (how quickly pinned verts follow bone)
-- `goal_friction`: 5.0 + stiffness × 45.0 (damping on goal springs)
-- `use_edges`: True
-- `pull`, `push`, `bend`, `damping`: see stiffness mapping above
-- `use_self_collision`: False (internal trusses handle shape preservation)
-- `mass`: 0.3 (fixed, reasonable default)
-- `gravity`: 9.8 (Blender default)
-- `speed`: 1.0
+- Pin group: `vertex_group_mass = "goal"` (weight 1.0 = fully pinned, 0.0 = free)
+- Structural: tension/compression stiffness and damping from slider
+- Bending: stiffness and damping from slider
+- Quality: 10 substeps
+- Mass: 0.3 (fixed)
+- Point cache: frame_end extended to 10000 (or scene end, whichever is larger)
+- Collision: optional, enabled if collision_obj provided
 
 #### Surface Deform binding
 
@@ -900,44 +927,51 @@ The visible mesh gets a Surface Deform modifier targeting the cage:
 #### Blender API reference (tested in 5.0.1)
 
 ```python
-# Soft Body modifier
-sb_mod = cage_obj.modifiers.new("Softbody", "SOFT_BODY")
-sb = sb_mod.settings
-sb.use_goal = True
-sb.vertex_group_goal = "goal"
-sb.goal_default = 0.0      # free verts
-sb.goal_spring = 0.8       # pin tracking speed
-sb.goal_friction = 10.0    # pin damping
-sb.use_edges = True
-sb.pull = 0.9              # structural tension
-sb.push = 0.9              # structural compression
-sb.bend = 5.0              # bending resistance (0-10)
-sb.damping = 10.0          # edge spring damping
-sb.mass = 0.3
+# Modifier stack on cage: Armature (first) → Cloth (second)
+# Armature must be first so pinned verts follow bone before Cloth evaluates.
+arm_mod = cage_obj.modifiers.new("Armature", "ARMATURE")
+arm_mod.object = armature_obj
+arm_mod.use_vertex_groups = True
+
+# Cloth modifier
+cloth_mod = cage_obj.modifiers.new("Cloth", "CLOTH")
+cs = cloth_mod.settings
+cs.vertex_group_mass = "goal"       # pin group (weight 1.0=pinned, 0.0=free)
+cs.tension_stiffness = 36.5         # structural tension
+cs.compression_stiffness = 36.5     # structural compression
+cs.bending_stiffness = 3.5          # bending resistance
+cs.tension_damping = 11.1           # tension damping
+cs.compression_damping = 11.1       # compression damping
+cs.bending_damping = 0.5            # bending damping
+cs.quality = 10
+cs.mass = 0.3
 
 # Surface Deform modifier (on visible mesh)
 sd_mod = target_mesh.modifiers.new("SurfaceDeform", "SURFACE_DEFORM")
 sd_mod.target = cage_obj
-# Bind: requires context override with target_mesh as active object
-with bpy.context.temp_override(active_object=target_mesh):
-    bpy.ops.object.surfacedeform_bind(modifier="SurfaceDeform")
+sd_mod.vertex_group = "sb_affected_<cage_name>"  # limits binding to affected verts
+with bpy.context.temp_override(object=target_mesh, active_object=target_mesh):
+    bpy.ops.object.surfacedeform_bind(modifier=sd_mod.name)
 
-# Goal vertex group (binary pinning)
+# Goal vertex group (gradient pinning)
 goal_vg = cage_obj.vertex_groups.new(name="goal")
-goal_vg.add(pin_vertex_indices, 1.0, "REPLACE")
+_PIN_WEIGHTS = [1.0, 0.8, 0.5]  # first 3 rings, rest = 0.0
+for ring_idx, weight in enumerate(_PIN_WEIGHTS):
+    indices = range(ring_idx * 8, (ring_idx + 1) * 8)  # 8 sides per ring
+    goal_vg.add(list(indices), weight, "REPLACE")
 
-# IMPORTANT: Soft body requires sequential frame evaluation.
-# Jumping frames produces wrong results. Always evaluate from frame_start.
+# IMPORTANT: Cloth requires sequential frame evaluation for correct simulation.
+# Jumping frames or scrubbing produces wrong results. Play forward from frame_start.
 ```
 
-#### Advantages over cloth approach
+#### Advantages over ribbon-mesh cloth approach
 
-- **Stability:** Soft body solver is inherently stable for semi-rigid shapes
+- **Stability:** Cage tube provides enough geometry for stable cloth simulation (ribbon meshes were too thin)
 - **No stretching:** Surface Deform preserves mesh topology perfectly
-- **Cross-section preservation:** Internal trusses prevent collapse without self-collision
+- **Gradient density:** More rings near root = stiffer attachment, fewer at tip = natural sway
 - **Intuitive control:** One stiffness slider + mesh density. No vertex painting.
-- **Predictable pinning:** Binary pin/unpin on vertices. No weight gradients.
-- **No bone binding:** Deformation is mesh-to-mesh, eliminating constraint artifacts
+- **Gradient pinning:** Smooth weight transition `[1.0, 0.8, 0.5, 0.0...]` prevents hard cutoff artifacts
+- **No bone binding:** Deformation is mesh-to-mesh, eliminating STRETCH_TO/DAMPED_TRACK artifacts
 - **Editable:** User can modify cage geometry in Edit Mode for fine control
 - **Coexists with rigid body:** Cage collides against rigid body collision surfaces
 
@@ -965,20 +999,120 @@ Single chain cage (tube along one bone chain) is Phase 1. Group mode handles par
 - Pin extra vertices at waistband or belt line
 - All the same pin/unpin/rebind workflow as single chain
 
-### Milestone 5: Materials & Textures
+### Milestone 5: Materials & Textures ✅
+
+**Status:** Done — visually matches mmd_tools baseline
 
 **Deliverables:**
-- Material creation from PMX data
-- Texture loading (diffuse, sphere, toon)
-- Basic EEVEE material setup
-- Per-material mesh split operation (for outline support)
+- Material creation from PMX data with two shader modes
+- `"mmd"` (default): Full MMDShaderDev node group — toon, sphere, specular, backface culling, alpha chains
+- `"simple"`: TransEmission node group — clean Diffuse+Emission+Transparency
+- Texture loading (diffuse, sphere, toon) with dedup by path
+- Shared toon texture support (toon01.bmp–toon10.bmp)
+- Sphere texture modes: multiply (sRGB), add (Linear), subtex (UV1)
+- Per-face material assignment via `foreach_set`
+- MMDTexUV node group for UV/sphere coordinate generation
+- `shader_mode` parameter on PMX import operator
+- UV V-flip (`V = 1.0 - V`) for PMX DirectX→Blender OpenGL convention
+- Overlapping face detection: overlay materials (eye highlights, layers) auto-set to `blend_method="BLEND"` with `show_transparent_back=False` to prevent z-fighting
+- Texture Fac defaults match mmd_tools: always 1.0 (multiply by white = identity when no texture loaded)
+- Sphere Mul/Add and default color set from PMX `sphere_mode`, independent of texture file existence
+
+**Not yet done (optimization):**
+- `foreach_set` for UV assignment (currently per-loop Python iteration — slow on large models)
+- Degenerate face cleanup (mmd_tools removes 2 faces on this model; we keep all)
+- Sharp edge detection from normals (mmd_tools marks sharp edges at angle threshold)
+
+**Deferred to future milestones:**
+- Edge/outline (solidify + edge materials)
+- Material morphs (VMD keyframes driving material properties)
+- Shader-swap UI panel (switch between mmd/simple after import)
+- Per-material mesh split (needed for selective outline rendering)
+- Custom simplified shader (see Milestone 7)
 
 ### Milestone 6: Animation Polish
 
-**Deliverables:**
+**Status:** In progress
+
+**Done:**
+- Additional transform (grant parent / 付与親) — TRANSFORM constraints + shadow bones for D bones, shoulder cancel, arm twist, eye tracking
+
+**Remaining:**
 - VMD camera motion import
 - CCD IK solver (matching MMD output more closely)
 - Keyframe management helpers
+
+### Milestone 7: Custom Shader & Creative Tools (planned)
+
+Now that we're independent of mmd_tools and have a solid import pipeline, we can start doing more creative things beyond MMD compatibility.
+
+**Custom simplified shader:**
+- A clean, modern shader that looks good in EEVEE and Cycles without the MMD-specific toon/sphere pipeline
+- Goal: "anime-style but production-ready" — good for rendering, compositing, and creative projects
+- Not bound by MMD's material model — can use Principled BSDF, custom node groups, or procedural approaches
+- Switchable post-import (alongside existing mmd/simple modes)
+
+**Edge/outline rendering:**
+- Solidify modifier + inverted-normals material for anime outlines
+- Per-material control (some materials need outlines, others don't)
+- May require per-material mesh split for selective application
+
+**Material morphs:**
+- VMD material keyframes → Blender material property drivers/keyframes
+- Covers effects like: glow, transparency fade, color shift, toon changes
+- Needs careful mapping of MMD material morph operations (add/multiply) to Blender node inputs
+
+### Future Roadmap
+
+Features beyond the current milestone plan. Ordered roughly by impact/feasibility.
+
+#### SDEF — Spherical Deformation (volume preservation)
+
+PMX supports SDEF bone weighting as an alternative to standard linear blend skinning (LBS). SDEF preserves volume at joints — prevents the "candy wrapper" collapse at elbows and knees that LBS causes when bones rotate significantly.
+
+**How it works in MMD:** Each SDEF vertex stores three extra parameters: C (center point), R0, and R1 (reference positions for each bone). Instead of linearly blending the two bone transforms, SDEF spherically interpolates rotations around C, keeping the mesh surface on a sphere and preventing volume loss.
+
+**Current state:** Our parser reads and stores SDEF data (`BoneWeightSDEF` with `center`, `r0`, `r1` fields). Weight assignment uses the same BDEF2 logic (linear blend). The spherical correction is not applied.
+
+**Implementation options:**
+1. **Geometry Nodes** (most Blender-native, Blender 5.0+ has Geometry Attribute Constraint): Compute corrective offsets per-vertex based on bone rotations and SDEF parameters. Would run as a modifier after Armature.
+2. **Shape key driver** approach: Pre-compute corrective shape keys for key rotation angles, blend via drivers. Approximation but fast.
+3. **Corrective Smooth modifier** (quick approximation): Already available, preserves volume but not SDEF-accurate. Could be a "good enough" interim solution.
+
+**Impact:** High for character animation quality. Noticeable on elbows, knees, shoulders. Most visible in close-up renders and extreme poses.
+
+#### Performance & Mesh Optimizations
+
+- **UV foreach_set:** Replace per-loop UV assignment with flat-array `foreach_set` (same pattern as material_index assignment). Significant speedup on 100k+ vertex models.
+- **Degenerate face cleanup:** Remove zero-area faces during import (matching mmd_tools). Prevents rendering artifacts and reduces poly count.
+- **Sharp edge marking:** Detect edge angles from custom normals and mark sharp edges (mmd_tools does this at 179° threshold). Affects auto-smooth and edge split behavior.
+- **Parallel texture loading:** Load textures in batch rather than one-at-a-time during material setup.
+- **Decimate / face reduction:** Many MMD models are over-tessellated (100k+ faces where 30k would suffice). Post-import decimate pass or operator that intelligently reduces face count while preserving UV seams, shape keys, and material boundaries. Could use Blender's Decimate modifier with smart settings, or a custom approach that respects MMD-specific topology (face layers, edge loops at material boundaries).
+
+#### VMD Camera Motion
+
+Import VMD camera keyframes (position, rotation, FOV, distance) as Blender camera animation. VMD camera data is already parsed; just needs the Blender camera creation and F-curve setup.
+
+#### Bone Morphs / Group Morphs
+
+VMD can keyframe bone morphs (pose presets like "T-pose", "fist") and group morphs (combinations). Currently parsed but not applied. Needs driver or action-based implementation.
+
+#### UV Morphs
+
+PMX UV morphs offset UV coordinates per-vertex. Need shape key UV layers or a Geometry Nodes approach since Blender shape keys only affect vertex positions, not UVs.
+
+#### CCD IK Solver
+
+MMD uses CCD (Cyclic Coordinate Descent) IK which converges differently than Blender's built-in IK. A custom CCD solver (evaluated per-frame via driver or handler) would match MMD motion more precisely. High complexity, moderate impact (current IK is "close enough" for most motions).
+
+#### Retargeting Tools
+
+Since we understand MMD bone rolls and local axes, we could build tools to retarget between:
+- MMD models (different bone structures)
+- MMD ↔ standard rigs (Mixamo, Rigify)
+- Motion capture data → MMD armature
+
+This is where correct bone roll really pays off — the roll defines what "rotate arm 45° around X" means physically.
 
 ---
 
