@@ -1,9 +1,9 @@
 """Unit tests for MMD → Blender coordinate conversion.
 
-MMD: left-handed Y-up (X-right, Y-up, Z-forward/towards camera)
-Blender: right-handed Z-up (X-right, Y-forward/into screen, Z-up)
+MMD: left-handed Y-up (X-right, Y-up, Z-forward)
+Blender: right-handed Z-up (X-right, Y-forward, Z-up)
 
-Conversion: (x, y, z) → (x, -z, y)
+Conversion: (x, y, z) → (x, z, y)  [swap Y↔Z]
 """
 
 from __future__ import annotations
@@ -22,15 +22,15 @@ class TestPositionConversion:
         # MMD Y (up) → Blender Z (up)
         assert _pos(0, 1.0, 0) == (0, 0, 1.0)
 
-    def test_z_becomes_negative_y(self):
-        # MMD Z (towards camera) → Blender -Y (towards camera)
-        assert _pos(0, 0, 1.0) == (0, -1.0, 0)
+    def test_z_becomes_y(self):
+        # MMD Z → Blender Y
+        assert _pos(0, 0, 1.0) == (0, 1.0, 0)
 
     def test_full_vector(self):
-        assert _pos(1.0, 2.0, 3.0) == (1.0, -3.0, 2.0)
+        assert _pos(1.0, 2.0, 3.0) == (1.0, 3.0, 2.0)
 
     def test_negative_values(self):
-        assert _pos(-1.0, -2.0, -3.0) == (-1.0, 3.0, -2.0)
+        assert _pos(-1.0, -2.0, -3.0) == (-1.0, -3.0, -2.0)
 
     def test_model_center_above_origin(self):
         """MMD center bone at Y=8 should be at Blender Z=8 (above origin)."""
@@ -43,7 +43,7 @@ class TestRotationConversion:
         assert _rot(0, 0, 0) == (0, 0, 0)
 
     def test_full_vector(self):
-        assert _rot(1.0, 2.0, 3.0) == (1.0, -3.0, 2.0)
+        assert _rot(1.0, 2.0, 3.0) == (1.0, 3.0, 2.0)
 
     def test_same_as_position(self):
         """Rotation uses same axis remapping as position."""

@@ -157,11 +157,14 @@ The PMX file is a sequential binary format. Key details for the parser:
 
 ### Coordinate conversion
 
-**At parse time.** The parser outputs all positions, normals, and rotations in Blender's coordinate system (Z-up, right-handed). The conversion from MMD's Y-up system happens inside the parser:
+**At parse time.** The parser outputs all positions, normals, and rotations in Blender's coordinate system (Z-up, right-handed). The conversion from MMD's Y-up left-handed system happens inside the parser:
 
-- Positions: `(x, -z, y)` — MMD Y-up → Blender Z-up, MMD Z-forward → Blender -Y
-- Rotations: `(x, -z, y)` — same axis remapping as positions
+- Positions: `(x, z, y)` — swap Y↔Z. MMD Y-up → Blender Z-up. This is a reflection (det=-1), which changes handedness.
+- Rotations: `(x, z, y)` — same axis remapping as positions
 - Normals: same conversion as positions
+- Face winding: reversed `(f3, f2, f1)` in parser to correct for handedness change
+
+**Why Y↔Z swap, not `(x, -z, y)`**: The negated-Z formula `(x, -z, y)` has det=+1 (a rotation, preserves handedness), which points the model 180° the wrong direction. The simple swap `(x, z, y)` has det=-1 (a reflection), correctly changing from left-handed to right-handed. This matches mmd_tools' `.xzy` swizzle.
 
 Downstream code never deals with MMD coordinates.
 
@@ -256,6 +259,23 @@ PMX bones have a `displayConnection` field whose meaning depends on a flag bit:
 - **Flag bit unset → position offset**: The bone's tail is at `head + offset`. If the offset is zero (tail == head), use a minimum-length offset along the bone's local Y axis to prevent Blender from deleting the zero-length bone.
 
 The minimum length offset should be small (e.g. 0.001 in Blender units) — just enough to keep the bone alive.
+
+### Bone roll / local axes
+
+**Critical for VMD motion import.** Bone roll determines the bone's local coordinate frame (`matrix_local`), which the per-bone VMD converter uses. Without correct roll, VMD keyframes produce visually wrong poses even though the math is correct.
+
+MMD bones have specific local axis orientations defined in two ways:
+
+1. **Explicit local axes** (`localCoordinate` in PMX, flag bit 0x0800): The PMX bone stores X-axis and Z-axis vectors. Only ~14 bones in a typical model use this (thumbs, fingertips).
+
+2. **Auto-computed axes** for arm/finger bones: Shoulder, arm, elbow, wrist, and finger bones get their local axes computed geometrically from head/tail positions in the XZ plane. This covers ~50+ bones.
+
+**Why this matters for retargeting**: Standard Blender rig animation (Mixamo, Rigify, motion capture) fails on MMD armatures because the bone rolls don't match. A "rotate arm 45° around X" keyframe means different physical rotations when the bone's local X-axis points in different directions. This is why direct animation mapping between standard rigs and MMD models produces broken poses.
+
+**Implementation** (in `armature.py`):
+- `_set_bone_roll_from_axes()`: Sets roll from PMX local axis data using `EditBone.align_roll()`
+- `_set_auto_bone_roll()`: Geometrically computes axes for arm/finger bones, matching mmd_tools' `FnBone.update_auto_bone_roll()`
+- Applied after setting bone tails, before leaving edit mode
 
 ### IK setup
 
@@ -470,12 +490,18 @@ blender_mmd.import_vmd
 
 Parameters:
 - `filepath`: Path to .vmd file
-- `scale`: Scale factor (default: 0.08, must match import scale)
+- Scale auto-detected from armature's `import_scale` custom property
 
 Behavior:
-1. Parse VMD file (bone keyframes, camera, morph keys)
-2. Apply bone keyframes to the active armature
-3. Log summary of applied keyframes
+1. Parse VMD file (bone keyframes, morph keyframes)
+2. Find the target armature (active selection or auto-detect)
+3. Build Japanese→English bone name lookup from `mmd_name_j` custom properties
+4. Apply bone keyframes via per-bone coordinate converter (`_BoneConverter`)
+5. Apply morph keyframes to shape key F-curves via `mmd_morph_map`
+6. Apply VMD Bézier interpolation handles to F-curves
+7. Log summary of matched/unmatched bones and morphs
+
+**Per-bone VMD conversion**: VMD keyframes are in bone-local space. The `_BoneConverter` class constructs a conversion matrix from `bone.matrix_local` (with Y↔Z row swap + transpose) and converts each keyframe via matrix conjugation: `q_mat @ q_vmd @ q_mat.conjugated()`. This depends on correct bone roll (see above).
 
 ---
 

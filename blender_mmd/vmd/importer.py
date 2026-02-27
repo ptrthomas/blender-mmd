@@ -1,0 +1,401 @@
+"""Apply parsed VMD motion data to a Blender armature and its mesh.
+
+Handles:
+- Bone keyframes → pose bone location/rotation F-curves
+- Morph keyframes → shape key value F-curves
+- Per-bone coordinate conversion from MMD (Y-up left-handed) to Blender (Z-up right-handed)
+- Japanese → English bone name matching via mmd_name_j custom properties
+- Morph name matching via mmd_morph_map JSON property on mesh object
+- VMD Bézier interpolation → Blender F-curve Bézier handles
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from collections import defaultdict
+
+import bpy
+from mathutils import Matrix, Quaternion, Vector
+
+from .types import BoneKeyframe, MorphKeyframe, VmdMotion
+
+log = logging.getLogger("blender_mmd")
+
+
+def import_vmd(
+    vmd: VmdMotion,
+    armature_obj: bpy.types.Object,
+    scale: float = 0.08,
+) -> None:
+    """Apply VMD motion to an armature and its child mesh.
+
+    The armature must have been imported with bmmd (bones have ``mmd_name_j``
+    custom properties).  The child mesh must have an ``mmd_morph_map`` custom
+    property (JSON dict mapping Japanese morph names to shape key names).
+    """
+    # Build Japanese name → Blender bone name lookup
+    jp_to_bone = _build_bone_lookup(armature_obj)
+
+    # Group bone keyframes by bone name
+    bone_groups: dict[str, list[BoneKeyframe]] = defaultdict(list)
+    for kf in vmd.bone_keyframes:
+        bone_groups[kf.bone_name].append(kf)
+
+    # Sort each group by frame
+    for group in bone_groups.values():
+        group.sort(key=lambda kf: kf.frame)
+
+    # Create bone action
+    bone_action = bpy.data.actions.new(f"{armature_obj.name}_VMD")
+    if armature_obj.animation_data is None:
+        armature_obj.animation_data_create()
+    armature_obj.animation_data.action = bone_action
+
+    # Set all pose bones to quaternion rotation mode
+    for pb in armature_obj.pose.bones:
+        pb.rotation_mode = "QUATERNION"
+
+    # Apply bone keyframes
+    matched_bones = 0
+    unmatched_bones: list[str] = []
+
+    for jp_name, keyframes in bone_groups.items():
+        blender_name = jp_to_bone.get(jp_name)
+        if blender_name is None:
+            unmatched_bones.append(jp_name)
+            continue
+
+        pose_bone = armature_obj.pose.bones.get(blender_name)
+        if pose_bone is None:
+            unmatched_bones.append(jp_name)
+            continue
+
+        matched_bones += 1
+        _apply_bone_keyframes(
+            bone_action, armature_obj, pose_bone, keyframes, scale,
+        )
+
+    if unmatched_bones:
+        log.warning(
+            "VMD: %d bone names unmatched: %s",
+            len(unmatched_bones),
+            ", ".join(unmatched_bones[:10])
+            + ("..." if len(unmatched_bones) > 10 else ""),
+        )
+
+    # Apply morph keyframes to shape keys
+    morph_count = 0
+    if vmd.morph_keyframes:
+        morph_count = _apply_morph_keyframes(vmd.morph_keyframes, armature_obj)
+
+    log.info(
+        "VMD applied: %d/%d bones matched, %d morph channels, %d total bone keyframes",
+        matched_bones,
+        len(bone_groups),
+        morph_count,
+        len(vmd.bone_keyframes),
+    )
+
+
+def _build_bone_lookup(armature_obj: bpy.types.Object) -> dict[str, str]:
+    """Build a mapping from Japanese bone name → Blender bone name.
+
+    Reads ``mmd_name_j`` custom property from each bone in the armature.
+    """
+    jp_to_bone: dict[str, str] = {}
+    for bone in armature_obj.data.bones:
+        jp_name = bone.get("mmd_name_j")
+        if jp_name:
+            jp_to_bone[jp_name] = bone.name
+    return jp_to_bone
+
+
+class _BoneConverter:
+    """Per-bone coordinate converter from MMD bone-local space to Blender bone-local space.
+
+    VMD keyframes are in bone-local space.  Because the coordinate conversion
+    (Y↔Z swap) changes each bone's local axes differently depending on the
+    bone's rest pose orientation, we need a per-bone conversion matrix.
+
+    This matches the approach used by mmd_tools (BoneConverter class).
+    """
+
+    __slots__ = ("_mat", "_scale")
+
+    def __init__(self, pose_bone: bpy.types.PoseBone, scale: float) -> None:
+        # Get bone's rest pose matrix (bone-local → armature space)
+        mat = pose_bone.bone.matrix_local.to_3x3()
+        # Swap Y and Z rows to account for MMD↔Blender coordinate change
+        mat[1], mat[2] = mat[2].copy(), mat[1].copy()
+        # Transpose to get the inverse rotation (armature → adjusted bone-local)
+        self._mat = mat.transposed()
+        self._scale = scale
+
+    def convert_location(self, loc: tuple[float, float, float]) -> Vector:
+        """Convert VMD bone-local location to Blender bone-local location."""
+        return self._mat @ Vector(loc) * self._scale
+
+    def convert_rotation(self, rot: tuple[float, float, float, float]) -> Quaternion:
+        """Convert VMD bone-local quaternion to Blender bone-local quaternion.
+
+        VMD stores quaternion as (x, y, z, w).
+        The matrix conjugation handles both the axis remapping and handedness.
+        """
+        qx, qy, qz, qw = rot
+        q_mmd = Quaternion((qw, qx, qy, qz))
+        q_mat = self._mat.to_quaternion()
+        return (q_mat @ q_mmd @ q_mat.conjugated()).normalized()
+
+
+def _apply_bone_keyframes(
+    action: bpy.types.Action,
+    armature_obj: bpy.types.Object,
+    pose_bone: bpy.types.PoseBone,
+    keyframes: list[BoneKeyframe],
+    scale: float,
+) -> None:
+    """Create F-curves for a single bone's keyframes."""
+    bone_name = pose_bone.name
+    loc_path = f'pose.bones["{bone_name}"].location'
+    rot_path = f'pose.bones["{bone_name}"].rotation_quaternion'
+
+    # Create F-curves: 3 for location, 4 for rotation quaternion
+    loc_fcs = [
+        action.fcurve_ensure_for_datablock(
+            armature_obj, loc_path, index=i, group_name=bone_name
+        )
+        for i in range(3)
+    ]
+    rot_fcs = [
+        action.fcurve_ensure_for_datablock(
+            armature_obj, rot_path, index=i, group_name=bone_name
+        )
+        for i in range(4)
+    ]
+
+    n = len(keyframes)
+
+    # Pre-allocate keyframe points
+    for fc in loc_fcs + rot_fcs:
+        fc.keyframe_points.add(n)
+
+    # Build per-bone converter
+    converter = _BoneConverter(pose_bone, scale)
+
+    # Fill keyframe data
+    for ki, kf in enumerate(keyframes):
+        loc = converter.convert_location(kf.location)
+        rot = converter.convert_rotation(kf.rotation)
+        frame = float(kf.frame)
+
+        # Location
+        for ci in range(3):
+            kp = loc_fcs[ci].keyframe_points[ki]
+            kp.co = (frame, loc[ci])
+            kp.interpolation = "BEZIER"
+
+        # Rotation (Blender quaternion order: W, X, Y, Z)
+        rot_vals = (rot.w, rot.x, rot.y, rot.z)
+        for ci in range(4):
+            kp = rot_fcs[ci].keyframe_points[ki]
+            kp.co = (frame, rot_vals[ci])
+            kp.interpolation = "BEZIER"
+
+    # Apply interpolation handles
+    _apply_bone_interpolation(loc_fcs, rot_fcs, keyframes)
+
+    # Finalize
+    for fc in loc_fcs + rot_fcs:
+        fc.update()
+
+
+def _apply_bone_interpolation(
+    loc_fcs: list,
+    rot_fcs: list,
+    keyframes: list[BoneKeyframe],
+) -> None:
+    """Apply VMD Bézier interpolation curves to F-curve keyframe handles.
+
+    VMD interpolation data is 64 bytes per keyframe, encoding Bézier control
+    points for 4 channels: X-location, Y-location, Z-location, Rotation.
+
+    Each channel has 4 bytes: (x1, y1, x2, y2) representing the two inner
+    control points of a cubic Bézier curve normalized to [0, 127].
+
+    The interpolation defines the curve *between* keyframe[i] and
+    keyframe[i+1], so we set the right handle of kp[i] and left handle of
+    kp[i+1].
+    """
+    n = len(keyframes)
+    if n < 2:
+        return
+
+    # VMD interpolation byte layout (64 bytes):
+    # The 64 bytes are laid out in a 4×16 pattern, but the actual values
+    # we need are at specific offsets. For each of the 4 channels:
+    #   channel 0 (X loc): bytes at indices 0, 4, 8, 12  → x1, y1, x2, y2
+    #   channel 1 (Y loc): bytes at indices 1, 5, 9, 13
+    #   channel 2 (Z loc): bytes at indices 2, 6, 10, 14
+    #   channel 3 (Rotation): bytes at indices 3, 7, 11, 15
+    # But these repeat in a 4×4 grid across the 64 bytes. The first 16 bytes
+    # contain all unique values.
+
+    # Map VMD channel → (fcurve_list, fcurve_index)
+    # VMD channels: 0=X loc, 1=Y loc, 2=Z loc, 3=rotation
+    # After coordinate conversion (x,y,z)→(x,z,y):
+    #   VMD X → Blender X (loc_fcs[0])
+    #   VMD Y → Blender Z (loc_fcs[2])
+    #   VMD Z → Blender Y (loc_fcs[1])
+    vmd_to_blender_loc = {0: 0, 1: 2, 2: 1}  # VMD channel → loc_fcs index
+
+    for ki in range(n - 1):
+        interp = keyframes[ki + 1].interpolation
+        if len(interp) < 16:
+            continue
+
+        # Location channels
+        for vmd_ch, bl_idx in vmd_to_blender_loc.items():
+            x1 = interp[vmd_ch]       # byte 0/1/2/3
+            y1 = interp[4 + vmd_ch]   # byte 4/5/6/7
+            x2 = interp[8 + vmd_ch]   # byte 8/9/10/11
+            y2 = interp[12 + vmd_ch]  # byte 12/13/14/15
+            _set_bezier_handles(
+                loc_fcs[bl_idx], ki, ki + 1, x1, y1, x2, y2
+            )
+
+        # Rotation channel (all 4 quaternion components share the same curve)
+        x1 = interp[3]
+        y1 = interp[7]
+        x2 = interp[11]
+        y2 = interp[15]
+        for fc in rot_fcs:
+            _set_bezier_handles(fc, ki, ki + 1, x1, y1, x2, y2)
+
+
+def _set_bezier_handles(
+    fc, ki0: int, ki1: int,
+    x1: int, y1: int, x2: int, y2: int,
+) -> None:
+    """Set Bézier handles between two adjacent keyframes.
+
+    (x1, y1) is the right control point of kp0.
+    (x2, y2) is the left control point of kp1.
+    Values are in [0, 127] representing normalized position within the
+    frame/value span between the two keyframes.
+    """
+    kp0 = fc.keyframe_points[ki0]
+    kp1 = fc.keyframe_points[ki1]
+
+    df = kp1.co[0] - kp0.co[0]  # frame delta
+    dv = kp1.co[1] - kp0.co[1]  # value delta
+
+    if df == 0:
+        return
+
+    # Check if this is linear (default) interpolation
+    if x1 == 20 and y1 == 20 and x2 == 107 and y2 == 107:
+        # These are roughly the default linear-ish handles, skip
+        pass
+
+    kp0.handle_right_type = "FREE"
+    kp1.handle_left_type = "FREE"
+
+    kp0.handle_right = (
+        kp0.co[0] + df * x1 / 127.0,
+        kp0.co[1] + dv * y1 / 127.0,
+    )
+    kp1.handle_left = (
+        kp0.co[0] + df * x2 / 127.0,
+        kp0.co[1] + dv * y2 / 127.0,
+    )
+
+
+def _apply_morph_keyframes(
+    morph_keyframes: list[MorphKeyframe],
+    armature_obj: bpy.types.Object,
+) -> int:
+    """Apply morph keyframes to shape key F-curves on the child mesh.
+
+    Returns the number of morph channels applied.
+    """
+    # Find the child mesh with shape keys
+    mesh_obj = None
+    for child in armature_obj.children:
+        if child.type == "MESH" and child.data.shape_keys:
+            mesh_obj = child
+            break
+
+    if mesh_obj is None:
+        log.warning("VMD: No child mesh with shape keys found on armature")
+        return 0
+
+    shape_keys = mesh_obj.data.shape_keys
+
+    # Load morph name mapping (Japanese → shape key name)
+    morph_map_json = mesh_obj.get("mmd_morph_map")
+    if morph_map_json:
+        morph_map: dict[str, str] = json.loads(morph_map_json)
+    else:
+        # Fallback: try matching morph names directly to shape key names
+        morph_map = {}
+        log.warning("VMD: No mmd_morph_map found, trying direct name match")
+
+    # Group morph keyframes by name
+    morph_groups: dict[str, list[MorphKeyframe]] = defaultdict(list)
+    for kf in morph_keyframes:
+        morph_groups[kf.morph_name].append(kf)
+
+    for group in morph_groups.values():
+        group.sort(key=lambda kf: kf.frame)
+
+    # Create morph action on the shape key datablock
+    morph_action = bpy.data.actions.new(f"{armature_obj.name}_VMD_Morphs")
+    if shape_keys.animation_data is None:
+        shape_keys.animation_data_create()
+    shape_keys.animation_data.action = morph_action
+
+    applied = 0
+    unmatched: list[str] = []
+
+    for jp_name, keyframes in morph_groups.items():
+        # Find the shape key name
+        sk_name = morph_map.get(jp_name)
+        if sk_name is None:
+            # Try direct match
+            if jp_name in shape_keys.key_blocks:
+                sk_name = jp_name
+            else:
+                unmatched.append(jp_name)
+                continue
+
+        if sk_name not in shape_keys.key_blocks:
+            unmatched.append(jp_name)
+            continue
+
+        data_path = f'key_blocks["{sk_name}"].value'
+        fc = morph_action.fcurve_ensure_for_datablock(
+            shape_keys, data_path, index=0, group_name=sk_name
+        )
+
+        n = len(keyframes)
+        fc.keyframe_points.add(n)
+
+        for ki, kf in enumerate(keyframes):
+            kp = fc.keyframe_points[ki]
+            kp.co = (float(kf.frame), kf.weight)
+            kp.interpolation = "LINEAR"
+
+        fc.update()
+        applied += 1
+
+    if unmatched:
+        log.warning(
+            "VMD: %d morph names unmatched: %s",
+            len(unmatched),
+            ", ".join(unmatched[:10])
+            + ("..." if len(unmatched) > 10 else ""),
+        )
+
+    log.info("VMD morphs: %d/%d channels applied", applied, len(morph_groups))
+    return applied

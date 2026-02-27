@@ -4,9 +4,9 @@ All coordinates are converted to Blender space (Z-up, right-handed) at parse tim
 Downstream code never deals with MMD coordinates.
 
 Coordinate conversion (MMD left-handed Y-up → Blender right-handed Z-up):
-    Position/Offset: (x, y, z) → (x, -z, y)
-    Normal:          (x, y, z) → (x, -z, y)
-    Rotation (euler):(x, y, z) → (x, -z, y)
+    Position/Offset: (x, y, z) → (x, z, y)   [swap Y↔Z]
+    Normal:          (x, y, z) → (x, z, y)
+    Rotation (euler):(x, y, z) → (x, z, y)    [TODO: negate for physics milestone]
 """
 
 from __future__ import annotations
@@ -167,13 +167,13 @@ class _Reader:
 # ---------------------------------------------------------------------------
 
 def _pos(x: float, y: float, z: float) -> tuple[float, float, float]:
-    """MMD position → Blender position: (x, y, z) → (x, -z, y)"""
-    return (x, -z, y)
+    """MMD position → Blender position: (x, y, z) → (x, z, y)"""
+    return (x, z, y)
 
 
 def _rot(x: float, y: float, z: float) -> tuple[float, float, float]:
-    """MMD euler rotation → Blender euler rotation: (x, y, z) → (x, -z, y)"""
-    return (x, -z, y)
+    """MMD euler rotation → Blender euler rotation: (x, y, z) → (x, z, y)"""
+    return (x, z, y)
 
 
 def _pos3(v: tuple[float, float, float]) -> tuple[float, float, float]:

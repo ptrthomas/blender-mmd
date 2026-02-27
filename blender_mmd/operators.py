@@ -42,14 +42,88 @@ class BLENDER_MMD_OT_import_pmx(bpy.types.Operator, ImportHelper):
             return {"CANCELLED"}
 
 
+def _find_mmd_armature(context) -> bpy.types.Object | None:
+    """Find a bmmd-imported armature to apply VMD motion to.
+
+    Priority:
+    1. Active object if it's a bmmd armature
+    2. Only bmmd armature in the scene (auto-detect)
+    Returns None if no armature found or multiple ambiguous choices.
+    """
+    active = context.active_object
+    if active and active.type == "ARMATURE" and _is_mmd_armature(active):
+        return active
+
+    candidates = [
+        obj for obj in context.scene.objects
+        if obj.type == "ARMATURE" and _is_mmd_armature(obj)
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _is_mmd_armature(obj: bpy.types.Object) -> bool:
+    """Check if an armature was imported by bmmd (has import_scale property)."""
+    return obj.get("import_scale") is not None
+
+
+class BLENDER_MMD_OT_import_vmd(bpy.types.Operator, ImportHelper):
+    """Import a VMD motion file onto an MMD armature"""
+
+    bl_idname = "blender_mmd.import_vmd"
+    bl_label = "Import VMD"
+    bl_options = {"REGISTER", "UNDO"}
+
+    filename_ext = ".vmd"
+    filter_glob: StringProperty(default="*.vmd", options={"HIDDEN"})
+
+    def execute(self, context):
+        from .vmd import parse
+        from .vmd.importer import import_vmd
+
+        armature_obj = _find_mmd_armature(context)
+        if armature_obj is None:
+            self.report(
+                {"ERROR"},
+                "No MMD armature found. Import a PMX model first, "
+                "or select the target armature.",
+            )
+            return {"CANCELLED"}
+
+        scale = armature_obj.get("import_scale", 0.08)
+
+        try:
+            vmd = parse(self.filepath)
+            import_vmd(vmd, armature_obj, scale)
+            self.report(
+                {"INFO"},
+                f"VMD applied to '{armature_obj.name}': "
+                f"{len(vmd.bone_keyframes)} bone kf, "
+                f"{len(vmd.morph_keyframes)} morph kf",
+            )
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("VMD import failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
 def menu_func_import(self, context):
     self.layout.operator(
         BLENDER_MMD_OT_import_pmx.bl_idname,
         text="MMD model (.pmx)",
     )
+    self.layout.operator(
+        BLENDER_MMD_OT_import_vmd.bl_idname,
+        text="MMD motion (.vmd)",
+    )
 
 
-_classes = (BLENDER_MMD_OT_import_pmx,)
+_classes = (
+    BLENDER_MMD_OT_import_pmx,
+    BLENDER_MMD_OT_import_vmd,
+)
 
 
 def register():

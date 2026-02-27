@@ -16,6 +16,18 @@ log = logging.getLogger("blender_mmd")
 # Minimum bone length to prevent Blender from deleting zero-length bones
 MIN_BONE_LENGTH = 0.001
 
+# Japanese bone names that need auto-computed local axes for correct roll.
+# These are arms, shoulders, elbows, wrists and their twist/parent variants.
+_AUTO_AXIS_ARMS = frozenset({
+    "左肩", "左腕", "左ひじ", "左手首",
+    "右肩", "右腕", "右ひじ", "右手首",
+})
+_AUTO_AXIS_SEMI = frozenset({
+    "左腕捩", "左手捩", "左肩P", "左ダミー",
+    "右腕捩", "右手捩", "右肩P", "右ダミー",
+})
+_AUTO_AXIS_FINGERS = ("親指", "人指", "中指", "薬指", "小指")
+
 
 def _resolve_bone_name(bone: Bone) -> str:
     """Choose the Blender bone name from PMX data.
@@ -46,6 +58,69 @@ def _ensure_unique_names(bones: list[Bone]) -> list[str]:
             name = base
         names.append(name)
     return names
+
+
+def _needs_auto_local_axis(name_j: str) -> bool:
+    """Check if a bone (by Japanese name) should get auto-computed local axes."""
+    if not name_j:
+        return False
+    if name_j in _AUTO_AXIS_ARMS or name_j in _AUTO_AXIS_SEMI:
+        return True
+    return any(f in name_j for f in _AUTO_AXIS_FINGERS)
+
+
+def _set_bone_roll_from_axes(
+    edit_bone: bpy.types.EditBone,
+    local_x: tuple[float, float, float],
+    local_z: tuple[float, float, float],
+) -> None:
+    """Set bone roll from local axis vectors (already in Blender coordinates).
+
+    Matches mmd_tools' FnBone.update_bone_roll / get_axes logic:
+    1. Orthogonalize the X/Z axes into a proper frame
+    2. Find which axis is most aligned with the bone direction
+    3. Use align_roll() with the perpendicular axis
+    """
+    x_axis = Vector(local_x).normalized()
+    z_axis = Vector(local_z).normalized()
+    y_axis = z_axis.cross(x_axis).normalized()
+    z_axis = x_axis.cross(y_axis).normalized()
+
+    axes = (x_axis, y_axis, z_axis)
+    idx, val = max(
+        [(i, edit_bone.vector.dot(v)) for i, v in enumerate(axes)],
+        key=lambda x: abs(x[1]),
+    )
+    edit_bone.align_roll(axes[(idx - 1) % 3 if val < 0 else (idx + 1) % 3])
+
+
+def _set_auto_bone_roll(edit_bone: bpy.types.EditBone) -> None:
+    """Auto-compute bone roll for arm/finger bones from geometry.
+
+    Matches mmd_tools' FnBone.update_auto_bone_roll: creates a synthetic
+    triangle from the bone's head/tail in the XZ plane to derive a consistent
+    local axis frame.
+    """
+    p1 = edit_bone.head.copy()
+    p2 = edit_bone.tail.copy()
+    p3 = p2.copy()
+
+    xz = Vector((p2.x - p1.x, p2.z - p1.z))
+    if xz.length < 1e-8:
+        return
+    xz.normalize()
+    theta = math.atan2(xz.y, xz.x)
+    norm = edit_bone.vector.length
+    p3.z += norm * math.cos(theta)
+    p3.x -= norm * math.sin(theta)
+
+    bone_dir = (p2 - p1).normalized()
+    z_tmp = (p3 - p1).normalized()
+    face_normal = bone_dir.cross(z_tmp)
+
+    # Effective result of mmd_tools' double .xzy cancellation:
+    # align_roll with face_normal × bone_dir
+    edit_bone.align_roll(face_normal.cross(bone_dir))
 
 
 def create_armature(model: Model, scale: float) -> bpy.types.Object:
@@ -109,6 +184,16 @@ def create_armature(model: Model, scale: float) -> bpy.types.Object:
                     eb.tail = eb.head + Vector((0, MIN_BONE_LENGTH, 0))
             else:
                 eb.tail = eb.head + Vector((0, MIN_BONE_LENGTH, 0))
+
+    # Set bone roll from PMX local axis data or auto-compute for arm/finger bones
+    for i, pmx_bone in enumerate(pmx_bones):
+        eb = edit_bones[i]
+        if eb.vector.length < MIN_BONE_LENGTH:
+            continue
+        if pmx_bone.has_local_axis and pmx_bone.local_axis_x and pmx_bone.local_axis_z:
+            _set_bone_roll_from_axes(eb, pmx_bone.local_axis_x, pmx_bone.local_axis_z)
+        elif _needs_auto_local_axis(pmx_bone.name):
+            _set_auto_bone_roll(eb)
 
     bpy.ops.object.mode_set(mode="OBJECT")
 
