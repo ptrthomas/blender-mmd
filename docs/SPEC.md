@@ -436,14 +436,22 @@ These are inherent to Blender's Bullet integration and cannot be fixed in addon 
 - **No mesh deformation feedback**: Collision shapes don't update when the mesh deforms. Physics bodies use their rest-pose shapes.
 - **Spring precision**: SPRING1 damping is capped at 1.0. Some MMD models may need manual damping adjustment.
 
-### Future: alternative physics modes
+### Physics modes
 
-The architecture supports destructive swap of physics modes per bone chain:
+The physics system supports three modes, controlled by a `mode` parameter on `build_physics`:
 
-- A user selects a skirt bone chain and asks Claude to convert from rigid bodies to Blender cloth simulation
-- The original rigid bodies are removed
-- New cloth sim is applied to the mesh region influenced by those bones
-- This is one-way (no re-export to PMX)
+```python
+def build_physics(model, armature_obj, mesh_obj, scale=1.0, mode="none"):
+    """mode: 'none' | 'rigid_body' | 'cloth'"""
+```
+
+| Mode | What happens | When to use |
+|------|-------------|-------------|
+| `none` (default) | Store rigid body/joint data as custom properties on armature. No Blender physics objects created. Clean scene. | Default import, or when user plans to add cloth later |
+| `rigid_body` | Current M4 implementation. Create Blender rigid bodies, joints, bone coupling. Matches mmd_tools quality. | Quick "good enough" physics, testing, comparison |
+| `cloth` | Store metadata (like `none`), then interactively convert selected chains to cloth simulation. | Best quality — hair, skirt, accessories |
+
+See Milestone 4b for implementation plan.
 
 ---
 
@@ -653,43 +661,93 @@ Rigid body physics implemented as intermediate step. Works but has fundamental l
 - `baseline_mmd_tools.json` — mmd_tools bone transforms at key frames (pose + IK only)
 - `miku_galaxias.blend` — mmd_tools reference: **pose + IK only, no physics baked**. Do not use this blend for physics comparison — mmd_tools physics was never applied to it.
 
-### Milestone 4b: Cloth Physics Conversion (next — PRIMARY OBJECTIVE)
+### Milestone 4b: Physics Rework — Three Modes (next — PRIMARY OBJECTIVE)
 
-**This is the most important objective of the rewrite.** Convert MMD rigid body chains into Blender-native cloth simulation. This is a one-time conversion: read PMX rigid body/joint data, generate cloth meshes, and discard the rigid body objects.
+**This is the most important objective of the rewrite.** Restructure physics into three clean modes: none (default), rigid_body (mmd_tools-style), and cloth (interactive conversion). See "Physics modes" section above.
 
-**Motivation:** MMD rigid bodies connected by joints form chains (hair strands, skirt panels, neckties). These behave like cloth/fabric in practice. Blender's rigid body solver is fundamentally wrong for this — it's designed for disconnected objects bouncing around, not articulated chains. Cloth simulation handles this natively and produces better results with less complexity.
+**Reference:** [blender_mmd_tools_append](https://github.com/MMD-Blender/blender_mmd_tools_append) (`~/dev/ycode/blender_mmd_tools_append/`) validates the cloth approach. They convert MMD rigid body chains to cloth simulation and get much better results than mmd_tools' rigid body approach. Key difference: they are a post-processor on top of mmd_tools; we build it in natively.
 
-**Reference:** [blender_mmd_tools_append](https://github.com/MMD-Blender/blender_mmd_tools_append) validates this approach. They convert MMD rigid body chains to cloth simulation and get much better results than mmd_tools' rigid body approach. Key difference: they are a post-processor on top of mmd_tools; we build it in natively.
+#### Phase 1: Restructure + Default-Off (`mode="none"`)
 
-**Approach (from blender_mmd_tools_append analysis):**
-1. **Topology extraction**: Read PMX rigid bodies + joints → identify chains (hair, skirt, accessories)
-2. **Mesh generation**: Each rigid body → vertex, each joint → edge. Extrude to create cloth polygons.
-3. **Modifier stack**: Armature (with pin group) → Cloth → Corrective Smooth → Surface Deform
-4. **Pin groups**: Root vertices (where chains attach to body) are pinned; free ends simulate
-5. **Bone binding**: STRETCH_TO constraints link pose bones to cloth vertices for feedback to armature
+Refactor `build_physics` into three paths. The `none` mode (default):
 
-**Simplifications over blender_mmd_tools_append:**
-- Skip SPRING values entirely — use Blender cloth presets (Cotton, Silk, etc.)
-- Skip complex pyramid mesh for breasts — simple cloth works well enough
-- No dynamic paint — out of scope
-- Single pass: import PMX → detect chains → generate cloth → done
+- Parse rigid body/joint data from the already-parsed PMX model
+- Store as custom properties on the armature (chain topology, rigid body params, joint connections) so nothing is lost and cloth conversion can use them later
+- Do NOT create rigid body objects, joints, or rigid body world
+- Model imports clean — just armature + mesh + morphs + animation, no physics clutter
 
 **Deliverables:**
-- [ ] Chain detection from PMX rigid body/joint topology
-- [ ] Cloth mesh generation from chains (vertices + faces)
+- [ ] Refactored `physics.py` with `mode` parameter (`none` / `rigid_body` / `cloth`)
+- [ ] Metadata storage format for rigid body/joint data on armature
+- [ ] `none` mode stores metadata, creates nothing
+- [ ] `rigid_body` mode is the existing M4 code, gated behind the flag
+- [ ] Tests for metadata storage (pure Python, no Blender)
+- [ ] Updated SPEC.md and CLAUDE.md
+
+#### Phase 2: Simplify Rigid Body Mode (`mode="rigid_body"`)
+
+Clean up the existing M4 code. Keep it working but don't overengineer:
+
+- **Keep:** collision margin, collision layers, non-collision constraints, dynamic body repositioning, RBW disable-during-setup, depsgraph flushes, bone coupling
+- **Simplify:** remove or minimize spring/soft-constraint complexity. Use simple Blender defaults where possible. No springs tuning — if user wants quality physics, use cloth mode instead.
+- **Goal:** match mmd_tools quality, not exceed it. "Good enough" rigid body physics.
+
+**Deliverables:**
+- [ ] Simplified rigid body code path (drop spring complexity)
+- [ ] Stable basic physics that doesn't explode
+- [ ] Side-by-side comparable to mmd_tools output
+
+#### Phase 3: Interactive Cloth Conversion (`mode="cloth"`)
+
+Build chain detection and interactive cloth conversion. This is the quality path.
+
+**Chain detection** (pure Python, testable without Blender):
+- Read PMX rigid bodies + joints → build directed graph
+- Identify chains: connected sequences of dynamic rigid bodies linked by joints
+- Group into named chains (e.g., "right hair", "left hair", "necktie", "skirt front")
+- A chain starts at a STATIC rigid body (attached to body) and follows DYNAMIC bodies outward
+- Output: list of chains with bone names, rigid body indices, attachment points
+
+**Interactive workflow** (conversational through Claude Code + blender-agent):
+1. `build_physics(mode="cloth")` → stores metadata, detects chains, lists them to user
+2. Claude pre-selects likely candidates (hair, skirt) and presents to user for confirmation
+3. User confirms which chains to convert and which mesh is the collision surface
+4. For each selected chain, `convert_chain_to_cloth()`:
+   - Create cloth-sim mesh from chain topology (rigid body positions → vertices, joints → edges, extrude to faces)
+   - Set up vertex pin group (pinned at the static/kinematic root bone, free ends simulate)
+   - Add Cloth modifier with reasonable MMD-like defaults (presets for hair, skirt, necktie)
+   - Add collision against the body mesh (user-confirmed collision surface)
+   - Connect back to bones via Surface Deform or STRETCH_TO constraints
+   - Modifier stack: Armature (pin) → Cloth → Corrective Smooth → Surface Deform
+5. User can iterate — convert one chain, test playback, adjust, convert another
+6. "Adjust cloth stiffness on hair" → Claude modifies cloth settings conversationally
+
+**Why interactive:** Every model is different. Hair bone counts, skirt topology, collision surfaces all vary. Pre-selecting and guiding the user through it works better than full automation. Claude can always pre-select sensible defaults and the user just confirms.
+
+**Simplifications over blender_mmd_tools_append:**
+- Skip PMX spring values entirely — use Blender cloth presets (Cotton, Silk, etc.)
+- Skip complex pyramid mesh for breasts — simple cloth works
+- No dynamic paint — out of scope
+- Interactive per-chain instead of batch-all
+
+**Deliverables:**
+- [ ] Chain detection algorithm from rigid body/joint graph (pure Python)
+- [ ] Chain grouping and naming heuristics
+- [ ] `convert_chain_to_cloth()` implementation
+- [ ] Cloth mesh generation from chain topology
 - [ ] Pin vertex groups (root attachment points)
-- [ ] Cloth simulation setup with sensible defaults
-- [ ] Surface Deform binding back to character mesh
-- [ ] STRETCH_TO bone constraints for armature feedback
-- [ ] Clear/rebuild physics command
-- [ ] Side-by-side comparison with M4 rigid body approach
-- [ ] Simple UI panel for build/bake/clear (optional)
+- [ ] Cloth presets for hair, skirt, necktie
+- [ ] Collision setup against body mesh
+- [ ] Surface Deform / STRETCH_TO binding back to armature
+- [ ] Tests for chain detection (pure Python, no Blender)
 
 **Validation:**
-- Import model + VMD, convert physics, play timeline
-- Hair and skirt swing naturally following body motion
+- Import model + VMD, convert hair chain to cloth, play timeline
+- Hair swings naturally following head motion
 - No explosion, no drift, no stiffness
+- Convert skirt, test independently
 - Better than both mmd_tools rigid body AND our M4 rigid body
+- User can iterate: convert one chain, test, adjust, convert next
 
 ### Milestone 5: Materials & Textures
 

@@ -10,7 +10,10 @@ Read `docs/SPEC.md` first. It is the single source of truth for architecture, de
 - **Milestone 3** (done): VMD motion import (bone keyframes, morph keyframes, bone roll)
 - **Milestone 3.5** (done): IK fix — correct constraint placement, native limits, VMD IK toggle
 - **Milestone 4** (done): Rigid body physics — functional but limited by Blender's RB solver
-- **Milestone 4b** (next, PRIMARY): Convert rigid body chains → Blender cloth simulation
+- **Milestone 4b** (next, PRIMARY): Physics rework — three modes:
+  - **Phase 1**: Restructure into modes + default-off (`mode="none"`, store metadata only)
+  - **Phase 2**: Simplify rigid body mode (`mode="rigid_body"`, mmd_tools-quality, no overengineering)
+  - **Phase 3**: Interactive cloth conversion (`mode="cloth"`, chain detection + guided setup)
 - **Milestone 5**: Materials & textures
 - **Primary motivation**: Replace mmd_tools' broken rigid body physics with Blender-native cloth sim
 
@@ -41,8 +44,10 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
 - **IK constraints**: Placed on first link bone (e.g. knee), NOT the end effector (ankle). Uses Blender-native `ik_min_x/max_x` properties instead of `LIMIT_ROTATION` constraints. `ik_loop_factor` param (default 1) multiplies PMX iteration count for better convergence.
 - **IK toggle**: VMD property section parsed and applied as IK constraint `influence` keyframes (0.0/1.0 with CONSTANT interpolation). More Blender-native than mmd_tools' custom property + callback approach.
 - **Scene settings**: VMD import sets FPS to 30 (MMD standard) and extends frame range to fit animation.
-- **Physics (M4 rigid body)**: Functional but limited. RB world disabled during build (mmd_tools pattern). Collision: shared layer 0 + own group + non-collision constraints. Margin 1e-6. Soft constraints enabled (lower>upper for locked DOFs). Dynamic body repositioning to match bone pose. Depsgraph flushes at key points. This is an intermediate solution — M4b (cloth conversion) is the real fix.
-- **Physics (M4b cloth — planned)**: One-time conversion of PMX rigid body chains → Blender cloth simulation. Reference: [blender_mmd_tools_append](https://github.com/MMD-Blender/blender_mmd_tools_append). Skip SPRING values entirely, use Blender cloth presets. Chain detection → mesh generation → pin groups → cloth sim → surface deform → bone binding.
+- **Physics**: Three modes (see SPEC.md Milestone 4b for full plan):
+  - `none` (default): metadata only, no physics objects. Clean import.
+  - `rigid_body`: M4 implementation. RBW disabled during build, collision layers, non-collision constraints, margin 1e-6, dynamic body repositioning, depsgraph flushes. "Good enough" mmd_tools-quality.
+  - `cloth`: Interactive chain-by-chain conversion to Blender cloth sim. Claude guides user through selecting chains and collision surfaces. Reference: `../blender_mmd_tools_append/`.
 - **No export**: One-way import only. No PMX/VMD/PMD export.
 - **No UI panels**: Claude Code is the interface.
 - **Logging**: Use blender-agent's session log. Python `logging` to stderr for diagnostics.
