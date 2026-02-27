@@ -417,9 +417,9 @@ The function `_apply_soft_constraints()` exists in `physics.py` but is not calle
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| `substeps_per_frame` | 60 | Must be high at 0.08 scale for tight joint constraint enforcement |
-| `solver_iterations` | 60 | Same reason — more passes per substep to prevent joint separation |
-| `gravity` | `(0, 0, -9.81 * scale)` | **Critical**: default -9.81 is ~12.5x too strong for 0.08 scale models, tearing joints apart. Scale gravity proportionally. |
+| `substeps_per_frame` | 6 | Matches mmd_tools. Higher values tighten constraints but slow playback. |
+| `solver_iterations` | 10 | Matches mmd_tools. |
+| `gravity` | Default (-9.81) | mmd_tools doesn't scale gravity. Gravity scaling was tested but removed. |
 | `use_split_impulse` | False | Can reduce bounce artifacts but causes stacking instability |
 
 ### Springs and soft constraints
