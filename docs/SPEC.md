@@ -616,40 +616,80 @@ VMD import follows morphs so we can see both body motion AND facial animation du
 - Baseline comparison: 21 bones × 11 frames all within <0.05 tolerance
 - Floor penetration comparable to mmd_tools reference (Blender IK solver limitation)
 
-### Milestone 4: Physics (in progress)
+### Milestone 4: Rigid Body Physics (current — functional, needs tuning)
 
-Physics follows VMD so we can validate with actual motion playing — a static model with physics proves nothing.
+Rigid body physics implemented as intermediate step. Works but has fundamental limitations of Blender's rigid body solver for MMD-style chain physics. The long-term plan is Milestone 4b (cloth conversion).
 
-**Deliverables:**
-- ✅ Rigid body creation with `collision_collections` (no non-collision constraint objects)
-- ✅ Joint setup with `GENERIC_SPRING` / `SPRING1` — **spring values actually applied**
-- ⚠️ Soft constraint workaround — implemented but disabled (causes instability)
-- ✅ Bone ↔ rigid body coupling for all three modes (STATIC, DYNAMIC, DYNAMIC_BONE)
+**Done:**
+- ✅ Rigid body creation with collision_collections (shared layer 0 + own group)
+- ✅ Non-collision constraints from PMX mask (GENERIC with disable_collisions=True)
+- ✅ Joint setup with GENERIC_SPRING / SPRING1 with spring values applied
+- ✅ Soft constraints for locked DOFs (lower > upper = free, spring provides resistance)
+- ✅ Collision margin fix (1e-6, Blender default 0.04 too large at 0.08 scale)
+- ✅ Dynamic body repositioning to match current bone pose
+- ✅ Joint empty repositioning using src_rigid bone delta
+- ✅ Bone ↔ rigid body coupling (STATIC, DYNAMIC, DYNAMIC_BONE)
+- ✅ RB world disabled during setup (mmd_tools pattern, prevents solver corruption)
+- ✅ Depsgraph flushes at key build steps
 - ✅ Physics build/clear operators
-- ✅ Physics world setup with recommended defaults
 - ✅ 13 pure-Python unit tests
 
-**Implementation notes:**
-- Rotation needs negation beyond parser's Y↔Z swap: `(-x, -y, -z)` matching mmd_tools' `.xzy * -1`
-- Joint rotation limits must be swapped AND negated: `lower = -upper_pmx`, `upper = -lower_pmx`
-- Rigid bodies need actual mesh geometry (bmesh sphere/box/capsule) — empty mesh = zero-size collision
-- Bone parenting: origin at bone TAIL with rest matrix, not just head position
-- Tracking empties: `matrix_parent_inverse = rb.matrix_world.inverted() @ bone_world`
-- Collision: own-group-only avoids Blender's symmetric layer false positives
-- Gravity: normal (-9.81), not scaled — collision shapes already sized at import scale
+**Known issues:**
+- Scrubbing/rewinding can reset baked simulation; must re-bake after rewind
+- No UI for build/bake/clear — must use Claude Code or Python console
+- Hair may appear too stiff or too loose depending on model
+- No automatic bake on build (user must bake manually or via playback)
+- Blender's rigid body solver is fundamentally wrong for MMD chain physics (hair, skirt)
 
-**Remaining work:**
-- Blender integration testing: verify hair/skirt physics look natural during VMD playback
-- Collision tuning: own-group-only may be too conservative (no cross-group body↔hair collision)
-- Soft constraints: find stable parameters or alternative approach for elastic locked DOFs
-- Gravity tuning: may need adjustment if bodies fall too fast at 0.08 scale
+**Where to find baked physics in Blender:**
+- Scene Properties → Rigid Body World → Cache section
+- "Bake" button bakes simulation, "Free Bake" clears it
+- Or via Python: `bpy.ops.ptcache.bake()` / `bpy.ops.ptcache.free_bake()`
+- Point cache frame range: `scene.rigidbody_world.point_cache.frame_start/frame_end`
+
+**Test data (`tests/samples/`):**
+- `初音ミク.pmx` — simple Miku model (122 bones, 45 rigid bodies, 27 joints)
+- `galaxias.vmd` — Galaxias dance motion
+- `baseline_mmd_tools.json` — mmd_tools bone transforms at key frames (pose + IK only)
+- `miku_galaxias.blend` — mmd_tools reference: **pose + IK only, no physics baked**. Do not use this blend for physics comparison — mmd_tools physics was never applied to it.
+
+### Milestone 4b: Cloth Physics Conversion (next — PRIMARY OBJECTIVE)
+
+**This is the most important objective of the rewrite.** Convert MMD rigid body chains into Blender-native cloth simulation. This is a one-time conversion: read PMX rigid body/joint data, generate cloth meshes, and discard the rigid body objects.
+
+**Motivation:** MMD rigid bodies connected by joints form chains (hair strands, skirt panels, neckties). These behave like cloth/fabric in practice. Blender's rigid body solver is fundamentally wrong for this — it's designed for disconnected objects bouncing around, not articulated chains. Cloth simulation handles this natively and produces better results with less complexity.
+
+**Reference:** [blender_mmd_tools_append](https://github.com/MMD-Blender/blender_mmd_tools_append) validates this approach. They convert MMD rigid body chains to cloth simulation and get much better results than mmd_tools' rigid body approach. Key difference: they are a post-processor on top of mmd_tools; we build it in natively.
+
+**Approach (from blender_mmd_tools_append analysis):**
+1. **Topology extraction**: Read PMX rigid bodies + joints → identify chains (hair, skirt, accessories)
+2. **Mesh generation**: Each rigid body → vertex, each joint → edge. Extrude to create cloth polygons.
+3. **Modifier stack**: Armature (with pin group) → Cloth → Corrective Smooth → Surface Deform
+4. **Pin groups**: Root vertices (where chains attach to body) are pinned; free ends simulate
+5. **Bone binding**: STRETCH_TO constraints link pose bones to cloth vertices for feedback to armature
+
+**Simplifications over blender_mmd_tools_append:**
+- Skip SPRING values entirely — use Blender cloth presets (Cotton, Silk, etc.)
+- Skip complex pyramid mesh for breasts — simple cloth works well enough
+- No dynamic paint — out of scope
+- Single pass: import PMX → detect chains → generate cloth → done
+
+**Deliverables:**
+- [ ] Chain detection from PMX rigid body/joint topology
+- [ ] Cloth mesh generation from chains (vertices + faces)
+- [ ] Pin vertex groups (root attachment points)
+- [ ] Cloth simulation setup with sensible defaults
+- [ ] Surface Deform binding back to character mesh
+- [ ] STRETCH_TO bone constraints for armature feedback
+- [ ] Clear/rebuild physics command
+- [ ] Side-by-side comparison with M4 rigid body approach
+- [ ] Simple UI panel for build/bake/clear (optional)
 
 **Validation:**
-- Import model + VMD motion, build physics, play timeline
-- Hair and clothing move naturally and don't fly apart
-- Rigid bodies stay connected to their constraints
-- Compare object count vs mmd_tools (should be 100–300 fewer objects)
-- This is the key end-to-end test: does our physics actually work better than mmd_tools?
+- Import model + VMD, convert physics, play timeline
+- Hair and skirt swing naturally following body motion
+- No explosion, no drift, no stiffness
+- Better than both mmd_tools rigid body AND our M4 rigid body
 
 ### Milestone 5: Materials & Textures
 
@@ -665,14 +705,6 @@ Physics follows VMD so we can validate with actual motion playing — a static m
 - VMD camera motion import
 - CCD IK solver (matching MMD output more closely)
 - Keyframe management helpers
-
-### Milestone 7: Advanced Physics
-
-**Deliverables:**
-- Driver-based DYNAMIC_BONE coupling (replacing constraints, reducing lag)
-- Cloth/hair simulation conversion for selected bone chains
-- SDEF implementation via Geometry Nodes
-- Physics tuning helpers for Claude
 
 ---
 

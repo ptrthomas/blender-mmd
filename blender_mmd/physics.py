@@ -26,7 +26,12 @@ _SHAPE_MAP = {
 
 
 def build_physics(armature_obj, model, scale: float) -> None:
-    """Create rigid bodies, joints, bone coupling, and configure physics world."""
+    """Create rigid bodies, joints, bone coupling, and configure physics world.
+
+    The rigid body world is disabled during setup (following mmd_tools' approach)
+    to prevent the solver from computing forces while bodies are being added.
+    Scene updates (frame_set) flush the depsgraph at key points.
+    """
     import bpy
 
     log.info(
@@ -38,33 +43,60 @@ def build_physics(armature_obj, model, scale: float) -> None:
     # Clean up any existing physics first
     clear_physics(armature_obj)
 
-    # Create physics collection with subcollections
-    col_name = f"{armature_obj.name}_Physics"
-    collection = bpy.data.collections.new(col_name)
-    bpy.context.scene.collection.children.link(collection)
-    armature_obj["physics_collection"] = col_name
+    # Disable rigid body world during setup to prevent solver interference.
+    # mmd_tools does this — without it, the solver runs partial computations
+    # as bodies are added one by one, corrupting initial state.
+    rbw_was_enabled = _set_rigid_body_world_enabled(bpy.context.scene, False)
 
-    rb_col = bpy.data.collections.new("Rigid Bodies")
-    collection.children.link(rb_col)
-    joint_col = bpy.data.collections.new("Joints")
-    collection.children.link(joint_col)
-    track_col = bpy.data.collections.new("Tracking")
-    collection.children.link(track_col)
+    try:
+        # Create physics collection with subcollections
+        col_name = f"{armature_obj.name}_Physics"
+        collection = bpy.data.collections.new(col_name)
+        bpy.context.scene.collection.children.link(collection)
+        armature_obj["physics_collection"] = col_name
 
-    # Build bone name lookup: bone_index → Blender bone name
-    bone_names = _build_bone_name_map(armature_obj)
+        rb_col = bpy.data.collections.new("Rigid Bodies")
+        collection.children.link(rb_col)
+        joint_col = bpy.data.collections.new("Joints")
+        collection.children.link(joint_col)
+        track_col = bpy.data.collections.new("Tracking")
+        collection.children.link(track_col)
 
-    # Step 1: Rigid bodies
-    rigid_objects = _create_rigid_bodies(model, armature_obj, scale, rb_col)
+        # Build bone name lookup: bone_index → Blender bone name
+        bone_names = _build_bone_name_map(armature_obj)
 
-    # Step 2: Joints
-    _create_joints(model, rigid_objects, scale, joint_col)
+        # Step 1: Rigid bodies (with collision margin fix)
+        rigid_objects = _create_rigid_bodies(model, armature_obj, scale, rb_col)
 
-    # Step 3: Bone↔rigid body coupling
-    _setup_bone_coupling(armature_obj, model, rigid_objects, bone_names, scale, track_col)
+        # Step 2: Reposition dynamic bodies to match current bone pose
+        _reposition_dynamic_bodies(model, armature_obj, rigid_objects, bone_names)
 
-    # Step 4: Physics world settings
-    _setup_physics_world(bpy.context.scene)
+        # Flush depsgraph so matrix_world is up to date for joint/coupling steps
+        bpy.context.scene.frame_set(bpy.context.scene.frame_current)
+
+        # Step 3: Joints (with repositioning for dynamic body bones)
+        joint_objects = _create_joints(model, armature_obj, rigid_objects, bone_names, scale, joint_col)
+
+        # Step 4: Non-collision constraints (mask-based)
+        _create_non_collision_constraints(model, rigid_objects, joint_objects, joint_col)
+
+        # Flush depsgraph before bone coupling (tracking empties need correct matrix_world)
+        bpy.context.scene.frame_set(bpy.context.scene.frame_current)
+
+        # Step 5: Bone↔rigid body coupling
+        _setup_bone_coupling(armature_obj, model, rigid_objects, bone_names, scale, track_col)
+
+        # Flush depsgraph after all parenting/constraints are set
+        bpy.context.scene.frame_set(bpy.context.scene.frame_current)
+
+        # Step 6: Physics world settings
+        _setup_physics_world(bpy.context.scene)
+
+    finally:
+        # Always enable rigid body world after build — we just created physics,
+        # so it should be active. (Don't restore previous state because if the
+        # RBW was newly created during build, the saved state would be False.)
+        _set_rigid_body_world_enabled(bpy.context.scene, True)
 
     log.info("Physics build complete: %d rigid bodies, %d joints",
              len(rigid_objects), len(model.joints))
@@ -115,7 +147,7 @@ def _build_bone_name_map(armature_obj) -> dict[int, str]:
 
 
 def _create_rigid_bodies(model, armature_obj, scale: float, collection) -> list:
-    """Create rigid body objects with collision_collections."""
+    """Create rigid body objects with collision_collections and collision margin."""
     import bpy
     from mathutils import Euler, Vector
 
@@ -158,8 +190,13 @@ def _create_rigid_bodies(model, armature_obj, scale: float, collection) -> list:
         rb.angular_damping = rigid.angular_damping
         rb.kinematic = (rigid.mode == RigidMode.STATIC)
 
-        # Collision collections
+        # Collision collections (shared layer 0 + own group)
         rb.collision_collections = _build_collision_collections(rigid)
+
+        # Collision margin: at 0.08 scale, Blender's default 0.04 is huge.
+        # mmd_tools uses 1e-6 to prevent capsules pushing each other apart.
+        rb.use_margin = True
+        rb.collision_margin = 1e-6
 
         # Store PMX index for joint lookups
         obj["mmd_rigid_index"] = i
@@ -276,19 +313,57 @@ def build_collision_collections(rigid: RigidBody) -> list[bool]:
 def _build_collision_collections(rigid: RigidBody) -> list[bool]:
     """Convert PMX collision group → Blender 20-bool array.
 
-    Each body goes ONLY in its own group layer. Blender's collision_collections
-    is symmetric: objects sharing ANY layer collide. PMX's bilateral mask system
-    (group + per-body mask) cannot map to this — adding mask-based layers causes
-    false collisions. Using own-group-only preserves correct within-group
-    collision and avoids aggressive cross-group false positives.
+    All bodies go on layer 0 (shared) so everything potentially collides.
+    Each body also gets its own group layer. Non-collision pairs are then
+    suppressed via GENERIC constraints with disable_collisions=True
+    (see _create_non_collision_constraints).
     """
     cols = [False] * 20
+    cols[0] = True  # shared layer — all bodies can potentially collide
     cols[rigid.collision_group_number] = True
     return cols
 
 
-def _create_joints(model, rigid_objects: list, scale: float, collection) -> list:
-    """Create joint constraints with GENERIC_SPRING and actual spring values."""
+def _reposition_dynamic_bodies(model, armature_obj, rigid_objects, bone_names) -> None:
+    """Reposition dynamic rigid bodies to match current bone pose.
+
+    PMX rigid body positions are in rest-pose coordinates. If VMD animation
+    has moved bones (e.g. head), static (bone-parented) bodies follow, but
+    dynamic bodies stay at rest-pose positions. This creates a mismatch at
+    joints, causing physics explosions.
+    """
+    for i, rigid in enumerate(model.rigid_bodies):
+        if rigid.mode == RigidMode.STATIC:
+            continue
+        if rigid.bone_index < 0:
+            continue
+        bone_name = bone_names.get(rigid.bone_index)
+        if not bone_name or bone_name not in armature_obj.data.bones:
+            continue
+
+        obj = rigid_objects[i]
+        bone = armature_obj.data.bones[bone_name]
+        pb = armature_obj.pose.bones[bone_name]
+
+        # Compute pose-to-rest delta in world space
+        rest_world = armature_obj.matrix_world @ bone.matrix_local
+        pose_world = armature_obj.matrix_world @ pb.matrix
+        delta = pose_world @ rest_world.inverted()
+
+        # Apply delta to rigid body's current world transform
+        new_matrix = delta @ obj.matrix_world
+        t, r, _s = new_matrix.decompose()
+        obj.location = t
+        obj.rotation_euler = r.to_euler(obj.rotation_mode)
+
+
+def _create_joints(model, armature_obj, rigid_objects: list, bone_names: dict,
+                   scale: float, collection) -> list:
+    """Create joint constraints with GENERIC_SPRING and actual spring values.
+
+    Joint empties are repositioned to match bone pose (same delta as
+    _reposition_dynamic_bodies) using the source rigid body's bone.
+    """
     import bpy
     from mathutils import Euler, Vector
 
@@ -307,6 +382,9 @@ def _create_joints(model, rigid_objects: list, scale: float, collection) -> list
         # Negate rotation for handedness change (same as rigid bodies)
         rx, ry, rz = joint.rotation
         obj.rotation_euler = Euler((-rx, -ry, -rz), "YXZ")
+
+        # Reposition joint to match posed bone (using src_rigid's bone)
+        _reposition_joint_empty(obj, joint, model, armature_obj, bone_names)
 
         # Add rigid body constraint
         bpy.context.view_layer.objects.active = obj
@@ -366,10 +444,39 @@ def _create_joints(model, rigid_objects: list, scale: float, collection) -> list
         rbc.spring_stiffness_ang_y = joint.spring_constant_rotate[1]
         rbc.spring_stiffness_ang_z = joint.spring_constant_rotate[2]
 
+        # Unlock locked angular DOFs: set lower > upper so Bullet treats
+        # them as free, with the spring providing soft resistance.
+        # Without this, locked DOFs (lower==upper) make hair/skirt rigid.
+        _apply_soft_constraints(rbc)
+
         obj["mmd_joint_index"] = i
         joint_objects.append(obj)
 
     return joint_objects
+
+
+def _reposition_joint_empty(obj, joint, model, armature_obj, bone_names) -> None:
+    """Apply pose-to-rest delta to a joint empty using its src_rigid's bone."""
+    if joint.src_rigid < 0 or joint.src_rigid >= len(model.rigid_bodies):
+        return
+    src_rigid = model.rigid_bodies[joint.src_rigid]
+    if src_rigid.bone_index < 0:
+        return
+    bone_name = bone_names.get(src_rigid.bone_index)
+    if not bone_name or bone_name not in armature_obj.data.bones:
+        return
+
+    bone = armature_obj.data.bones[bone_name]
+    pb = armature_obj.pose.bones[bone_name]
+
+    rest_world = armature_obj.matrix_world @ bone.matrix_local
+    pose_world = armature_obj.matrix_world @ pb.matrix
+    delta = pose_world @ rest_world.inverted()
+
+    new_matrix = delta @ obj.matrix_world
+    t, r, _s = new_matrix.decompose()
+    obj.location = t
+    obj.rotation_euler = r.to_euler(obj.rotation_mode)
 
 
 def is_locked_dof(lower: float, upper: float) -> bool:
@@ -393,6 +500,99 @@ def _apply_soft_constraints(rbc) -> None:
         if abs(hi - lo) < 1e-6:
             setattr(rbc, f"limit_ang_{axis}_lower", 1.0)
             setattr(rbc, f"limit_ang_{axis}_upper", 0.0)
+
+
+def _create_non_collision_constraints(model, rigid_objects, joint_objects, collection) -> None:
+    """Create non-collision constraints based on PMX collision_group_mask.
+
+    PMX uses a bilateral mask: each body has a 16-bit mask where bit N set
+    means "collide with group N". Blender's collision_collections is symmetric
+    and can't represent this, so all bodies share layer 0 (everything can
+    potentially collide) and we use GENERIC constraints with
+    disable_collisions=True to suppress unwanted pairs.
+
+    For pairs that already have a joint, we set disable_collisions on the
+    existing joint. For nearby pairs without a joint, we create a new GENERIC
+    constraint empty.
+    """
+    import bpy
+
+    # Build group map: group_number → list of rigid indices
+    group_map: dict[int, list[int]] = {}
+    for i, rigid in enumerate(model.rigid_bodies):
+        group_map.setdefault(rigid.collision_group_number, []).append(i)
+
+    # Map joint pairs → joint objects for reusing existing constraints
+    joint_pair_map: dict[frozenset, object] = {}
+    for j_idx, joint in enumerate(model.joints):
+        src, dst = joint.src_rigid, joint.dest_rigid
+        if 0 <= src < len(rigid_objects) and 0 <= dst < len(rigid_objects):
+            joint_pair_map[frozenset((src, dst))] = joint_objects[j_idx]
+
+    processed: set[frozenset] = set()
+    nc_count = 0
+
+    for i, rigid_a in enumerate(model.rigid_bodies):
+        mask = rigid_a.collision_group_mask
+        for g in range(16):
+            if mask & (1 << g):
+                continue  # bit set = collides with group g
+            # bit unset = should NOT collide with group g
+            for j in group_map.get(g, []):
+                if i == j:
+                    continue
+                pair = frozenset((i, j))
+                if pair in processed:
+                    continue
+                processed.add(pair)
+
+                if pair in joint_pair_map:
+                    # Set disable_collisions on existing joint
+                    joint_obj = joint_pair_map[pair]
+                    joint_obj.rigid_body_constraint.disable_collisions = True
+                else:
+                    # Check proximity — only create constraint for nearby bodies
+                    obj_a = rigid_objects[i]
+                    obj_b = rigid_objects[j]
+                    dist = (obj_a.location - obj_b.location).length
+                    range_a = _object_range(obj_a)
+                    range_b = _object_range(obj_b)
+                    threshold = 1.5 * (range_a + range_b) * 0.5
+
+                    if dist < threshold:
+                        _create_non_collision_empty(bpy, obj_a, obj_b, collection)
+                        nc_count += 1
+
+    if nc_count > 0:
+        log.info("Created %d non-collision constraints", nc_count)
+
+
+def _object_range(obj) -> float:
+    """Bounding box diagonal of a Blender object."""
+    d = obj.dimensions
+    return (d[0] ** 2 + d[1] ** 2 + d[2] ** 2) ** 0.5
+
+
+def _create_non_collision_empty(bpy, obj_a, obj_b, collection) -> None:
+    """Create a GENERIC constraint empty that disables collision between two bodies."""
+    name = f"NC_{obj_a.name[:15]}_{obj_b.name[:15]}"
+    empty = bpy.data.objects.new(name, None)
+    empty.empty_display_size = 0.01
+    empty.hide_render = True
+    collection.objects.link(empty)
+
+    # Position at midpoint
+    empty.location = (obj_a.location + obj_b.location) / 2
+
+    bpy.context.view_layer.objects.active = empty
+    empty.select_set(True)
+    bpy.ops.rigidbody.constraint_add(type="GENERIC")
+    empty.select_set(False)
+
+    rbc = empty.rigid_body_constraint
+    rbc.object1 = obj_a
+    rbc.object2 = obj_b
+    rbc.disable_collisions = True
 
 
 def _setup_bone_coupling(
@@ -498,3 +698,25 @@ def _setup_physics_world(scene) -> None:
         return
     rbw.substeps_per_frame = 10
     rbw.solver_iterations = 10
+
+
+def _set_rigid_body_world_enabled(scene, enable: bool) -> bool:
+    """Enable/disable the rigid body world, returning previous state.
+
+    If no RB world exists yet, creates one (disabled). This prevents the
+    solver from running while bodies are being added during physics build.
+    """
+    import bpy
+
+    if scene.rigidbody_world is None:
+        # bpy.ops.rigidbody.world_add() requires poll context
+        if bpy.ops.rigidbody.world_add.poll():
+            bpy.ops.rigidbody.world_add()
+            scene.rigidbody_world.enabled = False
+
+    rbw = scene.rigidbody_world
+    if rbw is None:
+        return True  # default: enabled
+    was_enabled = rbw.enabled
+    rbw.enabled = enable
+    return was_enabled

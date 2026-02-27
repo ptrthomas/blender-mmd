@@ -46,24 +46,24 @@ class TestCollisionCollections:
             cols = build_collision_collections(rigid)
             assert cols[group] is True
 
-    def test_only_own_group(self):
-        """Only the own group layer is set — mask is ignored.
+    def test_shared_layer_always_set(self):
+        """Layer 0 (shared) is always set so all bodies can potentially collide.
 
-        Blender's collision_collections is symmetric (share any layer = collide),
-        so adding mask-based layers causes false cross-group collisions.
+        Actual non-collision is handled by GENERIC constraints with
+        disable_collisions=True, not by collision layers.
         """
         rigid = _make_rigid(group=3, mask=0x0000)
         cols = build_collision_collections(rigid)
+        assert cols[0] is True
         assert cols[3] is True
-        assert sum(cols) == 1  # only own group
+        assert sum(cols) == 2  # shared layer + own group
 
-    def test_mask_ignored(self):
-        """Mask value doesn't affect collision layers."""
-        rigid = _make_rigid(group=1, mask=0xFFFE)
+    def test_group_0_two_layers_overlap(self):
+        """Group 0 body: shared layer and own group are the same layer."""
+        rigid = _make_rigid(group=0, mask=0xFFFF)
         cols = build_collision_collections(rigid)
-        assert cols[1] is True   # own group
-        assert cols[0] is False  # mask is ignored
-        assert sum(cols) == 1
+        assert cols[0] is True
+        assert sum(cols) == 1  # layer 0 is both shared and own group
 
     def test_result_length_20(self):
         """Blender needs exactly 20 bools for collision_collections."""
@@ -74,8 +74,9 @@ class TestCollisionCollections:
         """Edge case: highest PMX group (15)."""
         rigid = _make_rigid(group=15, mask=0x7FFF)
         cols = build_collision_collections(rigid)
-        assert cols[15] is True
-        assert sum(cols) == 1
+        assert cols[0] is True   # shared layer
+        assert cols[15] is True  # own group
+        assert sum(cols) == 2
 
 
 # ---------------------------------------------------------------------------
