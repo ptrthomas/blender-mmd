@@ -523,7 +523,6 @@ def _create_joints(model, armature_obj, rigid_objects: list, bone_names: dict,
         obj.select_set(False)
 
         rbc = obj.rigid_body_constraint
-        rbc.spring_type = "SPRING1"
         rbc.disable_collisions = False
 
         # Connect to rigid bodies

@@ -365,6 +365,36 @@ def _setup_ik(
         link_pb.ik_min_z = new_min[2]
         link_pb.ik_max_z = new_max[2]
 
+        # Blender clamps ik_min to [-π,0] and ik_max to [0,π], so small
+        # positive minimums (e.g. knee min_x=0.0087) get silently lost.
+        # Add a LIMIT_ROTATION constraint to enforce the actual limits
+        # where they differ from what native IK can represent (mmd_tools
+        # does the same with "mmd_ik_limit_override").
+        needs_override = (
+            link_pb.ik_min_x != new_min[0]
+            or link_pb.ik_max_x != new_max[0]
+            or link_pb.ik_min_y != new_min[1]
+            or link_pb.ik_max_y != new_max[1]
+            or link_pb.ik_min_z != new_min[2]
+            or link_pb.ik_max_z != new_max[2]
+        )
+        if needs_override:
+            c = link_pb.constraints.new("LIMIT_ROTATION")
+            c.name = "mmd_ik_limit_override"
+            c.owner_space = "LOCAL"
+            c.min_x = new_min[0]
+            c.max_x = new_max[0]
+            c.min_y = new_min[1]
+            c.max_y = new_max[1]
+            c.min_z = new_min[2]
+            c.max_z = new_max[2]
+            c.use_limit_x = (link_pb.ik_min_x != new_min[0]
+                             or link_pb.ik_max_x != new_max[0])
+            c.use_limit_y = (link_pb.ik_min_y != new_min[1]
+                             or link_pb.ik_max_y != new_max[1])
+            c.use_limit_z = (link_pb.ik_min_z != new_min[2]
+                             or link_pb.ik_max_z != new_max[2])
+
     log.debug(
         "IK: %s → %s (constraint on %s, chain=%d, iter=%d)",
         pose_bone.name, target_name, ik_constraint_pb.name,
