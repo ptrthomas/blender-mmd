@@ -292,7 +292,7 @@ Uses **Blender's native IK solver** with correct constraint placement:
 - Edge case: if first IK link == IK target, remove that link and use next link (matches mmd_tools)
 - Set `chain_count` from PMX IK link count (adjusted after any link removal)
 - Set `iterations` from PMX `loopCount * ik_loop_factor` (default factor=1, configurable)
-- Per-link rotation limits use **Blender-native IK properties** (`use_ik_limit_x`, `ik_min_x`, etc.) instead of `LIMIT_ROTATION` constraints — more performant and idiomatic
+- Per-link rotation limits use **Blender-native IK properties** (`use_ik_limit_x`, `ik_min_x`, etc.) — more performant and idiomatic. When Blender clamps a value (e.g. `ik_min_x` clamped to [-π,0], losing a positive minimum like 0.0087 rad), a `LIMIT_ROTATION` constraint (`mmd_ik_limit_override`) is added as a fallback override on only the affected axes.
 - IK limits converted from Blender-global to bone-local space via `_convert_ik_limits()`: negate bone matrix, Y↔Z row swap, transpose, snap to axis-aligned permutation (matches mmd_tools' `convertIKLimitAngles`)
 
 **IK iteration multiplier**: Blender's IK solver converges slower than MMD's CCDIK. The `ik_loop_factor` parameter (stored as custom property on armature) multiplies PMX iteration counts. Default 1 uses raw PMX values. mmd_tools users typically set factor=5 for better foot placement precision.
@@ -384,14 +384,12 @@ For each PMX rigid body:
 
 ### Joints
 
-Create joint constraints using `GENERIC_SPRING` rigid body constraint type with **`spring_type = 'SPRING1'`**.
-
-SPRING1 vs SPRING2: Blender offers two spring implementations. SPRING2 has a [known bug](https://projects.blender.org/blender/blender/issues/55958) where angular springs at high stiffness cause jitter and explosions. Since MMD joints rely heavily on angular springs for hair/skirt physics, we use SPRING1 exclusively.
+Create joint constraints using `GENERIC_SPRING` rigid body constraint type with Blender's default spring type (SPRING2). We use the default to match mmd_tools, which never sets `spring_type` explicitly.
 
 For each PMX joint:
 
 1. Create empty object with `rigid_body_constraint`
-2. Set type to `GENERIC_SPRING`, `spring_type` to `SPRING1`
+2. Set type to `GENERIC_SPRING`
 3. Connect source and destination rigid bodies (`object1`, `object2`)
 4. Enable all 6 DOF limits (`use_limit_lin_x/y/z`, `use_limit_ang_x/y/z`)
 5. Set translation limits from PMX `limit_move_lower/upper` (scaled by import scale)
@@ -446,7 +444,7 @@ These are inherent to Blender's Bullet integration and cannot be fixed in addon 
 - **One-frame lag**: Blender evaluates armature → physics → feeds back next frame. Hair/clothing trails body motion by one frame.
 - **No interactive physics**: Physics only advances during timeline playback. Cannot pose and see physics respond without playing.
 - **No mesh deformation feedback**: Collision shapes don't update when the mesh deforms. Physics bodies use their rest-pose shapes.
-- **Spring precision**: SPRING1 damping is capped at 1.0. Some MMD models may need manual damping adjustment.
+- **Spring precision**: Blender spring damping is capped at 1.0. Some MMD models may need manual damping adjustment.
 
 ### Physics modes
 
@@ -660,7 +658,7 @@ Rigid body physics implemented as intermediate step. Works but has fundamental l
 **Done:**
 - ✅ Rigid body creation with collision_collections (shared layer 0 + own group)
 - ✅ Non-collision constraints from PMX mask (GENERIC with disable_collisions=True)
-- ✅ Joint setup with GENERIC_SPRING / SPRING1 with spring values applied
+- ✅ Joint setup with GENERIC_SPRING (default SPRING2) with spring values applied
 - ✅ Soft constraints for locked DOFs (lower > upper = free, spring provides resistance)
 - ✅ Collision margin fix (1e-6, Blender default 0.04 too large at 0.08 scale)
 - ✅ Dynamic body repositioning to match current bone pose
@@ -669,7 +667,7 @@ Rigid body physics implemented as intermediate step. Works but has fundamental l
 - ✅ RB world disabled during setup (mmd_tools pattern, prevents solver corruption)
 - ✅ Depsgraph flushes at key build steps
 - ✅ Physics build/clear operators
-- ✅ Springs and soft constraints disabled (matches mmd_tools baseline, stable)
+- ✅ Springs enabled with PMX values, soft constraints disabled (matches mmd_tools baseline)
 - ✅ 19 pure-Python unit tests (collision, soft constraints, metadata serialization)
 
 **Known issues:**
@@ -709,9 +707,9 @@ Restructured physics into three clean modes: none (default), rigid_body (mmd_too
 
 #### Phase 2: Simplify Rigid Body Mode (`mode="rigid_body"`) ✅
 
-- [x] Springs disabled (`use_spring_* = False`) — Blender's Bullet doesn't match MMD springs
-- [x] Soft constraints disabled (no `_apply_soft_constraints()` call) — oscillates without springs
-- [x] Matches mmd_tools baseline: stable basic physics without overengineering
+- [x] Springs enabled with PMX stiffness/damping values (matches mmd_tools which uses Blender defaults)
+- [x] Soft constraints disabled (no `_apply_soft_constraints()` call) — oscillates
+- [x] Matches mmd_tools baseline: stable physics with springs providing restoring force
 - [x] Functions kept in file for future experimentation
 
 #### Phase 3: Interactive Cloth Conversion (`mode="cloth"`) ✅
@@ -755,26 +753,23 @@ What we learned from implementing and testing M4 rigid body physics. This inform
 - Physics cache end matches scene frame range
 
 **What doesn't work well (known compromises):**
-- **Soft constraints (lower > upper trick)**: Meant to make locked DOFs elastic. In practice, can cause oscillation or explosion with typical MMD spring stiffness. Currently enabled but may need per-model tuning or disabling.
-- **Springs (SPRING1)**: We apply spring values (unlike mmd_tools which doesn't), but Blender's SPRING1 damping is capped at 1.0 and the overall spring behavior doesn't match MMD's solver. Hair can be too loose or too stiff depending on the model's spring constants.
+- **Soft constraints (lower > upper trick)**: Meant to make locked DOFs elastic. In practice, causes oscillation or explosion with typical MMD spring stiffness. Currently disabled.
+- **Springs**: Applied from PMX values using Blender default SPRING2 (matching mmd_tools). Damping is capped at 1.0 — some models may need manual tuning.
 - **Scrubbing/rewinding**: Resets baked simulation. Must re-bake after rewind. This is a Blender limitation, not a bug.
 - **`frame_set()` doesn't run physics**: Only timeline playback or explicit baking advances the simulation. No way to "preview" physics at a specific frame.
 - **One-frame lag**: Inherent to Blender's dependency graph. Physics always trails bone motion by one frame.
 - **Physics explosion on rewind**: Baked cache gets cleared, dynamic bodies may be in wrong positions. Mitigation: always bake before playback, re-bake after rewind.
 
-**What to simplify in Phase 2:**
-- Drop `_apply_soft_constraints()` — the lower>upper trick is unreliable. Keep DOFs hard-locked as MMD defines them. This matches mmd_tools behavior and is more stable.
-- **Disable springs initially** — mmd_tools doesn't apply them and still gets usable physics. Start with no springs (easier to debug), get basic hair/skirt working stably first, then re-enable springs as a later tuning pass once the baseline is solid.
+**Phase 2 approach (implemented):**
+- Dropped `_apply_soft_constraints()` — the lower>upper trick is unreliable. DOFs stay hard-locked as PMX defines them.
+- Springs enabled with PMX values — provides restoring force that keeps chain bodies connected. Matches mmd_tools (which uses Blender defaults).
 - Don't try to match MMD physics perfectly — the goal is "mmd_tools quality" which is itself imperfect. Users who want good physics should use cloth mode.
-- Keep non-collision constraints — they're correct and prevent false collisions.
-- Consider adding auto-bake after build (bake the first N frames so user sees immediate results).
+- Non-collision constraints kept — they're correct and prevent false collisions.
 
 **What NOT to do:**
 - Don't add physics UI panels — use conversational workflow via Claude Code
-- Don't implement SPRING2 — it has known angular spring bugs in Blender
 - Don't try to match MMD's CCDIK-based physics solver — fundamentally different architecture
 - Don't over-optimize non-collision constraints — the O(n²) issue is theoretical; real models have <50 rigid bodies
-- Springs are a future enhancement — get stable physics without them first, add back later
 
 #### Rigid Body Parity Audit (mmd_tools alignment) ✅
 
@@ -787,6 +782,8 @@ Systematic audit of rigid body build pattern against mmd_tools. Fixes applied to
 - [x] Tracking empty reparenting deferred to post-build: empties created with matrix_world from bone pose, reparented to RBs in batch after depsgraph flush (preserving matrix_world).
 - [x] Physics cache frame_end synced to scene frame_end (both on VMD import and physics build).
 - [x] IK unmuted in `clear_physics()` when physics is removed.
+- [x] Spring type: removed explicit SPRING1 override, using Blender default (SPRING2) to match mmd_tools which never sets spring_type.
+- [x] LIMIT_ROTATION override for IK limits: Blender clamps `ik_min_x` to [-π,0], silently losing small positive minimums (e.g. knee 0.0087 rad). Added `mmd_ik_limit_override` LIMIT_ROTATION constraint on affected axes only.
 
 **Not changed (investigated, no fix needed):**
 - Bone disconnection: all hair chain bones already have `use_connect=False` from PMX data.
