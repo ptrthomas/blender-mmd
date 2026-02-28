@@ -152,6 +152,38 @@ def _build_bone_lookup(armature_obj: bpy.types.Object) -> dict[str, str]:
     return jp_to_bone
 
 
+class _InterpolationHelper:
+    """Compute axis permutation for interpolation channel remapping.
+
+    VMD interpolation has separate curves per axis (X, Y, Z location + rotation).
+    When the bone's local axes are permuted relative to the standard Y↔Z swap,
+    the interpolation channels must be remapped to match.
+
+    Matches mmd_tools' _InterpolationHelper.
+    """
+
+    __slots__ = ("_indices",)
+
+    def __init__(self, mat: Matrix) -> None:
+        indices = [0, 1, 2]
+        # Find the dominant axis mapping by sorting matrix elements
+        sorted_list = sorted(
+            (-abs(mat[i][j]), i, j) for i in range(3) for j in range(3)
+        )
+        _, i, j = sorted_list[0]
+        if i != j:
+            indices[i], indices[j] = indices[j], indices[i]
+        _, i, j = next(k for k in sorted_list if k[1] != i and k[2] != j)
+        if indices[i] != j:
+            idx = indices.index(j)
+            indices[i], indices[idx] = indices[idx], indices[i]
+        self._indices = indices
+
+    def convert(self, interp_xyz: tuple[int, ...]) -> tuple[int, ...]:
+        """Remap interpolation byte offsets according to axis permutation."""
+        return tuple(interp_xyz[i] for i in self._indices)
+
+
 class _BoneConverter:
     """Per-bone coordinate converter from MMD bone-local space to Blender bone-local space.
 
@@ -159,10 +191,10 @@ class _BoneConverter:
     (Y↔Z swap) changes each bone's local axes differently depending on the
     bone's rest pose orientation, we need a per-bone conversion matrix.
 
-    This matches the approach used by mmd_tools (BoneConverter class).
+    Matches mmd_tools' BoneConverter class.
     """
 
-    __slots__ = ("_mat", "_scale")
+    __slots__ = ("_mat", "_scale", "_interp_helper")
 
     def __init__(self, pose_bone: bpy.types.PoseBone, scale: float) -> None:
         # Get bone's rest pose matrix (bone-local → armature space)
@@ -172,6 +204,7 @@ class _BoneConverter:
         # Transpose to get the inverse rotation (armature → adjusted bone-local)
         self._mat = mat.transposed()
         self._scale = scale
+        self._interp_helper = _InterpolationHelper(self._mat)
 
     def convert_location(self, loc: tuple[float, float, float]) -> Vector:
         """Convert VMD bone-local location to Blender bone-local location."""
@@ -187,6 +220,27 @@ class _BoneConverter:
         q_mmd = Quaternion((qw, qx, qy, qz))
         q_mat = self._mat.to_quaternion()
         return (q_mat @ q_mmd @ q_mat.conjugated()).normalized()
+
+    def convert_interpolation(self, interp_xyz: tuple[int, ...]) -> tuple[int, ...]:
+        """Remap interpolation byte offsets for axis permutation."""
+        return self._interp_helper.convert(interp_xyz)
+
+
+def _compatible_quaternion(prev_q: Quaternion, curr_q: Quaternion) -> Quaternion:
+    """Ensure adjacent quaternion keyframes don't have sign flips.
+
+    q and -q represent the same rotation, but Blender's NLERP interpolation
+    treats them differently — interpolating between q and -q takes the long
+    path (spinning ~360° instead of staying still). This function picks the
+    sign that's closer to the previous quaternion.
+
+    Matches mmd_tools' __minRotationDiff.
+    """
+    t1 = ((prev_q.w - curr_q.w) ** 2 + (prev_q.x - curr_q.x) ** 2
+          + (prev_q.y - curr_q.y) ** 2 + (prev_q.z - curr_q.z) ** 2)
+    t2 = ((prev_q.w + curr_q.w) ** 2 + (prev_q.x + curr_q.x) ** 2
+          + (prev_q.y + curr_q.y) ** 2 + (prev_q.z + curr_q.z) ** 2)
+    return -curr_q if t2 < t1 else curr_q
 
 
 def _apply_bone_keyframes(
@@ -224,11 +278,17 @@ def _apply_bone_keyframes(
     # Build per-bone converter
     converter = _BoneConverter(pose_bone, scale)
 
-    # Fill keyframe data
+    # Fill keyframe data with quaternion sign compatibility
+    prev_rot = None
     for ki, kf in enumerate(keyframes):
         loc = converter.convert_location(kf.location)
         rot = converter.convert_rotation(kf.rotation)
         frame = float(kf.frame)
+
+        # Ensure quaternion sign consistency between adjacent keyframes
+        if prev_rot is not None:
+            rot = _compatible_quaternion(prev_rot, rot)
+        prev_rot = rot
 
         # Location
         for ci in range(3):
@@ -244,72 +304,71 @@ def _apply_bone_keyframes(
             kp.interpolation = "BEZIER"
 
     # Apply interpolation handles
-    _apply_bone_interpolation(loc_fcs, rot_fcs, keyframes)
+    _apply_bone_interpolation(loc_fcs, rot_fcs, keyframes, converter)
 
-    # Finalize
+    # Fix first/last keyframe handles (matches mmd_tools __fixFcurveHandles)
     for fc in loc_fcs + rot_fcs:
         fc.update()
+        if len(fc.keyframe_points) >= 1:
+            kp0 = fc.keyframe_points[0]
+            kp0.handle_left_type = "FREE"
+            kp0.handle_left = (kp0.co[0] - 1, kp0.co[1])
+            kp_last = fc.keyframe_points[-1]
+            kp_last.handle_right_type = "FREE"
+            kp_last.handle_right = (kp_last.co[0] + 1, kp_last.co[1])
 
 
 def _apply_bone_interpolation(
     loc_fcs: list,
     rot_fcs: list,
     keyframes: list[BoneKeyframe],
+    converter: _BoneConverter,
 ) -> None:
     """Apply VMD Bézier interpolation curves to F-curve keyframe handles.
 
     VMD interpolation data is 64 bytes per keyframe, encoding Bézier control
     points for 4 channels: X-location, Y-location, Z-location, Rotation.
 
-    Each channel has 4 bytes: (x1, y1, x2, y2) representing the two inner
-    control points of a cubic Bézier curve normalized to [0, 127].
+    The 64 bytes are a 4×16 transposed layout where rows are shifted copies.
+    Channel data is at stride-4 offsets from the row start:
+      Row 0 (offset  0): X-location  → bytes [0, 4, 8, 12]
+      Row 1 (offset 16): Y-location  → bytes [16, 20, 24, 28]
+      Row 2 (offset 32): Z-location  → bytes [32, 36, 40, 44]
+      Row 3 (offset 48): Rotation    → bytes [48, 52, 56, 60]
 
-    The interpolation defines the curve *between* keyframe[i] and
-    keyframe[i+1], so we set the right handle of kp[i] and left handle of
-    kp[i+1].
+    The axis remapping uses the bone converter's interpolation helper to
+    compute the correct row offsets for each axis (matches mmd_tools).
     """
     n = len(keyframes)
     if n < 2:
         return
 
-    # VMD interpolation byte layout (64 bytes):
-    # The 64 bytes are laid out in a 4×16 pattern, but the actual values
-    # we need are at specific offsets. For each of the 4 channels:
-    #   channel 0 (X loc): bytes at indices 0, 4, 8, 12  → x1, y1, x2, y2
-    #   channel 1 (Y loc): bytes at indices 1, 5, 9, 13
-    #   channel 2 (Z loc): bytes at indices 2, 6, 10, 14
-    #   channel 3 (Rotation): bytes at indices 3, 7, 11, 15
-    # But these repeat in a 4×4 grid across the 64 bytes. The first 16 bytes
-    # contain all unique values.
-
-    # Map VMD channel → (fcurve_list, fcurve_index)
-    # VMD channels: 0=X loc, 1=Y loc, 2=Z loc, 3=rotation
-    # After coordinate conversion (x,y,z)→(x,z,y):
-    #   VMD X → Blender X (loc_fcs[0])
-    #   VMD Y → Blender Z (loc_fcs[2])
-    #   VMD Z → Blender Y (loc_fcs[1])
-    vmd_to_blender_loc = {0: 0, 1: 2, 2: 1}  # VMD channel → loc_fcs index
+    # Compute axis-remapped interpolation byte offsets for location channels
+    # (0, 16, 32) are the row start offsets for X, Y, Z in the 64-byte block
+    loc_indices = converter.convert_interpolation((0, 16, 32))
+    # Rotation uses row 3 (offset 48) for all 4 quaternion components
+    rot_index = 48
 
     for ki in range(n - 1):
         interp = keyframes[ki + 1].interpolation
-        if len(interp) < 16:
+        if len(interp) < 64:
             continue
 
-        # Location channels
-        for vmd_ch, bl_idx in vmd_to_blender_loc.items():
-            x1 = interp[vmd_ch]       # byte 0/1/2/3
-            y1 = interp[4 + vmd_ch]   # byte 4/5/6/7
-            x2 = interp[8 + vmd_ch]   # byte 8/9/10/11
-            y2 = interp[12 + vmd_ch]  # byte 12/13/14/15
+        # Location channels: read 4 bytes at stride 4 from remapped row
+        for bl_axis, idx in enumerate(loc_indices):
+            x1 = interp[idx]
+            y1 = interp[idx + 4]
+            x2 = interp[idx + 8]
+            y2 = interp[idx + 12]
             _set_bezier_handles(
-                loc_fcs[bl_idx], ki, ki + 1, x1, y1, x2, y2
+                loc_fcs[bl_axis], ki, ki + 1, x1, y1, x2, y2
             )
 
         # Rotation channel (all 4 quaternion components share the same curve)
-        x1 = interp[3]
-        y1 = interp[7]
-        x2 = interp[11]
-        y2 = interp[15]
+        x1 = interp[rot_index]
+        y1 = interp[rot_index + 4]
+        x2 = interp[rot_index + 8]
+        y2 = interp[rot_index + 12]
         for fc in rot_fcs:
             _set_bezier_handles(fc, ki, ki + 1, x1, y1, x2, y2)
 

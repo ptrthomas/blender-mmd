@@ -158,6 +158,85 @@ class BLENDER_MMD_OT_build_physics(bpy.types.Operator):
             return {"CANCELLED"}
 
 
+class BLENDER_MMD_OT_toggle_ik(bpy.types.Operator):
+    """Toggle IK constraint on/off for an MMD bone chain"""
+
+    bl_idname = "blender_mmd.toggle_ik"
+    bl_label = "Toggle IK"
+    bl_options = {"REGISTER", "UNDO"}
+
+    target_bone: StringProperty(
+        name="Target Bone",
+        description="Name of the IK target bone (subtarget)",
+    )
+
+    def execute(self, context):
+        armature_obj = _find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        toggled = _toggle_ik_for_target(armature_obj, self.target_bone)
+        if not toggled:
+            self.report({"WARNING"}, f"No IK constraint targeting '{self.target_bone}'")
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class BLENDER_MMD_OT_toggle_all_ik(bpy.types.Operator):
+    """Enable or disable all IK constraints"""
+
+    bl_idname = "blender_mmd.toggle_all_ik"
+    bl_label = "Toggle All IK"
+    bl_options = {"REGISTER", "UNDO"}
+
+    enable: bpy.props.BoolProperty(name="Enable", default=True)
+
+    def execute(self, context):
+        armature_obj = _find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        influence = 1.0 if self.enable else 0.0
+        count = 0
+        for pb in armature_obj.pose.bones:
+            for c in pb.constraints:
+                if c.type == "IK" and c.subtarget:
+                    c.influence = influence
+                    _set_ik_limit_influence(armature_obj, pb, c, influence)
+                    count += 1
+
+        state = "enabled" if self.enable else "disabled"
+        self.report({"INFO"}, f"IK {state}: {count} chains")
+        return {"FINISHED"}
+
+
+def _toggle_ik_for_target(armature_obj, target_bone_name: str) -> bool:
+    """Toggle IK constraint influence for a given target bone. Returns True if found."""
+    for pb in armature_obj.pose.bones:
+        for c in pb.constraints:
+            if c.type == "IK" and c.subtarget == target_bone_name:
+                new_influence = 0.0 if c.influence > 0.5 else 1.0
+                c.influence = new_influence
+                _set_ik_limit_influence(armature_obj, pb, c, new_influence)
+                return True
+    return False
+
+
+def _set_ik_limit_influence(armature_obj, ik_bone, ik_constraint, influence: float):
+    """Set influence on LIMIT_ROTATION override constraints in the IK chain."""
+    # Walk the IK chain and toggle mmd_ik_limit_override constraints
+    bone = ik_bone
+    for _ in range(ik_constraint.chain_count):
+        if bone is None:
+            break
+        for c in bone.constraints:
+            if c.type == "LIMIT_ROTATION" and c.name == "mmd_ik_limit_override":
+                c.influence = influence
+        bone = bone.parent
+
+
 class BLENDER_MMD_OT_clear_physics(bpy.types.Operator):
     """Remove rigid body physics for an MMD model"""
 
@@ -199,6 +278,8 @@ _classes = (
     BLENDER_MMD_OT_import_vmd,
     BLENDER_MMD_OT_build_physics,
     BLENDER_MMD_OT_clear_physics,
+    BLENDER_MMD_OT_toggle_ik,
+    BLENDER_MMD_OT_toggle_all_ik,
 )
 
 

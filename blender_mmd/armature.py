@@ -319,14 +319,14 @@ def _finalize_shadow_constraints(
 
 
 def create_armature(
-    model: Model, scale: float, ik_loop_factor: int = 1,
+    model: Model, scale: float, ik_loop_factor: int = 5,
 ) -> bpy.types.Object:
     """Create a Blender armature from parsed PMX bone data.
 
     Args:
         ik_loop_factor: Multiplier for IK solver iterations. Blender's IK solver
             converges slower than MMD's CCDIK, so higher values improve precision.
-            Default 1 uses raw PMX values. Increase to 5–10 if foot IK is imprecise.
+            Default 5 matches common mmd_tools usage for good foot placement.
 
     Returns the armature object (already linked to the scene).
     """
@@ -495,7 +495,7 @@ def _setup_ik(
     pose_bone: bpy.types.PoseBone,
     pmx_bone: Bone,
     bone_names: list[str],
-    ik_loop_factor: int = 1,
+    ik_loop_factor: int = 5,
 ) -> None:
     """Set up IK constraint on the correct chain bone.
 
