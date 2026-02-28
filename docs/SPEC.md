@@ -93,13 +93,13 @@ ln -sf $(pwd)/blender_mmd ~/Library/Application\ Support/Blender/5.0/extensions/
 Claude Code drives development through blender-agent (separate repo, pure HTTP transport layer). The workflow:
 
 1. Edit blender_mmd source files
-2. Restart Blender to reload the addon (blender-agent supports quit + relaunch from shell)
+2. Restart Blender to reload the addon (`python3 ../blender-agent/start_server.py`)
 3. Execute test code via blender-agent (`POST http://localhost:5656`)
-4. Read results from blender-agent's session log (`output/<timestamp>/agent.log`)
-5. Take screenshots for visual validation (`bpy.ops.screen.screenshot(filepath=f"{SESSION}/screenshot.png")`)
+4. Read results from blender-agent's log (`output/agent.log`)
+5. Take screenshots for visual validation (`bpy.ops.screen.screenshot(filepath=f"{OUTPUT}/screenshot.png")`)
 6. Repeat
 
-blender-agent provides: code execution, session-scoped output directory, logging, screenshots, and Blender lifecycle control. blender-mmd has no Python import dependency on blender-agent — they are independent Blender extensions that communicate only through Claude Code.
+blender-agent provides: code execution, output directory, logging, screenshots, and Blender lifecycle control. blender-mmd has no Python import dependency on blender-agent — they are independent Blender extensions that communicate only through Claude Code.
 
 ### Extension manifest
 
@@ -612,7 +612,7 @@ These helpers evolve over time. Start minimal, add as needed.
 
 ## Logging
 
-blender-mmd relies on **blender-agent's existing logging infrastructure**. blender-agent already logs every code execution request and response to a session-scoped `agent.log` file (in `output/<timestamp>/agent.log`). Since Claude Code drives all operations through blender-agent, import results, errors, and tracebacks are captured there automatically.
+blender-mmd relies on **blender-agent's existing logging infrastructure**. blender-agent logs every code execution request and response to `output/agent.log`. Since Claude Code drives all operations through blender-agent, import results, errors, and tracebacks are captured there automatically.
 
 Within addon code, use Python's `logging` module with a `blender_mmd` logger for structured diagnostics:
 
@@ -622,7 +622,7 @@ Within addon code, use Python's `logging` module with a `blender_mmd` logger for
 
 When a PMX file uses features not yet implemented (morphs, display frames, etc.), log a warning and skip. No errors, no user-facing dialogs.
 
-The `blender_mmd` logger uses the default Python handler (stderr). During development, launch Blender from a terminal to see output live. Claude can also read blender-agent's session log for diagnostics. No separate log file or custom file handler needed — blender-agent already handles this.
+The `blender_mmd` logger uses the default Python handler (stderr). During development, launch Blender from a terminal to see output live. Claude can also read blender-agent's log (`output/agent.log`) for diagnostics. No separate log file or custom file handler needed — blender-agent already handles this.
 
 ### Error handling
 

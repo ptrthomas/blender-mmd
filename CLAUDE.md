@@ -27,13 +27,16 @@ Read `docs/SPEC.md` first. It is the single source of truth for architecture, de
 # Symlink addon into Blender extensions
 scripts/setup.sh
 
-# ALWAYS check if Blender is already running before launching:
-curl -s localhost:5656 --data-binary @- <<< 'bpy.app.version_string'
-# Only launch if the check above fails (connection refused):
-/Applications/Blender.app/Contents/MacOS/Blender --python ../blender-agent/start_server.py &
+# Start Blender (connects to existing instance or launches new one)
+python3 ../blender-agent/start_server.py
 
 # Use blender-agent (port 5656) for execution, screenshots, and log monitoring
 # Module reloading is unreliable — restart Blender for code changes
+
+# Restart Blender (for code changes)
+curl -s localhost:5656 --data-binary @- <<< 'bpy.ops.wm.quit_blender()' || true
+sleep 1 && pkill -x Blender 2>/dev/null || true
+sleep 1 && python3 ../blender-agent/start_server.py
 
 # Clear default scene objects before importing
 curl -s localhost:5656 --data-binary @- <<'PYEOF'
@@ -58,7 +61,7 @@ PYEOF
 # Screenshots: two-step process (NEVER use curl -o to save screenshots)
 # Step 1: Tell Blender to save screenshot to disk
 curl -s localhost:5656 --data-binary @- <<'PYEOF'
-bpy.ops.screen.screenshot(filepath="/tmp/blender_screenshot.png")
+bpy.ops.screen.screenshot(filepath=f"{OUTPUT}/screenshot.png")
 PYEOF
 # Step 2: Read the saved PNG file with the Read tool
 # The curl response is JSON, NOT an image. Never pipe/save it as a PNG.
@@ -83,7 +86,7 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
 - **Materials**: Single "MMD Shader" node group (Principled BSDF-based) with toon/sphere inputs. Global controls via armature custom properties (`mmd_emission`, `mmd_toon_fac`, `mmd_sphere_fac`) driven to all materials. Bundled toon textures (toon01-10.bmp) with fallback resolution. Alpha = PMX alpha × texture alpha (matching mmd_tools). Edge color/size stored as material custom properties.
 - **Armature visibility**: Hidden by default on import (`hide_set(True)`, STICK display). Unhide from outliner when needed. Bones split into three collections: "Armature" (standard), "Physics" (dynamic RB bones, orange), "mmd_shadow" (hidden helper bones).
 - **No export**: One-way import only. No PMX/VMD/PMD export.
-- **Logging**: Use blender-agent's session log. Python `logging` to stderr for diagnostics.
+- **Logging**: Use blender-agent's log (`output/agent.log`). Python `logging` to stderr for diagnostics.
 
 ## API usage (inside Blender via blender-agent)
 
