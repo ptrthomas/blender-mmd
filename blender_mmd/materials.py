@@ -129,6 +129,19 @@ def _new_mix_node(nodes, blend_type, location):
 # ---------------------------------------------------------------------------
 
 
+def _add_group_input(shader, links, node_input, name, socket_type, default, target=None, min_val=None, max_val=None):
+    """Add an input socket to a shader node group and optionally link it."""
+    isock = shader.interface.new_socket(name=name, in_out="INPUT", socket_type=socket_type)
+    if default is not None:
+        isock.default_value = default
+    if min_val is not None:
+        isock.min_value = min_val
+    if max_val is not None:
+        isock.max_value = max_val
+    if target is not None:
+        links.new(node_input.outputs[name], target)
+
+
 def _get_or_create_uv_group() -> "bpy.types.ShaderNodeTree":
     """Get or create the MMD UV node group."""
     group_name = "MMD UV"
@@ -241,26 +254,16 @@ def _get_or_create_mmd_shader() -> "bpy.types.ShaderNodeTree":
     links.new(node_bsdf.outputs["BSDF"], node_output.inputs["Shader"])
 
     # --- Input sockets ---
-    def add_input(name, socket_type, default, target=None, min_val=None, max_val=None):
-        isock = shader.interface.new_socket(name=name, in_out="INPUT", socket_type=socket_type)
-        if default is not None:
-            isock.default_value = default
-        if min_val is not None:
-            isock.min_value = min_val
-        if max_val is not None:
-            isock.max_value = max_val
-        if target is not None:
-            links.new(node_input.outputs[name], target)
-
-    add_input("Color", "NodeSocketColor", (1, 1, 1, 1), node_toon.inputs[_MIX_A])
-    add_input("Alpha", "NodeSocketFloat", 1.0, node_bsdf.inputs["Alpha"], 0, 1)
-    add_input("Emission", "NodeSocketFloat", 0.3, node_bsdf.inputs["Emission Strength"], 0, 2)
-    add_input("Roughness", "NodeSocketFloat", 0.8, node_bsdf.inputs["Roughness"], 0, 1)
-    add_input("Toon Tex", "NodeSocketColor", (1, 1, 1, 1), node_toon.inputs[_MIX_B])
-    add_input("Toon Fac", "NodeSocketFloat", 0.0, node_toon.inputs[_MIX_FAC], 0, 1)
-    add_input("Sphere Tex", "NodeSocketColor", (1, 1, 1, 1))  # wired manually below
-    add_input("Sphere Fac", "NodeSocketFloat", 0.0, min_val=0, max_val=1)  # wired manually below
-    add_input("Sphere Add", "NodeSocketFloat", 0.0, node_sphere_select.inputs[_MIX_FAC], 0, 1)
+    _ai = lambda *a, **kw: _add_group_input(shader, links, node_input, *a, **kw)
+    _ai("Color", "NodeSocketColor", (1, 1, 1, 1), node_toon.inputs[_MIX_A])
+    _ai("Alpha", "NodeSocketFloat", 1.0, node_bsdf.inputs["Alpha"], 0, 1)
+    _ai("Emission", "NodeSocketFloat", 0.3, node_bsdf.inputs["Emission Strength"], 0, 2)
+    _ai("Roughness", "NodeSocketFloat", 0.8, node_bsdf.inputs["Roughness"], 0, 1)
+    _ai("Toon Tex", "NodeSocketColor", (1, 1, 1, 1), node_toon.inputs[_MIX_B])
+    _ai("Toon Fac", "NodeSocketFloat", 0.0, node_toon.inputs[_MIX_FAC], 0, 1)
+    _ai("Sphere Tex", "NodeSocketColor", (1, 1, 1, 1))  # wired manually below
+    _ai("Sphere Fac", "NodeSocketFloat", 0.0, min_val=0, max_val=1)  # wired manually below
+    _ai("Sphere Add", "NodeSocketFloat", 0.0, node_sphere_select.inputs[_MIX_FAC], 0, 1)
 
     # Wire Sphere Tex to both multiply and add paths
     links.new(node_input.outputs["Sphere Tex"], node_sph_mul.inputs[_MIX_B])
@@ -307,21 +310,11 @@ def _get_or_create_basic_shader() -> "bpy.types.ShaderNodeTree":
     links.new(node_bsdf.outputs["BSDF"], node_output.inputs["Shader"])
 
     # Input sockets
-    def add_input(name, socket_type, default, target=None, min_val=None, max_val=None):
-        isock = shader.interface.new_socket(name=name, in_out="INPUT", socket_type=socket_type)
-        if default is not None:
-            isock.default_value = default
-        if min_val is not None:
-            isock.min_value = min_val
-        if max_val is not None:
-            isock.max_value = max_val
-        if target is not None:
-            links.new(node_input.outputs[name], target)
-
-    add_input("Color", "NodeSocketColor", (1, 1, 1, 1), node_bsdf.inputs["Base Color"])
-    add_input("Alpha", "NodeSocketFloat", 1.0, node_bsdf.inputs["Alpha"], 0, 1)
-    add_input("Emission", "NodeSocketFloat", 0.3, node_bsdf.inputs["Emission Strength"], 0, 2)
-    add_input("Roughness", "NodeSocketFloat", 0.8, node_bsdf.inputs["Roughness"], 0, 1)
+    _ai = lambda *a, **kw: _add_group_input(shader, links, node_input, *a, **kw)
+    _ai("Color", "NodeSocketColor", (1, 1, 1, 1), node_bsdf.inputs["Base Color"])
+    _ai("Alpha", "NodeSocketFloat", 1.0, node_bsdf.inputs["Alpha"], 0, 1)
+    _ai("Emission", "NodeSocketFloat", 0.3, node_bsdf.inputs["Emission Strength"], 0, 2)
+    _ai("Roughness", "NodeSocketFloat", 0.8, node_bsdf.inputs["Roughness"], 0, 1)
 
     # Also wire color to emission color for consistency with MMD Shader
     links.new(node_input.outputs["Color"], node_bsdf.inputs["Emission Color"])

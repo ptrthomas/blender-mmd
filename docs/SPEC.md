@@ -268,9 +268,7 @@ PMX bones have a `displayConnection` field whose meaning depends on a flag bit:
 - **Flag bit set → bone index**: The bone's tail points at the position of the referenced bone. If the referenced bone index is -1 or invalid, use the default tail offset.
 - **Flag bit unset → position offset**: The bone's tail is at `head + offset`. If the offset is zero (tail == head), use the default tail offset.
 
-**Default tail offset for zero-length bones: `(0, 0, 1) * scale`** (along +Z, length = import scale). This matches mmd_tools' behavior. The direction matters because it determines the bone's local coordinate frame (y_axis = head→tail direction), which propagates through additional transform shadow bones.
-
-**Bug found and fixed**: Originally used `(0, MIN_BONE_LENGTH, 0)` — along +Y with length 0.001. This caused 90° rotation errors on all additional transform bones (D bones, cancel bones, toe) because the shadow bone system copies the source bone's roll and tail offset. With the wrong tail direction, the shadow bone's local frame was rotated 90° relative to the target bone's frame, making TRANSFORM constraints produce wrong results.
+**Default tail offset for zero-length bones: `(0, 0, 1) * scale`** (along +Z, length = import scale). This matches mmd_tools' behavior. The direction matters because it determines the bone's local coordinate frame (y_axis = head→tail direction), which propagates through additional transform shadow bones. Using +Y instead of +Z would cause 90° rotation errors on shadow bones.
 
 ### Bone roll / local axes
 
@@ -296,8 +294,6 @@ MMD bones have specific local axis orientations defined in two ways:
 - `_set_auto_bone_roll()`: Geometrically computes axes for arm/finger bones, matching mmd_tools' `FnBone.update_auto_bone_roll()`
 - Applied after setting bone tails, before leaving edit mode
 - Bones shorter than `MIN_BONE_LENGTH` are skipped (no meaningful direction to derive roll from)
-
-**Verification**: At rest pose, all bone axes (x/y/z) match mmd_tools with dot product = 1.0000 for all tested bones including D bones, cancel bones, and toe bones.
 
 ### IK setup
 
@@ -342,12 +338,6 @@ Bones can inherit rotation and/or location from another bone, scaled by a factor
 - `_finalize_shadow_constraints()`: Wires up COPY_TRANSFORMS and subtargets in POSE mode
 - Chain dependencies (A→B→C) handled automatically by Blender's depsgraph
 - Validation: skip self-reference, out-of-range targets, zero factor
-
-**Results** (YYB Miku, 461 bones): 64 rotation + 46 location = 110 TRANSFORM constraints, 53 shadow bone pairs, 6 negative-factor cancel bones, 57 well-aligned optimizations.
-
-### Transform order
-
-Blender's dependency graph handles evaluation order based on constraint dependencies. The additional transform constraints create implicit dependency chains that the depsgraph resolves automatically.
 
 ### SDEF
 
@@ -443,12 +433,7 @@ Step 8 is the critical fix — mmd_tools stores these values but never applies t
 
 MMD's constraints are "soft" — even when a DOF is locked (`limit_min == limit_max`), bodies can move elastically past the limit with a spring restoring force. Blender's constraints are "hard" — locked DOFs are frozen.
 
-**Status: disabled.** The Bullet trick (setting `lower > upper` to unlock DOFs) was implemented but caused instability in practice:
-
-- Unlocking **translation** DOFs (e.g., `[0,0]` → unlocked) broke joint pivots — bodies separated and flew apart
-- Unlocking **angular** DOFs with spring restoring forces caused oscillation/explosion at typical MMD spring stiffness values
-
-The function `_apply_soft_constraints()` exists in `physics.py` but is not called. The locked DOFs remain hard-locked, which makes hair/clothing slightly stiffer than MMD but stable. This is a known compromise — future work may find better parameters or alternative approaches (e.g., only unlocking specific DOFs that have non-zero spring constants).
+**Disabled.** The Bullet trick (setting `lower > upper` to unlock DOFs) caused oscillation/explosion at typical MMD spring values. The function `_apply_soft_constraints()` exists in `physics.py` but is not called. Hair/clothing is slightly stiffer than MMD but stable.
 
 ### Physics world settings
 
@@ -456,16 +441,8 @@ The function `_apply_soft_constraints()` exists in `physics.py` but is not calle
 |-----------|-------|-------|
 | `substeps_per_frame` | 6 | Matches mmd_tools. Higher values tighten constraints but slow playback. |
 | `solver_iterations` | 10 | Matches mmd_tools. |
-| `gravity` | Default (-9.81) | mmd_tools doesn't scale gravity. Gravity scaling was tested but removed. |
+| `gravity` | Default (-9.81) | Not scaled (matches mmd_tools) |
 | `use_split_impulse` | False | Can reduce bounce artifacts but causes stacking instability |
-
-### Springs and soft constraints
-
-**Springs are enabled** with PMX stiffness values. They provide the restoring force that keeps chain bodies connected at joint pivots. Without springs, bodies scatter to joint limit edges under gravity (no force pulling them back to center).
-
-**Soft constraints are disabled.** The Bullet trick (setting `lower > upper` to unlock frozen DOFs) causes oscillation at typical MMD spring stiffness values. The functions remain in code for experimentation.
-
-This means hair/clothing is slightly stiffer than MMD (locked DOFs stay locked) but stable. Cloth mode is the quality path for natural movement.
 
 ### Physics chain discovery
 
@@ -632,186 +609,25 @@ Let parsing exceptions propagate. The import operator catches exceptions at the 
 
 ### Milestone 1: Import PMX — Armature + Mesh ✅
 
-**Deliverables:**
-- PMX parser (clean rewrite, Blender-coord output, full PMX 2.0/2.1 support)
-- Armature creation with all bones in correct rest positions
-- Mesh creation with correct geometry, vertex weights, normals, and UVs
-- IK constraints using Blender's native solver
-- Import operator with file browser and scale parameter
-- Basic helper functions for Claude introspection
-- Symlink setup script
-- Parser test harness (batch parse + comparison against mmd_tools)
-
-**Validation:**
-- Batch parse all user's test PMX files without errors
-- Field-by-field comparison against mmd_tools parser output
-- Import user's test PMX file, visual comparison: armature matches mmd_tools output
-- Vertex weights are correct (test by posing a bone)
-- IK chains work (move IK target, chain follows)
-- Normals render correctly (smooth shading matches mmd_tools)
-- UVs are present and correct (visible in UV editor)
+PMX parser (clean rewrite), armature with bones, mesh with geometry/weights/normals/UVs, IK constraints, import operator. Parser test harness validates against mmd_tools.
 
 ### Milestone 2: Morphs & Shape Keys ✅
 
-Morphs are needed before VMD import, since VMD files contain morph keyframes for facial animation. Without shape keys, VMD playback would be body-only with no facial expressions.
-
-**Deliverables:**
-- Vertex morph import as Blender shape keys
-- UV morph support (stored as shape key layers or custom data)
-- Bone morph support (stored for VMD application)
-- Material morph support (stored for future material milestone)
-- Shape key management helpers for Claude
-
-**Validation:**
-- Import PMX model, verify shape keys appear in Properties > Object Data > Shape Keys
-- Activate a facial morph shape key, verify mesh deformation is correct
-- Compare shape key count and names against mmd_tools import of the same model
+Vertex/UV/bone/material/group morphs imported as Blender shape keys.
 
 ### Milestone 3: VMD Motion Import ✅
 
-VMD import follows morphs so we can see both body motion AND facial animation during playback.
-
-**Deliverables:**
-- VMD parser (bone keyframes + morph keyframes + property/IK toggle keyframes)
-- Apply bone keyframes to armature as Blender actions/F-curves
-- Apply morph keyframes to shape key F-curves
-- VMD import operator
-- Japanese → English bone name matching via `mmd_name_j` custom properties
-- Translation table (`translations.py`) seeded by scanning user's PMX/VMD collection
-- `scripts/scan_translations.py` tool
-- IK constraint placement fix (first link bone, not end effector)
-- Blender-native IK limit properties (no LIMIT_ROTATION constraints)
-- IK limit angle conversion (Blender-global → bone-local space)
-- VMD IK toggle via constraint influence keyframes
-- Scene FPS (30) and frame range auto-set on VMD import
-
-**Validation:**
-- Import PMX model + VMD motion, play timeline
-- All VMD bone keyframes map to the correct English-named Blender bones
-- Character moves according to VMD with facial expressions animating
-- Compare playback side-by-side with mmd_tools on the same model + motion
-- IK constraint on knee (not ankle), native IK limits on knee PoseBone
-- Baseline comparison: 21 bones × 11 frames all within <0.05 tolerance
-- Floor penetration comparable to mmd_tools reference (Blender IK solver limitation)
+VMD parser, bone/morph keyframes as F-curves, IK toggle via constraint influence, translation table for Japanese→English bone matching, interpolation curves, scene FPS (30).
 
 ### Milestone 4: Rigid Body Physics ✅
 
-Rigid body physics implemented as intermediate step. Works but has fundamental limitations of Blender's rigid body solver for MMD-style chain physics. The long-term plan is Milestone 4b (cloth conversion).
-
-**Done:**
-- ✅ Rigid body creation with collision_collections (shared layer 0 + own group)
-- ✅ Non-collision constraints from PMX mask (GENERIC with disable_collisions=True)
-- ✅ Joint setup with GENERIC_SPRING (default SPRING2) with spring values applied
-- ✅ Soft constraints for locked DOFs (lower > upper = free, spring provides resistance)
-- ✅ Collision margin fix (1e-6, Blender default 0.04 too large at 0.08 scale)
-- ✅ Dynamic body repositioning to match current bone pose
-- ✅ Joint empty repositioning using src_rigid bone delta
-- ✅ Bone ↔ rigid body coupling (STATIC, DYNAMIC, DYNAMIC_BONE)
-- ✅ RB world disabled during setup (mmd_tools pattern, prevents solver corruption)
-- ✅ Depsgraph flushes at key build steps
-- ✅ Physics build/clear operators
-- ✅ Springs enabled with PMX values, soft constraints disabled (matches mmd_tools baseline)
-- ✅ 19 pure-Python unit tests (collision, soft constraints, metadata serialization)
-
-**Known issues:**
-- Scrubbing/rewinding can reset baked simulation; must re-bake after rewind
-- UI: MMD4B panel provides Build/Rebuild/Clear buttons
-- Hair may appear too stiff or too loose depending on model
-- No automatic bake on build (user must bake manually or via playback)
-- Blender's rigid body solver is fundamentally wrong for MMD chain physics (hair, skirt)
-
-**Where to find baked physics in Blender:**
-- Scene Properties → Rigid Body World → Cache section
-- "Bake" button bakes simulation, "Free Bake" clears it
-- Or via Python: `bpy.ops.ptcache.bake()` / `bpy.ops.ptcache.free_bake()`
-- Point cache frame range: `scene.rigidbody_world.point_cache.frame_start/frame_end`
+Rigid body creation, GENERIC_SPRING joints with spring values, collision layers, non-collision constraints, bone coupling (STATIC/DYNAMIC/DYNAMIC_BONE). Springs enabled, soft constraints disabled (oscillation issues). MMD4B panel for Build/Rebuild/Clear.
 
 **Test data (`tests/samples/`):**
 - `初音ミク.pmx` — simple Miku model (122 bones, 45 rigid bodies, 27 joints)
 - `galaxias.vmd` — Galaxias dance motion
-- `baseline_mmd_tools.json` — mmd_tools bone transforms at key frames (pose + IK only). 21 bones tracked across 11 frames (0, 100, ..., 1000). Uses Japanese bone names with .L/.R suffixes. Extracted from mmd_tools import with `ik_loop_factor=5`. The sample model is simpler (122 bones) — no arm twist or shoulder cancel bones.
-- `miku_galaxias.blend` — mmd_tools reference: **pose + IK only, no physics baked**. Do not use this blend for physics comparison — mmd_tools physics was never applied to it.
-
-### Milestone 4b: Physics Cleanup ✅
-
-Simplified physics into two modes: none (default) and rigid_body. Cloth/soft body cage code removed (planned for future phase). Added MMD4B panel for physics controls.
-
-#### Phase 1: Restructure + Default-Off (`mode="none"`) ✅
-
-- [x] Refactored `physics.py` with `mode` parameter (`none` / `rigid_body`)
-- [x] Metadata storage: JSON on `armature_obj["mmd_physics_data"]` (all RB+joint fields)
-- [x] `none` mode stores metadata, creates nothing
-- [x] `rigid_body` mode extracted into `_build_rigid_body_physics()` helper
-- [x] 6 metadata serialization tests (round-trip, fields, JSON validity)
-- [x] Operator updated with `mode` EnumProperty
-- [x] MMD4B panel: Build/Rebuild/Clear buttons in N-panel
-
-#### Phase 2: Simplify Rigid Body Mode (`mode="rigid_body"`) ✅
-
-- [x] Springs enabled with PMX stiffness/damping values (matches mmd_tools which uses Blender defaults)
-- [x] Soft constraints disabled (no `_apply_soft_constraints()` call) — oscillates
-- [x] Matches mmd_tools baseline: stable physics with springs providing restoring force
-- [x] Functions kept in file for future experimentation
-
-#### Phase 3: Soft body / cloth improvements (planned)
-
-Cloth-on-cage approach for hair/skirt deformation is planned as a future phase. The idea: generate a hidden cage tube along a bone chain, apply Cloth modifier to the cage, and bind the visible mesh via Surface Deform. Chain detection code exists in `chains.py` (pure Python, 9 tests). Implementation deferred until rigid body workflow is mature.
-
-#### Rigid Body Mode — Lessons Learned (Historical)
-
-What we learned from implementing and testing M4 rigid body physics. This informs Phase 2 cleanup and sets realistic expectations.
-
-**What works (keep these):**
-- RBW disabled during setup (`rigidbody_world.enabled = False`) — without this, solver corrupts initial state
-- Depsgraph flushes (`scene.frame_set(scene.frame_current)`) at key build points — without this, `matrix_world` is stale
-- Collision margin 1e-6 — Blender default 0.04 is huge at 0.08 model scale
-- Collision layers: shared layer 0 + own group, with GENERIC constraints for non-collision pairs
-- Dynamic body repositioning to match bone pose before creating joints
-- Joint empty repositioning using src_rigid's bone delta
-- Bone coupling: STATIC → bone parent, DYNAMIC → COPY_TRANSFORMS, DYNAMIC_BONE → COPY_ROTATION via tracking empty
-- CAPSULE/SPHERE/BOX mesh geometry for collision shapes (empty mesh = zero-size collision)
-- Rotation negation `(-x,-y,-z)` beyond parser's Y↔Z swap
-- Joint rotation limits: negate AND swap min/max
-- IK muting on physics bones (prevents IK solver from fighting COPY_TRANSFORMS on chain bones)
-- Deferred tracking empty reparenting (mmd_tools two-phase pattern: build muted → depsgraph flush → reparent → unmute)
-- Tracking constraint muting during build (create muted, unmute after reparenting)
-- Physics cache end matches scene frame range
-
-**What doesn't work well (known compromises):**
-- **Soft constraints (lower > upper trick)**: Meant to make locked DOFs elastic. In practice, causes oscillation or explosion with typical MMD spring stiffness. Currently disabled.
-- **Springs**: Applied from PMX values using Blender default SPRING2 (matching mmd_tools). Damping is capped at 1.0 — some models may need manual tuning.
-- **Scrubbing/rewinding**: Resets baked simulation. Must re-bake after rewind. This is a Blender limitation, not a bug.
-- **`frame_set()` doesn't run physics**: Only timeline playback or explicit baking advances the simulation. No way to "preview" physics at a specific frame.
-- **One-frame lag**: Inherent to Blender's dependency graph. Physics always trails bone motion by one frame.
-- **Physics explosion on rewind**: Baked cache gets cleared, dynamic bodies may be in wrong positions. Mitigation: always bake before playback, re-bake after rewind.
-
-**Phase 2 approach (implemented):**
-- Dropped `_apply_soft_constraints()` — the lower>upper trick is unreliable. DOFs stay hard-locked as PMX defines them.
-- Springs enabled with PMX values — provides restoring force that keeps chain bodies connected. Matches mmd_tools (which uses Blender defaults).
-- Don't try to match MMD physics perfectly — the goal is "mmd_tools quality" which is itself imperfect.
-- Non-collision constraints kept — they're correct and prevent false collisions.
-- Non-collision constraint creation uses template-and-duplicate pattern (O(log N) bpy.ops calls) to avoid Blender hanging on models with many constraint pairs.
-
-**What NOT to do:**
-- Don't try to match MMD's CCDIK-based physics solver — fundamentally different architecture
-
-#### Rigid Body Parity Audit (mmd_tools alignment) ✅
-
-Systematic audit of rigid body build pattern against mmd_tools. Fixes applied to match mmd_tools' proven build order and constraint types.
-
-**Fixed:**
-- [x] DYNAMIC bodies use COPY_TRANSFORMS (location + rotation from RB), not COPY_ROTATION. Prevents chain divergence at hair tips.
-- [x] IK constraints muted on DYNAMIC/DYNAMIC_BONE bones during physics build AND playback. Without this, IK solver (e.g. hair IK chain_count=5) overrides COPY_TRANSFORMS positions on chain bones.
-- [x] Tracking constraints (COPY_TRANSFORMS/COPY_ROTATION) created muted during build, unmuted in post-build after tracking empties are reparented.
-- [x] Tracking empty reparenting deferred to post-build: empties created with matrix_world from bone pose, reparented to RBs in batch after depsgraph flush (preserving matrix_world).
-- [x] Physics cache frame_end synced to scene frame_end (both on VMD import and physics build).
-- [x] IK unmuted in `clear_physics()` when physics is removed.
-- [x] Spring type: removed explicit SPRING1 override, using Blender default (SPRING2) to match mmd_tools which never sets spring_type.
-- [x] LIMIT_ROTATION override for IK limits: Blender clamps `ik_min_x` to [-π,0], silently losing small positive minimums (e.g. knee 0.0087 rad). Added `mmd_ik_limit_override` LIMIT_ROTATION constraint on affected axes only.
-
-**Not changed (investigated, no fix needed):**
-- Bone disconnection: all hair chain bones already have `use_connect=False` from PMX data.
-- Soft constraints: mmd_tools doesn't implement inverted-limits workaround either. Springs enabled, soft constraints disabled — matches mmd_tools.
+- `baseline_mmd_tools.json` — mmd_tools bone transforms at key frames (pose + IK only, `ik_loop_factor=5`)
+- `miku_galaxias.blend` — mmd_tools reference (**pose + IK only, no physics baked**)
 
 ### MMD4B Panel
 
@@ -834,63 +650,19 @@ Systematic audit of rigid body build pattern against mmd_tools. Fixes applied to
 
 ### Milestone 5: Materials & Textures ✅
 
-**Status:** Done — Principled BSDF-based shader with global controls
+Two shader modes: "MMD Shader Basic" (default, Principled BSDF only) and full "MMD Shader" (toon/sphere pipeline, opt-in via import checkbox). Texture loading with dedup, per-face material assignment, UV V-flip, overlapping face detection, global controls via armature drivers.
 
-**Deliverables:**
-- Two shader modes via "Toon & Sphere Textures" checkbox on PMX import (off by default):
-  - **"MMD Shader Basic"** (default): Principled BSDF with Color, Alpha, Emission, Roughness inputs only. No toon/sphere nodes or UV group. Lightweight for rendering and compositing.
-  - **"MMD Shader"** (checkbox on): Full toon/sphere pipeline — 5 processing nodes (toon multiply, sphere multiply/add, sphere select, Principled BSDF). Includes "MMD UV" node group for sphere/toon coordinate generation.
-- Toon texture support (full mode only) with bundled fallback: `blender_mmd/data/toons/toon01-10.bmp` — shared toon textures resolve from PMX dir → parent dir → bundled addon data
-- Sphere texture modes (full mode only): multiply (sRGB), add (Linear), subtex (UV1) — controlled by Sphere Fac and Sphere Add inputs
-- Global material controls via armature custom properties + drivers: `mmd_emission` on both modes; `mmd_toon_fac`, `mmd_sphere_fac` on full mode only
-- Texture loading (diffuse, sphere, toon) with dedup by path
-- Per-face material assignment via `foreach_set`
-- UV V-flip (`V = 1.0 - V`) for PMX DirectX→Blender OpenGL convention
-- Overlapping face detection: overlay materials (eye highlights, layers) auto-set to `blend_method="BLEND"` with `show_transparent_back=False` to prevent z-fighting
-- Material flag properties: `enabled_toon_edge`, `enabled_drop_shadow`, `enabled_self_shadow_map`, `enabled_self_shadow`
-- Edge color/size stored as custom properties on Blender materials for future outline support
-
-**Not yet done (optimization):**
-- `foreach_set` for UV assignment (currently per-loop Python iteration — slow on large models)
-- Degenerate face cleanup (mmd_tools removes 2 faces on this model; we keep all)
-- Sharp edge detection from normals (mmd_tools marks sharp edges at angle threshold)
-
-**Deferred to future milestones:**
-- Edge/outline (solidify + edge materials, using stored `mmd_edge_color`/`mmd_edge_size`)
-- Material morphs (VMD keyframes driving material properties)
-- Per-material mesh split (needed for selective outline rendering)
-- Light linking (Principled BSDF compatible, but needs per-object mesh split)
+**Remaining optimizations:** `foreach_set` for UV assignment, degenerate face cleanup.
 
 ### Milestone 6: Animation Polish
 
-**Status:** In progress — remaining items are low priority, contributions welcome
+Additional transforms done (grant parent, shadow bones). Remaining: VMD camera motion, CCD IK solver.
 
-**Done:**
-- Additional transform (grant parent / 付与親) — TRANSFORM constraints + shadow bones for D bones, shoulder cancel, arm twist, eye tracking
+### Milestone 7: Creative Tools (planned)
 
-**Remaining (contributions welcome — Claude Code recommended for development):**
-- VMD camera motion import
-- CCD IK solver (matching MMD output more closely)
-
-### Milestone 7: Custom Shader & Creative Tools (planned)
-
-Now that we're independent of mmd_tools and have a solid import pipeline, we can start doing more creative things beyond MMD compatibility.
-
-**Custom simplified shader:**
-- A clean, modern shader that looks good in EEVEE and Cycles without the MMD-specific toon/sphere pipeline
-- Goal: "anime-style but production-ready" — good for rendering, compositing, and creative projects
-- Not bound by MMD's material model — can use Principled BSDF, custom node groups, or procedural approaches
-- Switchable post-import (alongside existing mmd/simple modes)
-
-**Edge/outline rendering:**
-- Solidify modifier + inverted-normals material for anime outlines
-- Per-material control (some materials need outlines, others don't)
-- May require per-material mesh split for selective application
-
-**Material morphs:**
-- VMD material keyframes → Blender material property drivers/keyframes
-- Covers effects like: glow, transparency fade, color shift, toon changes
-- Needs careful mapping of MMD material morph operations (add/multiply) to Blender node inputs
+- Edge/outline rendering (solidify + inverted-normals material, per-material control)
+- Material morphs (VMD material keyframes → Blender property drivers)
+- Per-material mesh split (needed for selective outline rendering)
 
 ### Future Roadmap
 

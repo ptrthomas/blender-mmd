@@ -223,65 +223,6 @@ class TestParseSynthetic:
 
 
 # ---------------------------------------------------------------------------
-# Coordinate conversion (pure Python — no Blender/mathutils needed)
-# ---------------------------------------------------------------------------
-
-def _convert_location_pure(loc: tuple) -> tuple:
-    """MMD (x, y, z) → Blender (x, z, y).  Swap Y↔Z."""
-    return (loc[0], loc[2], loc[1])
-
-
-def _convert_rotation_pure(rot: tuple) -> tuple:
-    """MMD quaternion (x,y,z,w) → Blender quaternion (w,x,y,z) with axis remap.
-
-    The Y↔Z swap changes handedness (det=-1).  Converting a left-handed
-    rotation quaternion to right-handed negates all vector components and
-    swaps Y↔Z:  qx_b = -qx, qy_b = -qz, qz_b = -qy.
-    Returns (w, x, y, z) in Blender convention.
-    """
-    qx, qy, qz, qw = rot
-    return (qw, -qx, -qz, -qy)
-
-
-class TestCoordinateConversion:
-    """Test the coordinate conversion logic used by the VMD importer."""
-
-    def test_location_identity(self):
-        assert _convert_location_pure((0.0, 0.0, 0.0)) == (0.0, 0.0, 0.0)
-
-    def test_location_conversion(self):
-        # MMD (x, y, z) → Blender (x, z, y)
-        result = _convert_location_pure((1.0, 2.0, 3.0))
-        assert result[0] == pytest.approx(1.0)   # x → x
-        assert result[1] == pytest.approx(3.0)   # z → y
-        assert result[2] == pytest.approx(2.0)   # y → z
-
-    def test_rotation_identity(self):
-        # Identity quaternion (x=0,y=0,z=0,w=1) should stay identity
-        w, x, y, z = _convert_rotation_pure((0.0, 0.0, 0.0, 1.0))
-        assert w == pytest.approx(1.0)
-        assert x == pytest.approx(0.0)
-        assert y == pytest.approx(0.0)
-        assert z == pytest.approx(0.0)
-
-    def test_rotation_y_axis_to_z_axis(self):
-        import math
-        # 45 degrees around MMD Y-axis (up) → Blender Z-axis (up), negated
-        # due to left-handed → right-handed conversion
-        angle = math.pi / 4
-        sin_a = math.sin(angle / 2)
-        cos_a = math.cos(angle / 2)
-        # MMD quat for Y-axis rotation: (x=0, y=sin, z=0, w=cos)
-        w, x, y, z = _convert_rotation_pure((0.0, sin_a, 0.0, cos_a))
-        # All vector components negated + Y↔Z swap:
-        # qx_b=-0=0, qy_b=-qz=-0=0, qz_b=-qy=-sin_a
-        assert w == pytest.approx(cos_a)
-        assert x == pytest.approx(0.0)
-        assert y == pytest.approx(0.0)
-        assert z == pytest.approx(-sin_a)
-
-
-# ---------------------------------------------------------------------------
 # Error handling
 # ---------------------------------------------------------------------------
 

@@ -4,25 +4,7 @@ from __future__ import annotations
 
 import bpy
 
-
-def _is_mmd_armature(obj) -> bool:
-    return (
-        obj is not None
-        and obj.type == "ARMATURE"
-        and obj.get("import_scale") is not None
-    )
-
-
-def _find_mmd_armature(context) -> bpy.types.Object | None:
-    """Find the relevant MMD armature for the panel."""
-    obj = context.active_object
-    if obj is None:
-        return None
-    if _is_mmd_armature(obj):
-        return obj
-    if obj.parent and _is_mmd_armature(obj.parent):
-        return obj.parent
-    return None
+from .helpers import find_mmd_armature
 
 
 def _get_ik_chains(armature_obj) -> list[tuple[str, str, bool]]:
@@ -52,11 +34,11 @@ class BLENDER_MMD_PT_physics(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        return _find_mmd_armature(context) is not None
+        return find_mmd_armature(context) is not None
 
     def draw(self, context):
         layout = self.layout
-        armature_obj = _find_mmd_armature(context)
+        armature_obj = find_mmd_armature(context)
 
         has_physics = armature_obj.get("physics_collection") is not None
 
@@ -103,11 +85,11 @@ class BLENDER_MMD_PT_ik_toggle(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        return _find_mmd_armature(context) is not None
+        return find_mmd_armature(context) is not None
 
     def draw(self, context):
         layout = self.layout
-        armature_obj = _find_mmd_armature(context)
+        armature_obj = find_mmd_armature(context)
 
         chains = _get_ik_chains(armature_obj)
         if not chains:
@@ -145,10 +127,10 @@ class BLENDER_MMD_PT_main(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        return _find_mmd_armature(context) is not None
+        return find_mmd_armature(context) is not None
 
     def draw(self, context):
-        armature_obj = _find_mmd_armature(context)
+        armature_obj = find_mmd_armature(context)
         self.layout.label(text=armature_obj.name, icon="ARMATURE_DATA")
 
 

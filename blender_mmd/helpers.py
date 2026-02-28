@@ -5,6 +5,36 @@ from __future__ import annotations
 import bpy
 
 
+# ---------------------------------------------------------------------------
+# Shared armature lookup (used by operators.py, panels.py, and helpers below)
+# ---------------------------------------------------------------------------
+
+
+def is_mmd_armature(obj) -> bool:
+    """Check if an object is a blender_mmd-imported armature."""
+    return (
+        obj is not None
+        and obj.type == "ARMATURE"
+        and obj.get("import_scale") is not None
+    )
+
+
+def find_mmd_armature(context) -> bpy.types.Object | None:
+    """Find the relevant MMD armature from context.
+
+    Checks: active object → active object's parent (mesh child) → single armature in scene.
+    """
+    obj = context.active_object
+    if obj is not None:
+        if is_mmd_armature(obj):
+            return obj
+        if obj.parent and is_mmd_armature(obj.parent):
+            return obj.parent
+    # Auto-detect: single MMD armature in scene
+    candidates = [o for o in context.scene.objects if is_mmd_armature(o)]
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def get_model_info(armature_name: str | None = None) -> dict:
     """Return summary info about an imported MMD model."""
     if armature_name:

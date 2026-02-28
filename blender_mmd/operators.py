@@ -8,6 +8,8 @@ import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, StringProperty
 from bpy_extras.io_utils import ImportHelper
 
+from .helpers import find_mmd_armature
+
 log = logging.getLogger("blender_mmd")
 
 
@@ -48,31 +50,6 @@ class BLENDER_MMD_OT_import_pmx(bpy.types.Operator, ImportHelper):
             return {"CANCELLED"}
 
 
-def _find_mmd_armature(context) -> bpy.types.Object | None:
-    """Find a blender_mmd-imported armature to apply VMD motion to.
-
-    Priority:
-    1. Active object if it's a blender_mmd armature
-    2. Only blender_mmd armature in the scene (auto-detect)
-    Returns None if no armature found or multiple ambiguous choices.
-    """
-    active = context.active_object
-    if active and active.type == "ARMATURE" and _is_mmd_armature(active):
-        return active
-
-    candidates = [
-        obj for obj in context.scene.objects
-        if obj.type == "ARMATURE" and _is_mmd_armature(obj)
-    ]
-    if len(candidates) == 1:
-        return candidates[0]
-    return None
-
-
-def _is_mmd_armature(obj: bpy.types.Object) -> bool:
-    """Check if an armature was imported by blender_mmd (has import_scale property)."""
-    return obj.get("import_scale") is not None
-
 
 class BLENDER_MMD_OT_import_vmd(bpy.types.Operator, ImportHelper):
     """Import a VMD motion file onto an MMD armature"""
@@ -88,7 +65,7 @@ class BLENDER_MMD_OT_import_vmd(bpy.types.Operator, ImportHelper):
         from .vmd import parse
         from .vmd.importer import import_vmd
 
-        armature_obj = _find_mmd_armature(context)
+        armature_obj = find_mmd_armature(context)
         if armature_obj is None:
             self.report(
                 {"ERROR"},
@@ -136,7 +113,7 @@ class BLENDER_MMD_OT_build_physics(bpy.types.Operator):
         from .physics import build_physics
         from .pmx import parse
 
-        armature_obj = _find_mmd_armature(context)
+        armature_obj = find_mmd_armature(context)
         if armature_obj is None:
             self.report({"ERROR"}, "No MMD armature found.")
             return {"CANCELLED"}
@@ -177,7 +154,7 @@ class BLENDER_MMD_OT_toggle_ik(bpy.types.Operator):
     )
 
     def execute(self, context):
-        armature_obj = _find_mmd_armature(context)
+        armature_obj = find_mmd_armature(context)
         if armature_obj is None:
             self.report({"ERROR"}, "No MMD armature found.")
             return {"CANCELLED"}
@@ -199,7 +176,7 @@ class BLENDER_MMD_OT_toggle_all_ik(bpy.types.Operator):
     enable: bpy.props.BoolProperty(name="Enable", default=True)
 
     def execute(self, context):
-        armature_obj = _find_mmd_armature(context)
+        armature_obj = find_mmd_armature(context)
         if armature_obj is None:
             self.report({"ERROR"}, "No MMD armature found.")
             return {"CANCELLED"}
@@ -253,7 +230,7 @@ class BLENDER_MMD_OT_clear_physics(bpy.types.Operator):
     def execute(self, context):
         from .physics import clear_physics
 
-        armature_obj = _find_mmd_armature(context)
+        armature_obj = find_mmd_armature(context)
         if armature_obj is None:
             self.report({"ERROR"}, "No MMD armature found.")
             return {"CANCELLED"}
