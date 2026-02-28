@@ -362,23 +362,19 @@ Default import scale: **0.08** (matching mmd_tools). Configurable at import time
 
 ### Overview
 
-The physics system is the primary motivation for blender-mmd. Blender's rigid body physics (Bullet engine) is fundamentally capable but mmd_tools has three bugs/limitations that cause most of the problems users experience:
+The physics system uses Blender's rigid body physics (Bullet engine) with the same core approach as mmd_tools: `GENERIC_SPRING` joints with spring values applied, `disable_collisions` constraints for non-colliding pairs, and bone coupling via COPY_TRANSFORMS/COPY_ROTATION. Both mmd_tools and blender-mmd apply PMX spring stiffness values to Blender constraints (mmd_tools via property update callbacks, blender-mmd directly during joint creation).
 
-1. **Spring values never applied** — mmd_tools stores PMX spring stiffness/damping in custom properties but never sets them on the actual `GENERIC_SPRING` constraints. This is the main reason rigid bodies fly apart.
-2. **O(n²) non-collision constraint objects** — mmd_tools creates an EMPTY with `disable_collisions=True` for every non-colliding pair. A model with 100 rigid bodies can generate 200+ extra objects. Blender's `collision_collections` API eliminates all of these.
-3. **Hard vs soft constraint mismatch** — When PMX locks a DOF (`limit_min == limit_max`), MMD treats it as elastic. Blender freezes it. This makes hair/clothing stiff and unnatural.
+The main limitation is Blender's hard constraint model vs MMD's soft constraints: when a DOF is locked (`limit_min == limit_max`), MMD allows elastic movement while Blender freezes it. This makes hair/clothing stiffer than MMD. The cloth-on-cage approach (Milestone 4b) is the quality path for natural movement.
 
 ### What we can and cannot fix
 
-| Problem | Fix | Confidence |
-|---------|-----|------------|
-| Rigid bodies flying apart | Actually apply spring stiffness/damping to constraints | High |
-| 200+ extra non-collision objects | Use `collision_collections` (native API) | High |
-| Stiff hair/clothing (hard constraints) | Unlock frozen DOFs, use spring restoring force | Medium |
+| Problem | Fix | Status |
+|---------|-----|--------|
+| Stiff hair/clothing (hard constraints) | Cloth-on-cage simulation (M4b) | Done |
 | One-frame physics lag behind bone motion | Inherent to Blender's dependency graph — cannot fix | N/A |
 | Interactive posing with live physics | Not possible — physics only advances during timeline playback | N/A |
 
-**Workflow expectation**: Import model, apply VMD motion, play timeline forward (or bake). Physics settles over the first few frames. This matches the existing mmd_tools workflow but with bodies that actually stay connected and respond elastically.
+**Workflow expectation**: Import model, apply VMD motion, play timeline forward (or bake). Physics settles over the first few frames. For better hair/skirt physics, use the MMD4B cloth panel to convert bone chains to cloth simulation.
 
 ### Collision groups
 
@@ -386,16 +382,15 @@ Use Blender's `collision_collections` property (20-element boolean array on `Rig
 
 MMD uses 16 collision groups with a bilateral "non-collision mask" (bit set = don't collide). Blender uses "collision collections" where objects sharing ANY layer collide (symmetric). This asymmetry means PMX's bilateral mask system cannot be directly mapped — adding mask-based layers causes false cross-group collisions.
 
-**Current approach: own-group-only.** Each body is placed only in its own collision group layer. This preserves within-group self-collision and avoids aggressive false positives (e.g., hair colliding with skirt when only body↔hair was intended). The tradeoff is that some intended cross-group collisions are lost.
+**Current approach: shared layer + own group + non-collision constraints.** Each body is placed on shared layer 0 (so everything potentially collides) plus its own collision group layer. Non-colliding pairs are then suppressed via `GENERIC` constraints with `disable_collisions=True`, same pattern as mmd_tools. For pairs that already have a joint, the existing joint's `disable_collisions` is set instead of creating a new object. A proximity filter (1.5x average range) avoids creating constraints for distant bodies that would never collide anyway.
 
 ```python
 blender_collections = [False] * 20
-blender_collections[pmx_rigid.collision_group_number] = True  # own group only
+blender_collections[0] = True  # shared layer — all bodies can potentially collide
+blender_collections[pmx_rigid.collision_group_number] = True  # own group
 ```
 
-This eliminates all non-collision constraint objects entirely. For a typical model this removes 100–300 Blender objects.
-
-**Future improvement**: A more accurate approach would analyze the collision graph to find groups that mutually want to collide and merge them onto shared layers, while keeping non-colliding groups separated. This is complex but would recover cross-group collisions without false positives.
+**Future improvement**: A more accurate approach would analyze the collision graph to find groups that mutually want to collide and merge them onto shared layers, while keeping non-colliding groups separated. This could reduce or eliminate the need for non-collision constraint objects.
 
 ### Rigid body creation
 

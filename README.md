@@ -6,32 +6,33 @@ Imports PMX models and VMD motions into Blender with correct armature, mesh, mat
 
 ## Why rewrite mmd_tools?
 
-mmd_tools is a battle-tested addon that has served the MMD-Blender community for years. This project rewrites it from scratch to fix fundamental issues and target modern Blender:
-
-**Physics that actually works.** mmd_tools stores PMX spring stiffness values in custom properties but never applies them to Blender's joint constraints. This is the main reason rigid bodies fly apart. We actually set the spring values. We also offer a cloth-on-cage approach (MMD4B panel) for hair and skirt physics that produces more natural movement than rigid bodies alone.
-
-**No O(n^2) collision objects.** mmd_tools creates an empty object with `disable_collisions=True` for every non-colliding rigid body pair. A model with 100 rigid bodies can generate 200+ extra objects. We use Blender's native `collision_collections` API instead.
+mmd_tools is a battle-tested addon that has served the MMD-Blender community for years. This project rewrites it from scratch for modern Blender with a cleaner architecture:
 
 **Blender 5.0+ only.** No legacy code paths, no backwards compatibility shims. Uses current APIs throughout: extension manifest, `collision_collections`, modern normals API, slot-based action system.
 
-**Clean, documented codebase.** The full architecture is documented in [`docs/SPEC.md`](docs/SPEC.md). The PMX and VMD parsers are standalone reference implementations with Python type hints, useful beyond Blender (e.g., for a future three.js port).
+**Coordinate conversion in the parser.** mmd_tools scatters `.xzy` swizzles throughout the importer, bone utilities, and physics code. We convert once in the parser — all downstream code works in pure Blender coordinates. This eliminates an entire class of coordinate bugs.
+
+**Clean, documented codebase.** The full architecture is documented in [`docs/SPEC.md`](docs/SPEC.md) — every design decision, coordinate system detail, and known limitation. The PMX and VMD parsers are standalone reference implementations with Python type hints and dataclasses, useful beyond Blender (e.g., for a future three.js port).
+
+**Cloth-on-cage physics.** Beyond standard rigid body physics, we offer a cloth simulation approach for hair and skirts: select bones, generate a cage tube, and let Cloth + Surface Deform handle the deformation. This produces more natural movement than rigid bodies alone.
+
+**Designed for AI-assisted development.** No traditional UI panels beyond the import operator and MMD4B cloth panel. The addon is designed to be driven by Claude Code via [blender-agent](https://github.com/ptrthomas/blender-agent).
 
 ## Key differences from mmd_tools
 
 | | mmd_tools | Blender MMD |
 |---|---|---|
 | Blender version | 2.83–4.x | 5.0+ only |
+| Codebase | ~15k LOC, accumulated over years | ~11k LOC, clean rewrite with full spec |
 | Object hierarchy | Root Empty > Armature > Mesh | Armature > Mesh (no root empty) |
-| Bone names | Japanese (with .L/.R) | English (Japanese stored as custom property) |
-| IK constraints | On end effector (ankle) | On first link (knee) — correct for Blender's solver |
-| IK limits | LIMIT_ROTATION constraints | Native PoseBone IK properties |
-| IK toggle (VMD) | Custom property + update callback | Constraint influence keyframes (CONSTANT interpolation) |
-| Physics springs | Stored but never applied | Applied to GENERIC_SPRING constraints |
-| Non-collision pairs | O(n^2) empty objects | `collision_collections` API |
-| Coordinate conversion | Scattered throughout | Done once in parser — downstream is pure Blender coords |
+| Bone names | Japanese by default (optional translation) | English by default (Japanese stored as `mmd_name_j`) |
+| Coordinate conversion | `.xzy` swizzles scattered across importer, bone, physics code | Done once in parser — downstream is pure Blender coords |
+| IK toggle (VMD) | Custom `mmd_ik_toggle` property + update callback | Constraint influence keyframes (more Blender-native) |
 | Hair/skirt physics | Rigid body only | Rigid body + cloth-on-cage with Surface Deform |
-| UI | Sidebar panels, menus | Minimal — designed to be driven by Claude Code |
-| Additional transforms | COPY_ROTATION | TRANSFORM constraints + shadow bones (handles negative factors, euler discontinuities) |
+| Physics springs | Applied via property update callbacks | Applied directly during joint creation |
+| UI | Sidebar panels, menus, property groups | Minimal — designed for Claude Code |
+
+Both projects share the same core approach for IK constraints (first link bone placement), IK limits (native properties + LIMIT_ROTATION override), and additional transforms (TRANSFORM constraints + shadow bones).
 
 ## What's implemented
 
