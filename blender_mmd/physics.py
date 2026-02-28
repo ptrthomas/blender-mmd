@@ -155,6 +155,11 @@ def _build_rigid_body_physics(armature_obj, model, scale: float) -> None:
         # Step 6: Physics world settings
         _setup_physics_world(bpy.context.scene, scale)
 
+        # Hide physics collection in viewport (less clutter)
+        vl_col = bpy.context.view_layer.layer_collection.children.get(col_name)
+        if vl_col:
+            vl_col.hide_viewport = True
+
     finally:
         # Always enable rigid body world after build — we just created physics,
         # so it should be active.
