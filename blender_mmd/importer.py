@@ -11,7 +11,7 @@ from .pmx import parse
 from .pmx.types import RigidMode
 from .armature import create_armature
 from .mesh import create_mesh
-from .materials import create_materials
+from .materials import create_materials, setup_drivers
 
 log = logging.getLogger("blender_mmd")
 
@@ -74,6 +74,10 @@ def _setup_bone_collections(armature_obj, model) -> None:
             bone.color.custom.select = (1.0, 0.6, 0.0)
             bone.color.custom.active = (1.0, 0.8, 0.2)
 
+    # Hide all bone collections by default (unhide from outliner when needed)
+    armature_coll.is_visible = False
+    physics_coll.is_visible = False
+
     # Enable bone colors and use STICK display
     arm_data.show_bone_colors = True
     arm_data.display_type = "STICK"
@@ -117,13 +121,16 @@ def import_pmx(
     # Set up bone collections and physics bone coloring
     _setup_bone_collections(armature_obj, model)
 
-    # Hide armature in viewport (less clutter, still selectable in outliner)
+    # Armature display settings
     armature_obj.show_in_front = False
-    armature_obj.hide_set(True)
 
     # Select armature as active
     bpy.context.view_layer.objects.active = armature_obj
     armature_obj.select_set(True)
+
+    # Set up material drivers (must be after full scene registration)
+    bpy.context.view_layer.update()
+    setup_drivers(armature_obj)
 
     log.info(
         "Import complete: '%s' — %d bones, %d vertices",

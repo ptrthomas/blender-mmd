@@ -3,6 +3,8 @@
 Uses a single Principled BSDF-based "MMD Shader" node group with optional
 toon and sphere texture inputs. Global controls (emission, toon, sphere)
 are driven from armature custom properties.
+
+Uses ShaderNodeMix (Blender 4.0+) instead of deprecated ShaderNodeMixRGB.
 """
 
 from __future__ import annotations
@@ -97,6 +99,36 @@ except ImportError:
     _HAS_BPY = False
 
 
+# ---------------------------------------------------------------------------
+# ShaderNodeMix helpers (replaces deprecated ShaderNodeMixRGB)
+# ---------------------------------------------------------------------------
+
+# ShaderNodeMix with data_type='RGBA' exposes these socket indices:
+#   inputs:  0=Factor(float), 1=Factor(vector), 2=A(float), 3=B(float),
+#            4=A(vector), 5=B(vector), 6=A(color), 7=B(color),
+#            8=A(rotation), 9=B(rotation)
+#   outputs: 0=Result(float), 1=Result(vector), 2=Result(color),
+#            3=Result(rotation)
+_MIX_FAC = 0   # Factor (float) input index
+_MIX_A = 6     # A (color) input index
+_MIX_B = 7     # B (color) input index
+_MIX_OUT = 2   # Result (color) output index
+
+
+def _new_mix_node(nodes, blend_type, location):
+    """Create a ShaderNodeMix configured for RGBA color mixing."""
+    node = nodes.new("ShaderNodeMix")
+    node.data_type = "RGBA"
+    node.blend_type = blend_type
+    node.location = location
+    return node
+
+
+# ---------------------------------------------------------------------------
+# Node group builders
+# ---------------------------------------------------------------------------
+
+
 def _get_or_create_uv_group() -> "bpy.types.ShaderNodeTree":
     """Get or create the MMD UV node group."""
     group_name = "MMD UV"
@@ -106,33 +138,43 @@ def _get_or_create_uv_group() -> "bpy.types.ShaderNodeTree":
     if shader is None:
         shader = bpy.data.node_groups.new(name=group_name, type="ShaderNodeTree")
 
-    ng = _NodeGroupUtils(shader)
+    nodes = shader.nodes
+    links = shader.links
 
-    node_output = ng.new_node("NodeGroupOutput", (6, 0))
+    node_output = nodes.new("NodeGroupOutput")
+    node_output.location = (6 * 210, 0)
 
-    tex_coord = ng.new_node("ShaderNodeTexCoord", (0, 0))
+    tex_coord = nodes.new("ShaderNodeTexCoord")
+    tex_coord.location = (0, 0)
 
-    tex_coord1 = ng.new_node("ShaderNodeUVMap", (4, -2))
+    tex_coord1 = nodes.new("ShaderNodeUVMap")
+    tex_coord1.location = (4 * 210, -2 * 220)
     tex_coord1.uv_map = "UV1"
 
-    vec_trans = ng.new_node("ShaderNodeVectorTransform", (1, -1))
+    vec_trans = nodes.new("ShaderNodeVectorTransform")
+    vec_trans.location = (1 * 210, -1 * 220)
     vec_trans.vector_type = "NORMAL"
     vec_trans.convert_from = "OBJECT"
     vec_trans.convert_to = "CAMERA"
 
-    node_vector = ng.new_node("ShaderNodeMapping", (2, -1))
+    node_vector = nodes.new("ShaderNodeMapping")
+    node_vector.location = (2 * 210, -1 * 220)
     node_vector.vector_type = "POINT"
     node_vector.inputs["Location"].default_value = (0.5, 0.5, 0.0)
     node_vector.inputs["Scale"].default_value = (0.5, 0.5, 1.0)
 
-    links = ng.links
     links.new(tex_coord.outputs["Normal"], vec_trans.inputs["Vector"])
     links.new(vec_trans.outputs["Vector"], node_vector.inputs["Vector"])
 
-    ng.new_output_socket("UV", tex_coord.outputs["UV"])
-    ng.new_output_socket("Toon", node_vector.outputs["Vector"])
-    ng.new_output_socket("Sphere", node_vector.outputs["Vector"])
-    ng.new_output_socket("SubTex", tex_coord1.outputs["UV"])
+    # Create output sockets and wire them
+    for name, output in [
+        ("UV", tex_coord.outputs["UV"]),
+        ("Toon", node_vector.outputs["Vector"]),
+        ("Sphere", node_vector.outputs["Vector"]),
+        ("SubTex", tex_coord1.outputs["UV"]),
+    ]:
+        shader.interface.new_socket(name=name, in_out="OUTPUT", socket_type="NodeSocketVector")
+        links.new(output, node_output.inputs[name])
 
     return shader
 
@@ -144,8 +186,7 @@ def _get_or_create_mmd_shader() -> "bpy.types.ShaderNodeTree":
             Toon Tex, Toon Fac, Sphere Tex, Sphere Fac, Sphere Add
     Output: Shader
 
-    When Toon Fac=0 and Sphere Fac=0, all MixRGB nodes pass Color through
-    unchanged — no performance cost for simple materials.
+    Uses ShaderNodeMix (RGBA mode) instead of deprecated ShaderNodeMixRGB.
     """
     group_name = "MMD Shader"
     shader = bpy.data.node_groups.get(group_name)
@@ -154,75 +195,80 @@ def _get_or_create_mmd_shader() -> "bpy.types.ShaderNodeTree":
     if shader is None:
         shader = bpy.data.node_groups.new(name=group_name, type="ShaderNodeTree")
 
-    ng = _NodeGroupUtils(shader)
+    nodes = shader.nodes
+    links = shader.links
 
-    node_input = ng.new_node("NodeGroupInput", (-5, 0))
-    node_output = ng.new_node("NodeGroupOutput", (5, 0))
+    node_input = nodes.new("NodeGroupInput")
+    node_input.location = (-5 * 210, 0)
+    node_output = nodes.new("NodeGroupOutput")
+    node_output.location = (5 * 210, 0)
 
     # --- Color chain: Color × Toon × Sphere → Principled BSDF ---
 
     # 1. Toon multiply: Color × Toon Tex (controlled by Toon Fac)
-    node_toon = ng.new_mix_node("MULTIPLY", (-3, 2))
+    node_toon = _new_mix_node(nodes, "MULTIPLY", (-3 * 210, 2 * 220))
 
     # 2. Sphere multiply path: toon_result × Sphere Tex
-    node_sph_mul = ng.new_mix_node("MULTIPLY", (-1, 3))
+    node_sph_mul = _new_mix_node(nodes, "MULTIPLY", (-1 * 210, 3 * 220))
 
     # 3. Sphere add path: toon_result + Sphere Tex
-    node_sph_add = ng.new_mix_node("ADD", (-1, 1))
+    node_sph_add = _new_mix_node(nodes, "ADD", (-1 * 210, 1 * 220))
 
     # 4. Sphere mode select: mix between multiply and add result
-    node_sphere_select = ng.new_mix_node("MIX", (1, 2))
+    node_sphere_select = _new_mix_node(nodes, "MIX", (1 * 210, 2 * 220))
 
     # 5. Principled BSDF
-    node_bsdf = ng.new_node("ShaderNodeBsdfPrincipled", (3, 0))
+    node_bsdf = nodes.new("ShaderNodeBsdfPrincipled")
+    node_bsdf.location = (3 * 210, 0)
     node_bsdf.inputs["Specular IOR Level"].default_value = 0.0
 
-    # --- Links ---
-    links = ng.links
+    # --- Internal links ---
 
-    # Toon multiply: Color1=Color input, Color2=Toon Tex, Fac=Toon Fac
-    # (wired via input sockets below)
+    # Toon result → Sphere multiply and add inputs
+    links.new(node_toon.outputs[_MIX_OUT], node_sph_mul.inputs[_MIX_A])
+    links.new(node_toon.outputs[_MIX_OUT], node_sph_add.inputs[_MIX_A])
 
-    # Sphere multiply: toon_result × Sphere Tex
-    links.new(node_toon.outputs["Color"], node_sph_mul.inputs["Color1"])
-    # Sphere Tex wired via input socket
-
-    # Sphere add: toon_result + Sphere Tex
-    links.new(node_toon.outputs["Color"], node_sph_add.inputs["Color1"])
-    # Sphere Tex wired via input socket
-
-    # Sphere mode select: MIX between multiply result (Color1) and add result (Color2)
-    links.new(node_sph_mul.outputs["Color"], node_sphere_select.inputs["Color1"])
-    links.new(node_sph_add.outputs["Color"], node_sphere_select.inputs["Color2"])
+    # Sphere mode select: MIX between multiply result (A) and add result (B)
+    links.new(node_sph_mul.outputs[_MIX_OUT], node_sphere_select.inputs[_MIX_A])
+    links.new(node_sph_add.outputs[_MIX_OUT], node_sphere_select.inputs[_MIX_B])
 
     # Final color → Principled BSDF
-    links.new(node_sphere_select.outputs["Color"], node_bsdf.inputs["Base Color"])
-    links.new(node_sphere_select.outputs["Color"], node_bsdf.inputs["Emission Color"])
+    links.new(node_sphere_select.outputs[_MIX_OUT], node_bsdf.inputs["Base Color"])
+    links.new(node_sphere_select.outputs[_MIX_OUT], node_bsdf.inputs["Emission Color"])
 
     # BSDF → Group Output
-    links.new(node_bsdf.outputs["BSDF"], node_output.inputs[0] if node_output.inputs else node_output.inputs)
+    shader.interface.new_socket(name="Shader", in_out="OUTPUT", socket_type="NodeSocketShader")
+    links.new(node_bsdf.outputs["BSDF"], node_output.inputs["Shader"])
 
     # --- Input sockets ---
-    ng.new_input_socket("Color", node_toon.inputs["Color1"], (1, 1, 1, 1))
-    ng.new_input_socket("Alpha", node_bsdf.inputs["Alpha"], 1.0, min_max=(0, 1))
-    ng.new_input_socket("Emission", node_bsdf.inputs["Emission Strength"], 0.3, min_max=(0, 2))
-    ng.new_input_socket("Roughness", node_bsdf.inputs["Roughness"], 0.8, min_max=(0, 1))
-    ng.new_input_socket("Toon Tex", node_toon.inputs["Color2"], (1, 1, 1, 1))
-    ng.new_input_socket("Toon Fac", node_toon.inputs["Fac"], 0.0, min_max=(0, 1))
-    ng.new_input_socket("Sphere Tex", None, (1, 1, 1, 1))  # wired manually below
-    ng.new_input_socket("Sphere Fac", None, 0.0, min_max=(0, 1))  # wired manually below
-    ng.new_input_socket("Sphere Add", node_sphere_select.inputs["Fac"], 0.0, min_max=(0, 1))
+    def add_input(name, socket_type, default, target=None, min_val=None, max_val=None):
+        isock = shader.interface.new_socket(name=name, in_out="INPUT", socket_type=socket_type)
+        if default is not None:
+            isock.default_value = default
+        if min_val is not None:
+            isock.min_value = min_val
+        if max_val is not None:
+            isock.max_value = max_val
+        if target is not None:
+            links.new(node_input.outputs[name], target)
+
+    add_input("Color", "NodeSocketColor", (1, 1, 1, 1), node_toon.inputs[_MIX_A])
+    add_input("Alpha", "NodeSocketFloat", 1.0, node_bsdf.inputs["Alpha"], 0, 1)
+    add_input("Emission", "NodeSocketFloat", 0.3, node_bsdf.inputs["Emission Strength"], 0, 2)
+    add_input("Roughness", "NodeSocketFloat", 0.8, node_bsdf.inputs["Roughness"], 0, 1)
+    add_input("Toon Tex", "NodeSocketColor", (1, 1, 1, 1), node_toon.inputs[_MIX_B])
+    add_input("Toon Fac", "NodeSocketFloat", 0.0, node_toon.inputs[_MIX_FAC], 0, 1)
+    add_input("Sphere Tex", "NodeSocketColor", (1, 1, 1, 1))  # wired manually below
+    add_input("Sphere Fac", "NodeSocketFloat", 0.0, min_val=0, max_val=1)  # wired manually below
+    add_input("Sphere Add", "NodeSocketFloat", 0.0, node_sphere_select.inputs[_MIX_FAC], 0, 1)
 
     # Wire Sphere Tex to both multiply and add paths
-    links.new(node_input.outputs["Sphere Tex"], node_sph_mul.inputs["Color2"])
-    links.new(node_input.outputs["Sphere Tex"], node_sph_add.inputs["Color2"])
+    links.new(node_input.outputs["Sphere Tex"], node_sph_mul.inputs[_MIX_B])
+    links.new(node_input.outputs["Sphere Tex"], node_sph_add.inputs[_MIX_B])
 
     # Wire Sphere Fac to both multiply and add paths
-    links.new(node_input.outputs["Sphere Fac"], node_sph_mul.inputs["Fac"])
-    links.new(node_input.outputs["Sphere Fac"], node_sph_add.inputs["Fac"])
-
-    # --- Output socket ---
-    ng.new_output_socket("Shader", node_bsdf.outputs["BSDF"])
+    links.new(node_input.outputs["Sphere Fac"], node_sph_mul.inputs[_MIX_FAC])
+    links.new(node_input.outputs["Sphere Fac"], node_sph_add.inputs[_MIX_FAC])
 
     return shader
 
@@ -258,114 +304,6 @@ def _load_image(filepath: str) -> "bpy.types.Image":
         img.alpha_mode = "NONE"
 
     return img
-
-
-# ---------------------------------------------------------------------------
-# Node group utils (subset of mmd_tools shader.py)
-# ---------------------------------------------------------------------------
-
-SOCKET_TYPE_MAPPING = {"NodeSocketFloatFactor": "NodeSocketFloat"}
-SOCKET_SUBTYPE_MAPPING = {"NodeSocketFloatFactor": "FACTOR"}
-
-
-class _NodeGroupUtils:
-    """Utility for building shader node groups. Based on mmd_tools."""
-
-    def __init__(self, shader: "bpy.types.ShaderNodeTree"):
-        self.shader = shader
-        self.nodes = shader.nodes
-        self.links = shader.links
-
-    def new_node(self, idname: str, pos: tuple) -> "bpy.types.ShaderNode":
-        node = self.nodes.new(idname)
-        node.location = (pos[0] * 210, pos[1] * 220)
-        return node
-
-    def new_math_node(self, operation, pos, value1=None, value2=None):
-        node = self.new_node("ShaderNodeMath", pos)
-        node.operation = operation
-        if value1 is not None:
-            node.inputs[0].default_value = value1
-        if value2 is not None:
-            node.inputs[1].default_value = value2
-        return node
-
-    def new_mix_node(self, blend_type, pos, fac=None, color1=None, color2=None):
-        node = self.new_node("ShaderNodeMixRGB", pos)
-        node.blend_type = blend_type
-        if fac is not None:
-            node.inputs["Fac"].default_value = fac
-        if color1 is not None:
-            node.inputs["Color1"].default_value = color1
-        if color2 is not None:
-            node.inputs["Color2"].default_value = color2
-        return node
-
-    def new_input_socket(self, io_name, socket, default_val=None, min_max=None):
-        # Find or create the interface socket
-        node_input = self._find_node("NodeGroupInput")
-        if node_input is None:
-            node_input = self.new_node("NodeGroupInput", (-2, 0))
-        io_sockets = node_input.outputs
-
-        if io_name not in io_sockets:
-            if socket is not None:
-                idname = socket.bl_idname
-            else:
-                idname = "NodeSocketColor" if isinstance(default_val, tuple) and len(default_val) == 4 else "NodeSocketFloat"
-            socket_type = SOCKET_TYPE_MAPPING.get(idname, idname)
-            interface_socket = self.shader.interface.new_socket(
-                name=io_name, in_out="INPUT", socket_type=socket_type
-            )
-            if idname in SOCKET_SUBTYPE_MAPPING:
-                interface_socket.subtype = SOCKET_SUBTYPE_MAPPING[idname]
-            if min_max is None:
-                if idname.endswith("Factor") or io_name.endswith("Alpha"):
-                    interface_socket.min_value, interface_socket.max_value = 0, 1
-                elif idname.endswith(("Float", "Vector")):
-                    interface_socket.min_value, interface_socket.max_value = -10, 10
-            if default_val is not None:
-                interface_socket.default_value = default_val
-            if min_max is not None:
-                interface_socket.min_value, interface_socket.max_value = min_max
-
-        if socket is not None:
-            self.links.new(io_sockets[io_name], socket)
-
-    def new_output_socket(self, io_name, socket, default_val=None, min_max=None):
-        node_output = self._find_node("NodeGroupOutput")
-        if node_output is None:
-            node_output = self.new_node("NodeGroupOutput", (2, 0))
-        io_sockets = node_output.inputs
-
-        if io_name not in io_sockets:
-            if socket is not None:
-                idname = socket.bl_idname
-            else:
-                idname = "NodeSocketFloat"
-            socket_type = SOCKET_TYPE_MAPPING.get(idname, idname)
-            interface_socket = self.shader.interface.new_socket(
-                name=io_name, in_out="OUTPUT", socket_type=socket_type
-            )
-            if idname in SOCKET_SUBTYPE_MAPPING:
-                interface_socket.subtype = SOCKET_SUBTYPE_MAPPING[idname]
-            if min_max is None:
-                if idname.endswith("Factor") or io_name.endswith("Alpha"):
-                    interface_socket.min_value, interface_socket.max_value = 0, 1
-                elif idname.endswith(("Float", "Vector")):
-                    interface_socket.min_value, interface_socket.max_value = -10, 10
-            if default_val is not None:
-                interface_socket.default_value = default_val
-            if min_max is not None:
-                interface_socket.min_value, interface_socket.max_value = min_max
-
-        if socket is not None:
-            self.links.new(socket, io_sockets[io_name])
-
-    def _find_node(self, node_type: str):
-        return next(
-            (n for n in self.nodes if n.bl_idname == node_type), None
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +348,69 @@ def _setup_armature_controls(armature_obj: "bpy.types.Object") -> None:
         armature_obj["mmd_sphere_fac"] = 1.0
         ui = rna("mmd_sphere_fac")
         ui.update(min=0.0, max=1.0, description="Sphere texture influence for all materials")
+
+
+def setup_drivers(armature_obj: "bpy.types.Object") -> None:
+    """Add drivers to all materials on the mesh child of the armature.
+
+    Must be called after the full import is complete and the depsgraph
+    has been flushed, otherwise drivers evaluate as invalid.
+    """
+    for child in armature_obj.children:
+        if child.type != "MESH":
+            continue
+        for mat in child.data.materials:
+            if not mat or not mat.use_nodes:
+                continue
+            shader = mat.node_tree.nodes.get("Shader")
+            if shader is None:
+                continue
+            # Skip if already has drivers
+            ad = mat.node_tree.animation_data
+            if ad and ad.drivers:
+                continue
+            _add_driver(shader, "Emission", armature_obj, "mmd_emission")
+            # Check if toon/sphere textures are connected
+            has_toon = any(
+                link.to_socket.name == "Toon Tex"
+                for link in mat.node_tree.links
+                if link.to_node == shader
+            )
+            has_sphere = any(
+                link.to_socket.name == "Sphere Tex"
+                for link in mat.node_tree.links
+                if link.to_node == shader
+            )
+            if has_toon:
+                _add_driver(shader, "Toon Fac", armature_obj, "mmd_toon_fac")
+            if has_sphere:
+                _add_driver(shader, "Sphere Fac", armature_obj, "mmd_sphere_fac")
+
+
+def update_materials(armature_obj: "bpy.types.Object") -> None:
+    """Update all materials on the mesh to match current armature control values.
+
+    Call after changing mmd_emission, mmd_toon_fac, or mmd_sphere_fac
+    if drivers are not working (e.g. auto-execute scripts is disabled).
+    """
+    emission = armature_obj.get("mmd_emission", 0.3)
+    toon_fac = armature_obj.get("mmd_toon_fac", 1.0)
+    sphere_fac = armature_obj.get("mmd_sphere_fac", 1.0)
+
+    for child in armature_obj.children:
+        if child.type != "MESH":
+            continue
+        for mat in child.data.materials:
+            if not mat or not mat.use_nodes:
+                continue
+            shader = mat.node_tree.nodes.get("Shader")
+            if shader is None:
+                continue
+            shader.inputs["Emission"].default_value = emission
+            if "Toon Fac" in shader.inputs:
+                shader.inputs["Toon Fac"].default_value = toon_fac
+            if "Sphere Fac" in shader.inputs:
+                shader.inputs["Sphere Fac"].default_value = sphere_fac
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +552,8 @@ def create_materials(
     # Set up armature controls if available
     if armature_obj is not None:
         _setup_armature_controls(armature_obj)
+        # Flush depsgraph so custom properties are visible to drivers
+        bpy.context.view_layer.update()
 
     for mat_data in model.materials:
         mat_name = mat_data.name_e if mat_data.name_e else mat_data.name
@@ -652,14 +655,6 @@ def create_materials(
             mat_data, nodes, links, node_shader, node_uv, tex_paths,
         ) is not None
 
-        # --- Drivers from armature custom properties ---
-        if armature_obj is not None:
-            _add_driver(node_shader, "Emission", armature_obj, "mmd_emission")
-            if has_toon:
-                _add_driver(node_shader, "Toon Fac", armature_obj, "mmd_toon_fac")
-            if has_sphere:
-                _add_driver(node_shader, "Sphere Fac", armature_obj, "mmd_sphere_fac")
-
         # Append material to mesh
         mesh_data.materials.append(mat)
 
@@ -671,6 +666,9 @@ def create_materials(
 
     # Fix overlapping face materials (z-fighting layers like eye highlights)
     _fix_overlapping_face_materials(mesh_data)
+
+    # Note: drivers are added separately via setup_drivers() after import
+    # completes, since the depsgraph needs the armature fully registered.
 
     log.info(
         "Created %d materials, assigned to %d faces",

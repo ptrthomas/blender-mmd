@@ -55,7 +55,7 @@ After import, key settings live as custom properties on the armature object. Cha
 | `mmd_sphere_fac` | 1.0 | Sphere texture influence (0 = off, 1 = full) |
 | `ik_loop_factor` | 1 | Multiplier for IK solver iterations (increase for better foot plant accuracy) |
 
-Per-material override: remove the driver on that material's shader group input and set it manually in the Shader Editor.
+**Note:** Drivers require **Preferences > Save & Load > Auto Run Python Scripts** to be enabled. Per-material override: remove the driver on that material's shader group input and set it manually in the Shader Editor.
 
 ## Requirements
 
