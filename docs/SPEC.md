@@ -1044,15 +1044,14 @@ Single chain cage (tube along one bone chain) is Phase 1. Group mode handles par
 
 ### Milestone 6: Animation Polish
 
-**Status:** In progress
+**Status:** In progress — remaining items are low priority, contributions welcome
 
 **Done:**
 - Additional transform (grant parent / 付与親) — TRANSFORM constraints + shadow bones for D bones, shoulder cancel, arm twist, eye tracking
 
-**Remaining:**
+**Remaining (contributions welcome — Claude Code recommended for development):**
 - VMD camera motion import
 - CCD IK solver (matching MMD output more closely)
-- Keyframe management helpers
 
 ### Milestone 7: Custom Shader & Creative Tools (planned)
 
