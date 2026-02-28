@@ -10,7 +10,7 @@ Read `docs/SPEC.md` first. It is the single source of truth for architecture, de
 - **Milestone 3** (done): VMD motion import (bone keyframes, morph keyframes, bone roll)
 - **Milestone 3.5** (done): IK fix — correct constraint placement, native limits, VMD IK toggle
 - **Milestone 4** (done): Rigid body physics — functional but limited by Blender's RB solver
-- **Milestone 4b** (done): Cloth on cage tube + Surface Deform for hair/skirt/tie. Three physics modes coexist: none, rigid_body, soft_body.
+- **Milestone 4b** (done): Physics cleanup — two modes (none, rigid_body), MMD4B panel with Build/Rebuild/Clear. Cloth/soft body deferred to future phase.
 - **Milestone 5** (done): Materials & textures — Principled BSDF-based "MMD Shader" node group, bundled toon textures with fallback, global controls via armature drivers (emission/toon/sphere), per-face assignment, UV V-flip, overlapping face fix.
 - **Milestone 6** (in progress): Animation polish — additional transforms done (grant parent, shadow bones). Remaining: VMD camera, CCD IK
 - **Milestone 7** (planned): Creative tools — edge/outline rendering, material morphs
@@ -78,11 +78,10 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
 - **IK constraints**: Placed on first link bone (e.g. knee), NOT the end effector (ankle). Uses Blender-native `ik_min_x/max_x` properties instead of `LIMIT_ROTATION` constraints. `ik_loop_factor` param (default 1) multiplies PMX iteration count for better convergence.
 - **IK toggle**: VMD property section parsed and applied as IK constraint `influence` keyframes (0.0/1.0 with CONSTANT interpolation). More Blender-native than mmd_tools' custom property + callback approach.
 - **Scene settings**: VMD import sets FPS to 30 (MMD standard) and extends frame range to fit animation.
-- **Physics**: Three modes, can coexist (rigid_body provides collision surfaces for soft_body cages):
+- **Physics**: Two modes:
   - `none` (default): metadata only, no physics objects. Clean import.
-  - `rigid_body`: M4 implementation. RBW disabled during build, collision layers, non-collision constraints, margin 1e-6, dynamic body repositioning, depsgraph flushes. "Good enough" mmd_tools-quality.
-  - `soft_body`: MMD4B panel. User selects bone chain, algorithm generates octagonal cage tube with gradient density (more rings near root), Cloth modifier on cage + Surface Deform on visible mesh. Gradient pinning `[1.0, 0.8, 0.5]` for smooth transition. Auto-integrates with rigid_body mode: static RBs get COLLISION modifiers (body collision), dynamic RBs on cage bones are removed (cloth replaces them). Rebuilding rigid body physics preserves existing cages.
-- **MMD4B panel**: N-panel (tab "MMD4B") for soft body deformation. Select bones in Pose Mode → generate cage → play. Uses Cloth modifier (not Soft Body) because Cloth respects Armature modifier output for pinned vertices. Collision is auto-detected from static rigid bodies (no manual picker).
+  - `rigid_body`: RBW disabled during build, collision layers, non-collision constraints (O(log N) template-and-duplicate), margin 1e-6, dynamic body repositioning, depsgraph flushes. "Good enough" mmd_tools-quality.
+- **MMD4B panel**: N-panel (tab "MMD4B") for physics controls. Build/Rebuild/Clear rigid body physics. Rebuild after VMD import to sync physics to starting pose.
 - **Materials**: Single "MMD Shader" node group (Principled BSDF-based) with toon/sphere inputs. Global controls via armature custom properties (`mmd_emission`, `mmd_toon_fac`, `mmd_sphere_fac`) driven to all materials. Bundled toon textures (toon01-10.bmp) with fallback resolution. Alpha = PMX alpha × texture alpha (matching mmd_tools). Edge color/size stored as material custom properties.
 - **Armature visibility**: Hidden by default on import (`hide_set(True)`, STICK display). Unhide from outliner when needed. Bones split into three collections: "Armature" (standard), "Physics" (dynamic RB bones, orange), "mmd_shadow" (hidden helper bones).
 - **No export**: One-way import only. No PMX/VMD/PMD export.

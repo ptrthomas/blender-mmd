@@ -14,9 +14,7 @@ mmd_tools is a battle-tested addon that has served the MMD-Blender community for
 
 **Clean, documented codebase.** The full architecture is documented in [`docs/SPEC.md`](docs/SPEC.md) — every design decision, coordinate system detail, and known limitation. The PMX and VMD parsers are standalone reference implementations with Python type hints and dataclasses, useful beyond Blender (e.g., for a future three.js port).
 
-**Cloth-on-cage physics.** Beyond standard rigid body physics, we offer a cloth simulation approach for hair and skirts: select bones, generate a cage tube, and let Cloth + Surface Deform handle the deformation. This produces more natural movement than rigid bodies alone.
-
-**Designed for AI-assisted development.** No traditional UI panels beyond the import operator and MMD4B cloth panel. The addon is designed to be driven by Claude Code via [blender-agent](https://github.com/ptrthomas/blender-agent).
+**Designed for AI-assisted development.** Minimal UI — import operators plus an MMD4B physics panel for build/clear. The addon is designed to be driven by Claude Code via [blender-agent](https://github.com/ptrthomas/blender-agent).
 
 ## Key differences from mmd_tools
 
@@ -29,8 +27,8 @@ mmd_tools is a battle-tested addon that has served the MMD-Blender community for
 | Coordinate conversion | `.xzy` swizzles scattered across importer, bone, physics code | Done once in parser — downstream is pure Blender coords |
 | IK toggle (VMD) | Custom `mmd_ik_toggle` property + update callback | Constraint influence keyframes (more Blender-native) |
 | Materials | Custom ~20-node shader group per material | Single Principled BSDF group (~7 nodes), global driver controls |
-| Hair/skirt physics | Rigid body only | Rigid body + cloth-on-cage with Surface Deform |
-| Physics workflow | Must build from rest pose, complex UI | Build/clear anytime (even mid-animation), one-click panel |
+| Hair/skirt physics | Rigid body only | Rigid body (cloth-on-cage planned) |
+| Physics workflow | Must build from rest pose, complex UI | Build/rebuild/clear anytime, one-click MMD4B panel |
 | Physics springs | Applied via property update callbacks | Applied directly during joint creation |
 | UI | Sidebar panels, menus, property groups | Minimal — designed for Claude Code + MMD4B panel |
 
@@ -42,8 +40,7 @@ Both projects share the same core approach for IK constraints (first link bone p
 - **Materials** — Principled BSDF-based "MMD Shader" node group with toon/sphere texture support. ~7 internal nodes (vs ~20 in mmd_tools) while preserving the MMD look. Bundled shared toon files (toon01–10.bmp). Global controls via armature custom properties and drivers
 - **VMD motion** — bone keyframes, morph keyframes, IK toggle, bezier interpolation
 - **Morphs** — vertex, UV, bone, material, group morphs as Blender shape keys
-- **Rigid body physics** — build and clear anytime, even after loading animation on a posed model. Pose-aware repositioning prevents physics explosions on non-rest-pose builds
-- **Cloth physics** — MMD4B panel: select bones, generate cage tube, cloth sim + Surface Deform
+- **Rigid body physics** — build/rebuild/clear via MMD4B panel, even after loading animation. Rebuild after VMD import to sync physics to starting pose
 - **Additional transforms** — grant parent system (D bones, shoulder cancel, arm twist, eye tracking)
 - **IK** — correct constraint placement, native limits, per-bone angle conversion
 
@@ -92,6 +89,7 @@ Or use the Blender operator: **File > Import > MMD PMX (.pmx)**
 
 The project is designed for development with Claude Code. The full specification in [`docs/SPEC.md`](docs/SPEC.md) covers architecture, decisions, coordinate systems, and remaining work. Areas where contributions are welcome:
 
+- Soft body / cloth improvements (cage-based hair/skirt deformation)
 - VMD camera motion import
 - CCD IK solver
 - Performance optimizations (UV foreach_set, degenerate face cleanup)

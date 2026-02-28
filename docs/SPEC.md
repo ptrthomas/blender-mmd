@@ -13,7 +13,7 @@ A ground-up rewrite of [blender_mmd_tools](../../../blender_mmd_tools) targeting
 
 - PMX/PMD/VMD export (one-way import only, no round-trip)
 - PMD format support (PMX only)
-- Traditional Blender UI panels or sidebar (except MMD4B cloth panel — see below)
+- Traditional Blender UI panels or sidebar (except MMD4B physics panel)
 - Backwards compatibility with mmd_tools object hierarchy or metadata
 - Material library system
 - Rigify integration
@@ -56,14 +56,13 @@ blender-mmd/
 │   │   ├── types.py          # Dataclasses for VMD structures
 │   │   └── importer.py       # VMD → Blender F-curves, IK toggle
 │   ├── importer.py           # PMX → Blender object creation
-│   ├── physics.py            # Rigid body and joint setup (mode routing, metadata)
+│   ├── physics.py            # Rigid body and joint setup (metadata, build, clear)
 │   ├── chains.py             # Chain detection from RB/joint topology (pure Python)
-│   ├── cloth.py              # Cloth conversion for physics chains
 │   ├── armature.py           # Bone creation, IK setup, additional transforms, shadow bones
 │   ├── mesh.py               # Mesh creation and vertex weights
 │   ├── materials.py          # Material/shader creation, texture loading
 │   ├── operators.py          # Thin Blender operator layer
-│   ├── panels.py             # MMD4B N-panel for cloth conversion
+│   ├── panels.py             # MMD4B N-panel for physics controls
 │   ├── helpers.py            # Introspection and query helpers for Claude
 │   └── translations.py       # Japanese ↔ English bone name dictionary
 ├── docs/
@@ -486,20 +485,19 @@ These are inherent to Blender's Bullet integration and cannot be fixed in addon 
 
 ### Physics modes
 
-The physics system supports three modes, controlled by a `mode` parameter on `build_physics`:
+The physics system supports two modes, controlled by a `mode` parameter on `build_physics`:
 
 ```python
 def build_physics(armature_obj, model, scale: float, mode: str = "none") -> None:
-    """mode: 'none' | 'rigid_body' | 'cloth'"""
+    """mode: 'none' | 'rigid_body'"""
 ```
 
 | Mode | What happens | When to use |
 |------|-------------|-------------|
-| `none` (default) | Store rigid body/joint data as custom properties on armature. No Blender physics objects created. Clean scene. | Default import, or when user plans to add cloth later |
-| `rigid_body` | Current M4 implementation. Create Blender rigid bodies, joints, bone coupling. Matches mmd_tools quality. | Quick "good enough" physics, testing, comparison |
-| `cloth` | Store metadata (like `none`), then interactively convert selected chains to cloth simulation. | Best quality — hair, skirt, accessories |
+| `none` (default) | Store rigid body/joint data as custom properties on armature. No Blender physics objects created. Clean scene. | Default import |
+| `rigid_body` | Create Blender rigid bodies, joints, bone coupling. Matches mmd_tools quality. | Standard physics for hair/skirt/accessories |
 
-See Milestone 4b for implementation plan.
+The MMD4B panel in the N-panel provides Build/Rebuild/Clear buttons. Rebuild after VMD import or pose changes to sync rigid bodies to the current bone pose.
 
 ---
 
@@ -535,17 +533,8 @@ Behavior:
 ### Physics operators
 
 ```
-blender_mmd.build_physics              # Build physics (mode: none/rigid_body/cloth)
+blender_mmd.build_physics              # Build physics (mode: none/rigid_body)
 blender_mmd.clear_physics              # Remove all physics objects and metadata
-blender_mmd.convert_chain_to_cloth     # Convert a detected chain to cloth (legacy, RB-based)
-blender_mmd.clear_cloth                # Remove cloth objects and constraints
-```
-
-### Cloth operators (MMD4B panel)
-
-```
-blender_mmd.convert_selection_to_cloth  # Convert selected pose bones to cloth sim
-blender_mmd.remove_cloth_sim            # Remove a single cloth sim by object name
 ```
 
 ### VMD binary format
@@ -717,7 +706,7 @@ Rigid body physics implemented as intermediate step. Works but has fundamental l
 
 **Known issues:**
 - Scrubbing/rewinding can reset baked simulation; must re-bake after rewind
-- No UI for build/bake/clear — must use Claude Code or Python console
+- UI: MMD4B panel provides Build/Rebuild/Clear buttons
 - Hair may appear too stiff or too loose depending on model
 - No automatic bake on build (user must bake manually or via playback)
 - Blender's rigid body solver is fundamentally wrong for MMD chain physics (hair, skirt)
@@ -734,21 +723,19 @@ Rigid body physics implemented as intermediate step. Works but has fundamental l
 - `baseline_mmd_tools.json` — mmd_tools bone transforms at key frames (pose + IK only). 21 bones tracked across 11 frames (0, 100, ..., 1000). Uses Japanese bone names with .L/.R suffixes. Extracted from mmd_tools import with `ik_loop_factor=5`. The sample model is simpler (122 bones) — no arm twist or shoulder cancel bones.
 - `miku_galaxias.blend` — mmd_tools reference: **pose + IK only, no physics baked**. Do not use this blend for physics comparison — mmd_tools physics was never applied to it.
 
-### Milestone 4b: Physics Rework — Three Modes ✅
+### Milestone 4b: Physics Cleanup ✅
 
-Restructured physics into three clean modes: none (default), rigid_body (mmd_tools-style), and cloth (interactive conversion). See "Physics modes" section above.
-
-**Reference:** [blender_mmd_tools_append](https://github.com/MMD-Blender/blender_mmd_tools_append) (`~/dev/ycode/blender_mmd_tools_append/`) validates the cloth approach.
+Simplified physics into two modes: none (default) and rigid_body. Cloth/soft body cage code removed (planned for future phase). Added MMD4B panel for physics controls.
 
 #### Phase 1: Restructure + Default-Off (`mode="none"`) ✅
 
-- [x] Refactored `physics.py` with `mode` parameter (`none` / `rigid_body` / `cloth`)
+- [x] Refactored `physics.py` with `mode` parameter (`none` / `rigid_body`)
 - [x] Metadata storage: JSON on `armature_obj["mmd_physics_data"]` (all RB+joint fields)
 - [x] `none` mode stores metadata, creates nothing
 - [x] `rigid_body` mode extracted into `_build_rigid_body_physics()` helper
-- [x] `cloth` mode runs chain detection, stores as `armature_obj["mmd_physics_chains"]`
 - [x] 6 metadata serialization tests (round-trip, fields, JSON validity)
 - [x] Operator updated with `mode` EnumProperty
+- [x] MMD4B panel: Build/Rebuild/Clear buttons in N-panel
 
 #### Phase 2: Simplify Rigid Body Mode (`mode="rigid_body"`) ✅
 
@@ -757,25 +744,9 @@ Restructured physics into three clean modes: none (default), rigid_body (mmd_too
 - [x] Matches mmd_tools baseline: stable physics with springs providing restoring force
 - [x] Functions kept in file for future experimentation
 
-#### Phase 3: Interactive Cloth Conversion (`mode="cloth"`) ✅
+#### Phase 3: Soft body / cloth improvements (planned)
 
-**Chain detection** (`chains.py`, pure Python, 9 tests):
-- [x] BFS from STATIC roots through DYNAMIC/DYNAMIC_BONE bodies via joint graph
-- [x] Chain classification by name pattern (hair/skirt/accessory/other)
-- [x] All 27 dynamic bodies in sample model accounted for, no duplicates
-- [x] JSON serialization for storage on armature
-
-**Cloth conversion** (`cloth.py`, Blender-specific):
-- [x] Ribbon mesh from chain RB positions (root anchor + extrude to faces)
-- [x] Pin vertex group (root + extruded counterpart at weight 1.0)
-- [x] Modifier stack: Armature → Cloth → Corrective Smooth
-- [x] Cloth presets: cotton (tension=15, bending=0.5), silk (5/0.05), hair (20/5.0)
-- [x] Optional collision on body mesh
-- [x] STRETCH_TO bone binding (replaces mmd_dynamic constraints)
-- [x] Operators: `convert_chain_to_cloth`, `clear_cloth`
-- [x] Helper functions: `get_physics_mode()`, `get_physics_chains()`
-
-**Validation status:** Code complete, unit tests pass. Blender integration testing pending.
+Cloth-on-cage approach for hair/skirt deformation is planned as a future phase. The idea: generate a hidden cage tube along a bone chain, apply Cloth modifier to the cage, and bind the visible mesh via Surface Deform. Chain detection code exists in `chains.py` (pure Python, 9 tests). Implementation deferred until rigid body workflow is mature.
 
 #### Rigid Body Mode — Lessons Learned (Historical)
 
@@ -808,13 +779,12 @@ What we learned from implementing and testing M4 rigid body physics. This inform
 **Phase 2 approach (implemented):**
 - Dropped `_apply_soft_constraints()` — the lower>upper trick is unreliable. DOFs stay hard-locked as PMX defines them.
 - Springs enabled with PMX values — provides restoring force that keeps chain bodies connected. Matches mmd_tools (which uses Blender defaults).
-- Don't try to match MMD physics perfectly — the goal is "mmd_tools quality" which is itself imperfect. Users who want good physics should use cloth mode.
+- Don't try to match MMD physics perfectly — the goal is "mmd_tools quality" which is itself imperfect.
 - Non-collision constraints kept — they're correct and prevent false collisions.
+- Non-collision constraint creation uses template-and-duplicate pattern (O(log N) bpy.ops calls) to avoid Blender hanging on models with many constraint pairs.
 
 **What NOT to do:**
-- Don't add physics UI panels — use conversational workflow via Claude Code
 - Don't try to match MMD's CCDIK-based physics solver — fundamentally different architecture
-- Don't over-optimize non-collision constraints — the O(n²) issue is theoretical; real models have <50 rigid bodies
 
 #### Rigid Body Parity Audit (mmd_tools alignment) ✅
 
@@ -834,176 +804,15 @@ Systematic audit of rigid body build pattern against mmd_tools. Fixes applied to
 - Bone disconnection: all hair chain bones already have `use_connect=False` from PMX data.
 - Soft constraints: mmd_tools doesn't implement inverted-limits workaround either. Springs enabled, soft constraints disabled — matches mmd_tools.
 
-### MMD4B — Soft Body Deformation Panel
+### MMD4B Panel — Physics Controls
 
-**Previous approach (cloth on ribbon mesh) abandoned.** Cloth simulation on thin ribbon meshes was tested for hair/tie/skirt deformation but proved fundamentally unstable — ribbon geometry gives the solver too little to work with, and STRETCH_TO/DAMPED_TRACK bone binding caused stretching/rotation artifacts.
+**N-panel**: Tab "MMD4B" in 3D Viewport sidebar. Visible when active object is an MMD armature (or child mesh).
 
-**Current approach: Cloth on cage tube + Surface Deform.** A hidden low-poly cage tube (8-sided, following the bone chain centerline) gets a Cloth modifier. The visible mesh inherits deformation via Surface Deform. The cage provides enough geometry for stable cloth simulation. Cloth is used instead of Soft Body because Cloth respects Armature modifier output for pinned vertices (Soft Body only anchors to rest shape).
+**Layout:**
+- **No physics state:** "Build Rigid Body" button (calls `build_physics` with `mode=rigid_body`)
+- **Physics active:** Shows rigid body count, "Rebuild" button (re-parses PMX and rebuilds), "Clear" button
 
-**Coexists with rigid_body mode.** Rigid body provides collision surfaces (body parts). Soft body cages collide against them. Both can be active simultaneously on the same armature.
-
-**N-panel**: Tab "MMD4B" in 3D Viewport sidebar. Visible when active object is an MMD armature.
-
-#### Workflow — bone-driven (same selection UI as cloth, but better outcome)
-
-**Why bones, not meshes:** MMD models have one big mesh — you can't "select the hair mesh." Bones define which part of the mesh moves, which direction the cage should follow, and which bone to pin to. The bone chain gives us everything.
-
-1. User selects **bones** in Pose Mode (e.g. hair1.L → hair6.L, or skirt bones)
-2. We find mesh vertices weighted to those bones → defines what the cage encloses
-3. Algorithm generates a low-poly **cage** tube following the bone chain direction
-4. Pin bone = parent of root selected bone (Head for hair, Hips for skirt) — always unambiguous
-5. Soft Body modifier on cage, top ring pinned to pin bone via goal vertex group
-6. Surface Deform modifier on the mesh → bound to cage, limited to affected vertices via `vertex_group`
-7. Cage generation auto-handles rigid body integration: adds COLLISION modifiers to static RBs (head, body), removes dynamic RBs on cage bones (replaced by cloth sim)
-8. Play animation — cage deforms under soft body physics, mesh vertices follow
-9. User can edit cage mesh (add loop cuts, adjust shape) for fine control
-
-#### Cage generation algorithm
-
-Given selected bones and the mesh they deform:
-
-1. **Find affected vertices:** For each selected bone, collect mesh vertices with non-zero weight in that bone's vertex group. Union of all = the region to enclose.
-2. **Cage axis from bones:** The bone chain head→tail positions define the cage centerline. No PCA needed.
-3. **Tube generation:** Build a tube (octagonal cross-section, 8 sides) following the bone chain centerline with **gradient density** — more rings near the pinned root (stability), fewer toward the free tip (freedom). `subdivs_base=3` inserts extra rings per segment: root segments get 3 extra, tip segments get 1. Example for 6-bone chain: `[3,3,2,2,1,1]` extra rings → 19 total rings (vs. 7 without subdivision). Positions and radii interpolated linearly between bone joints. Per-ring radius = max perpendicular distance from affected vertices to centerline, plus 15% margin.
-4. **Triangulation:** Tube quads are triangulated (curved tube produces non-planar quads that prevent Surface Deform binding). Normals recalculated. End caps close the mesh.
-5. **Gradient pinning:** First 3 rings get goal weights `[1.0, 0.8, 0.5]` for smooth transition from pinned to free. An Armature modifier + pin bone vertex group makes pinned verts follow the parent bone.
-6. **Affected vertex group:** Create a vertex group on the mesh containing only the affected vertices. Surface Deform uses this to limit its influence.
-
-#### Pinning — gradient auto-pin, manual override
-
-**Auto-pin:** Cage generator applies gradient weights to the first 3 rings: `[1.0, 0.8, 0.5]`. Ring 0 (at root bone head) is fully pinned, rings 1–2 provide smooth transition, remaining rings are free (0.0). This prevents hard cutoff artifacts at the pin boundary.
-
-**Manual pin/unpin:** In Edit Mode on the cage, user selects vertices and clicks Pin/Unpin in the MMD4B panel. This adds/removes them from the `goal` vertex group. Use cases:
-- Pin extra vertices where hair meets the head to prevent separation
-- Unpin vertices to allow more movement at specific points
-- Pin a ring in the middle of a skirt cage to create a belt-like constraint
-
-The panel shows pin count and highlights pinned verts (e.g. via display overlay or selection).
-
-#### Stiffness — one slider + mesh density
-
-**UI slider: "Stiffness" (0.0–1.0, default 0.7).** Maps to Cloth modifier parameters:
-- `tension_stiffness` / `compression_stiffness`: `5 + stiffness × 45` (range 5–50)
-- `bending_stiffness`: `0.1 + stiffness × 4.9` (range 0.1–5)
-- `tension_damping` / `compression_damping`: `2 + stiffness × 13` (range 2–15)
-- `bending_damping`: 0.5 (fixed)
-- `quality`: 10, `mass`: 0.3
-
-At default stiffness 0.7: tension=36.5, bending=3.5, damping=11.1. These are intentionally soft — the gradient-density cage provides structural stiffness via geometry (more rings near root = more springs = stiffer).
-
-**Mesh density as stiffness control:** More vertices in the cage = more cloth springs = inherently stiffer structure. The gradient subdivision already provides this near the root. The user can add loop cuts to the cage in Edit Mode for localized stiffening.
-
-**No vertex painting.** Stiffness is uniform across the cage (set by the slider). Spatial stiffness variation comes from mesh density instead.
-
-#### Cloth settings (derived from stiffness slider)
-
-- Pin group: `vertex_group_mass = "goal"` (weight 1.0 = fully pinned, 0.0 = free)
-- Structural: tension/compression stiffness and damping from slider
-- Bending: stiffness and damping from slider
-- Quality: 10 substeps
-- Mass: 0.3 (fixed)
-- Point cache: frame_end extended to 10000 (or scene end, whichever is larger)
-- Collision: auto-enabled; static rigid bodies get COLLISION modifiers automatically
-
-#### Surface Deform binding
-
-The visible mesh gets a Surface Deform modifier targeting the cage:
-1. Cage is generated slightly oversized to fully enclose the affected vertices at bind time
-2. `bpy.ops.object.surfacedeform_bind(modifier="SurfaceDeform")` with context override on target mesh
-3. `sd_mod.vertex_group` = name of the affected-vertices group (limits binding to hair/skirt verts only)
-4. At runtime, cage deformation drives only the affected mesh vertices — rest of mesh unaffected
-5. If user edits cage geometry, rebind via panel button
-
-#### Panel layout
-
-**Convert section (Pose Mode, bones selected):**
-- Bone selection info (count, chain range, pin bone)
-- Stiffness slider (0.0–1.0, default 0.7)
-- "Generate Cage" button
-- Reuses existing `validate_bone_chain` / `validate_bone_group` from cloth code
-
-**Active Cages section (always visible):**
-- List of active soft body cages, clickable to select cage mesh
-- Per cage: name, bone count, affected vertex count
-- Pin/Unpin buttons (visible when cage is in Edit Mode)
-- Rebind button (rebinds Surface Deform after cage edits)
-- Remove (X) button per cage
-- Reset Sims / Clear All buttons
-
-#### Blender API reference (tested in 5.0.1)
-
-```python
-# Modifier stack on cage: Armature (first) → Cloth (second)
-# Armature must be first so pinned verts follow bone before Cloth evaluates.
-arm_mod = cage_obj.modifiers.new("Armature", "ARMATURE")
-arm_mod.object = armature_obj
-arm_mod.use_vertex_groups = True
-
-# Cloth modifier
-cloth_mod = cage_obj.modifiers.new("Cloth", "CLOTH")
-cs = cloth_mod.settings
-cs.vertex_group_mass = "goal"       # pin group (weight 1.0=pinned, 0.0=free)
-cs.tension_stiffness = 36.5         # structural tension
-cs.compression_stiffness = 36.5     # structural compression
-cs.bending_stiffness = 3.5          # bending resistance
-cs.tension_damping = 11.1           # tension damping
-cs.compression_damping = 11.1       # compression damping
-cs.bending_damping = 0.5            # bending damping
-cs.quality = 10
-cs.mass = 0.3
-
-# Surface Deform modifier (on visible mesh)
-sd_mod = target_mesh.modifiers.new("SurfaceDeform", "SURFACE_DEFORM")
-sd_mod.target = cage_obj
-sd_mod.vertex_group = "sb_affected_<cage_name>"  # limits binding to affected verts
-with bpy.context.temp_override(object=target_mesh, active_object=target_mesh):
-    bpy.ops.object.surfacedeform_bind(modifier=sd_mod.name)
-
-# Goal vertex group (gradient pinning)
-goal_vg = cage_obj.vertex_groups.new(name="goal")
-_PIN_WEIGHTS = [1.0, 0.8, 0.5]  # first 3 rings, rest = 0.0
-for ring_idx, weight in enumerate(_PIN_WEIGHTS):
-    indices = range(ring_idx * 8, (ring_idx + 1) * 8)  # 8 sides per ring
-    goal_vg.add(list(indices), weight, "REPLACE")
-
-# IMPORTANT: Cloth requires sequential frame evaluation for correct simulation.
-# Jumping frames or scrubbing produces wrong results. Play forward from frame_start.
-```
-
-#### Advantages over ribbon-mesh cloth approach
-
-- **Stability:** Cage tube provides enough geometry for stable cloth simulation (ribbon meshes were too thin)
-- **No stretching:** Surface Deform preserves mesh topology perfectly
-- **Gradient density:** More rings near root = stiffer attachment, fewer at tip = natural sway
-- **Intuitive control:** One stiffness slider + mesh density. No vertex painting.
-- **Gradient pinning:** Smooth weight transition `[1.0, 0.8, 0.5, 0.0...]` prevents hard cutoff artifacts
-- **No bone binding:** Deformation is mesh-to-mesh, eliminating STRETCH_TO/DAMPED_TRACK artifacts
-- **Editable:** User can modify cage geometry in Edit Mode for fine control
-- **Coexists with rigid body:** Cage collides against rigid body collision surfaces
-
-#### Phase 2 (deferred): Group mode for skirts
-
-Single chain cage (tube along one bone chain) is Phase 1. Group mode handles parallel bone chains (skirts, capes) with a cylindrical wrap cage.
-
-`validate_bone_group()` in `panels.py` already detects the pattern: multiple chains sharing a common parent, sorted by angle around the armature center.
-
-**Algorithm:**
-1. Each chain gives a "column" of bone joint positions at increasing depth levels
-2. At each depth level, connect columns into a ring (already angle-sorted by validation)
-3. Hull the affected vertices at each ring level to determine radius — produces a hollow cylinder/cone shape
-4. Top ring pinned to common parent bone (e.g. Lower Body for skirt)
-5. Bottom ring open (or closed, depending on geometry)
-
-**Handles common skirt types:**
-- **Simple skirts:** Uniform ring of chains, straightforward cylinder
-- **Frills/layered:** Wider radius at bottom levels, same algorithm (radius adapts per ring)
-- **Split skirts** (front/back panels): Chains cluster into angular groups with gaps — detectable as separate half-cylinders
-
-**User editing after generation:**
-- Add loop cuts to cage for localized stiffness
-- Adjust cage vertices where auto-shape doesn't fit
-- Pin extra vertices at waistband or belt line
-- All the same pin/unpin/rebind workflow as single chain
+**Workflow:** Import PMX → optionally import VMD → click "Build Rigid Body" in MMD4B panel → play animation. If you import a VMD after building physics, click "Rebuild" to sync rigid bodies to the new starting pose.
 
 ### Milestone 5: Materials & Textures ✅
 

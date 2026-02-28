@@ -59,30 +59,9 @@ def build_physics(armature_obj, model, scale: float, mode: str = "none") -> None
 
     if mode == "rigid_body":
         _build_rigid_body_physics(armature_obj, model, scale)
-        # Preserve existing cloth cages: remove dynamic RBs on cage bones
-        _preserve_cloth_cages(armature_obj)
         return
 
     raise ValueError(f"Unknown physics mode: {mode!r}")
-
-
-def _preserve_cloth_cages(armature_obj) -> None:
-    """After physics build, remove dynamic RBs that conflict with existing cloth cages."""
-    raw = armature_obj.get("mmd_softbody_cages")
-    if not raw:
-        return
-
-    cages = json.loads(raw)
-    all_cage_bones: set[str] = set()
-    for cage_info in cages:
-        all_cage_bones.update(cage_info.get("bone_names", []))
-
-    if not all_cage_bones:
-        return
-
-    count = remove_rigid_bodies_for_bones(armature_obj, all_cage_bones)
-    if count > 0:
-        log.info("Preserved cloth cages: removed %d conflicting dynamic rigid bodies", count)
 
 
 def _chain_to_dict(chain) -> dict:
@@ -183,169 +162,6 @@ def _build_rigid_body_physics(armature_obj, model, scale: float) -> None:
 
     log.info("Physics build complete: %d rigid bodies, %d joints",
              len(rigid_objects), len(model.joints))
-
-
-def remove_rigid_bodies_for_bones(armature_obj, bone_names: set[str]) -> int:
-    """Remove dynamic rigid bodies (mode 1,2) on the given bones.
-
-    Also removes connected joints, tracking empties, and bone constraints.
-    Static RBs (mode 0) are left alone — they're collision surfaces.
-
-    Returns count of removed rigid bodies.
-    """
-    import bpy
-
-    physics_json = armature_obj.get("mmd_physics_data")
-    if not physics_json:
-        return 0
-
-    data = json.loads(physics_json)
-    rigids = data.get("rigid_bodies", [])
-    joints = data.get("joints", [])
-    bone_name_map = _build_bone_name_map(armature_obj)
-
-    # Find dynamic rigid indices on target bones
-    rigid_indices_to_remove: set[int] = set()
-    for i, rb in enumerate(rigids):
-        if rb["mode"] == 0:  # STATIC — keep
-            continue
-        bone_idx = rb["bone_index"]
-        if bone_idx < 0:
-            continue
-        bl_name = bone_name_map.get(bone_idx)
-        if bl_name and bl_name in bone_names:
-            rigid_indices_to_remove.add(i)
-
-    if not rigid_indices_to_remove:
-        return 0
-
-    col_name = armature_obj.get("physics_collection")
-    if not col_name:
-        return 0
-
-    collection = bpy.data.collections.get(col_name)
-    if not collection:
-        return 0
-
-    # Find rigid body objects to remove
-    rb_col = None
-    joint_col = None
-    track_col = None
-    for child in collection.children:
-        if child.name == "Rigid Bodies":
-            rb_col = child
-        elif child.name == "Joints":
-            joint_col = child
-        elif child.name == "Tracking":
-            track_col = child
-
-    objects_to_remove = []
-
-    # Rigid body objects
-    if rb_col:
-        for obj in list(rb_col.objects):
-            idx = obj.get("mmd_rigid_index")
-            if idx is not None and idx in rigid_indices_to_remove:
-                objects_to_remove.append(obj)
-
-    # Joint objects connected to removed rigids
-    if joint_col:
-        for obj in list(joint_col.objects):
-            j_idx = obj.get("mmd_joint_index")
-            if j_idx is not None and 0 <= j_idx < len(joints):
-                j = joints[j_idx]
-                if j["src_rigid"] in rigid_indices_to_remove or j["dest_rigid"] in rigid_indices_to_remove:
-                    objects_to_remove.append(obj)
-
-    # Tracking empties for removed bones
-    removed_bone_names: set[str] = set()
-    for i in rigid_indices_to_remove:
-        bone_idx = rigids[i]["bone_index"]
-        bl_name = bone_name_map.get(bone_idx)
-        if bl_name:
-            removed_bone_names.add(bl_name)
-
-    if track_col:
-        for obj in list(track_col.objects):
-            for bn in removed_bone_names:
-                if obj.name == f"Track_{bn}":
-                    objects_to_remove.append(obj)
-                    break
-
-    # Remove constraints from pose bones
-    if armature_obj.pose:
-        for bn in removed_bone_names:
-            pb = armature_obj.pose.bones.get(bn)
-            if not pb:
-                continue
-            to_remove = [
-                c for c in pb.constraints
-                if c.name in ("mmd_dynamic", "mmd_dynamic_bone")
-            ]
-            for c in to_remove:
-                pb.constraints.remove(c)
-            # Unmute IK constraints — physics no longer driving these bones
-            for c in pb.constraints:
-                if c.type == "IK" and c.mute:
-                    c.mute = False
-
-    # Delete objects
-    for obj in objects_to_remove:
-        bpy.data.objects.remove(obj, do_unlink=True)
-
-    count = len(rigid_indices_to_remove)
-    log.info("Removed %d dynamic rigid bodies for bones: %s", count, ", ".join(sorted(removed_bone_names)))
-    return count
-
-
-def get_static_collision_objects(armature_obj) -> list:
-    """Find all static rigid body Blender objects (collision surfaces).
-
-    Returns list of Blender objects with mode=0 (STATIC) rigid bodies.
-    """
-    import bpy
-
-    physics_json = armature_obj.get("mmd_physics_data")
-    if not physics_json:
-        return []
-
-    data = json.loads(physics_json)
-    rigids = data.get("rigid_bodies", [])
-
-    # Find static rigid indices
-    static_indices: set[int] = set()
-    for i, rb in enumerate(rigids):
-        if rb["mode"] == 0:
-            static_indices.add(i)
-
-    if not static_indices:
-        return []
-
-    col_name = armature_obj.get("physics_collection")
-    if not col_name:
-        return []
-
-    collection = bpy.data.collections.get(col_name)
-    if not collection:
-        return []
-
-    # Find rigid body objects
-    rb_col = None
-    for child in collection.children:
-        if child.name == "Rigid Bodies":
-            rb_col = child
-            break
-
-    if not rb_col:
-        return []
-
-    result = []
-    for obj in rb_col.objects:
-        idx = obj.get("mmd_rigid_index")
-        if idx is not None and idx in static_indices:
-            result.append(obj)
-
-    return result
 
 
 def clear_physics(armature_obj) -> None:
@@ -837,10 +653,9 @@ def _create_non_collision_constraints(model, rigid_objects, joint_objects, colle
     2. Non-joint pairs within proximity: create GENERIC constraint empties using
        a template-and-duplicate pattern (O(log N) operator calls, not O(N)).
 
-    Group-based iteration avoids O(n²) distance checks on all pairs.
+    Group-based iteration avoids O(n^2) distance checks on all pairs.
     """
     import bpy
-    from mathutils import Vector
 
     n_bodies = len(rigid_objects)
 
@@ -849,7 +664,7 @@ def _create_non_collision_constraints(model, rigid_objects, joint_objects, colle
     for i, rigid in enumerate(model.rigid_bodies):
         group_map.setdefault(rigid.collision_group_number, []).append(i)
 
-    # Map joint pairs → joint objects
+    # Map joint pairs -> joint objects
     joint_pair_map: dict[frozenset, object] = {}
     for j_idx, joint in enumerate(model.joints):
         src, dst = joint.src_rigid, joint.dest_rigid
@@ -862,11 +677,10 @@ def _create_non_collision_constraints(model, rigid_objects, joint_objects, colle
     joint_nc_count = 0
 
     for i, rigid_a in enumerate(model.rigid_bodies):
-        # Check which groups this body EXCLUDES (bit NOT set in mask)
         for grp in range(16):
             if rigid_a.collision_group_mask & (1 << grp):
                 continue  # bit set = collides with this group, skip
-            # Body A excludes group `grp` — check all bodies in that group
+            # Body A excludes group `grp` -- check all bodies in that group
             for j in group_map.get(grp, []):
                 if i == j:
                     continue
@@ -876,7 +690,7 @@ def _create_non_collision_constraints(model, rigid_objects, joint_objects, colle
                 non_collision_pairs.add(pair)
 
                 if pair in joint_pair_map:
-                    # Existing joint — just flip the flag
+                    # Existing joint -- just flip the flag
                     joint_pair_map[pair].rigid_body_constraint.disable_collisions = True
                     joint_nc_count += 1
                 else:
@@ -906,7 +720,7 @@ def _create_non_collision_empties(bpy, pair_table: list[tuple], collection) -> N
 
     Uses mmd_tools' template-and-duplicate pattern: create ONE constraint
     via bpy.ops, then duplicate with bpy.ops.object.duplicate() (which
-    doubles the selection each iteration → O(log N) operator calls).
+    doubles the selection each iteration -> O(log N) operator calls).
     """
     total = len(pair_table)
     if total < 1:
@@ -937,7 +751,7 @@ def _create_non_collision_empties(bpy, pair_table: list[tuple], collection) -> N
         all_objs.extend(new_objs)
         remain = total - len(all_objs) - len(new_objs)
         if remain < 0:
-            # Too many — deselect extras so next iteration doesn't over-duplicate
+            # Too many -- deselect extras so next iteration doesn't over-duplicate
             last_selected = new_objs
             for k in range(-remain):
                 last_selected[k].select_set(False)
