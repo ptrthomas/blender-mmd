@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 import bpy
-from bpy.props import EnumProperty, FloatProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, StringProperty
 from bpy_extras.io_utils import ImportHelper
 
 log = logging.getLogger("blender_mmd")
@@ -29,11 +29,17 @@ class BLENDER_MMD_OT_import_pmx(bpy.types.Operator, ImportHelper):
         max=10.0,
     )
 
+    use_toon_sphere: BoolProperty(
+        name="Toon & Sphere Textures",
+        description="Include toon and sphere texture nodes in materials (adds overhead)",
+        default=False,
+    )
+
     def execute(self, context):
         from .importer import import_pmx
 
         try:
-            armature = import_pmx(self.filepath, self.scale)
+            armature = import_pmx(self.filepath, self.scale, use_toon_sphere=self.use_toon_sphere)
             self.report({"INFO"}, f"Imported: {armature.name}")
             return {"FINISHED"}
         except Exception as e:

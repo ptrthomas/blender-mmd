@@ -91,9 +91,14 @@ def _setup_bone_collections(armature_obj, model) -> None:
 
 
 def import_pmx(
-    filepath: str, scale: float = DEFAULT_SCALE
+    filepath: str, scale: float = DEFAULT_SCALE, *, use_toon_sphere: bool = False
 ) -> bpy.types.Object:
     """Import a PMX file into the current scene.
+
+    Args:
+        filepath: Path to .pmx file.
+        scale: Import scale factor.
+        use_toon_sphere: Include toon and sphere texture nodes in materials.
 
     Returns the armature object.
     """
@@ -113,7 +118,7 @@ def import_pmx(
     mesh_obj = create_mesh(model, armature_obj, scale)
 
     # Create materials and assign to faces (pass armature for driver setup)
-    create_materials(model, mesh_obj, filepath, armature_obj=armature_obj)
+    create_materials(model, mesh_obj, filepath, armature_obj=armature_obj, use_toon_sphere=use_toon_sphere)
 
     # Store filepath for deferred physics build
     armature_obj["pmx_filepath"] = filepath

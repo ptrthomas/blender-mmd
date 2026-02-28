@@ -273,6 +273,62 @@ def _get_or_create_mmd_shader() -> "bpy.types.ShaderNodeTree":
     return shader
 
 
+def _get_or_create_basic_shader() -> "bpy.types.ShaderNodeTree":
+    """Get or create the MMD Shader Basic node group (no toon/sphere).
+
+    Inputs: Color, Alpha, Emission, Roughness
+    Output: Shader
+
+    A lightweight alternative to the full MMD Shader when toon and sphere
+    textures are not needed.
+    """
+    group_name = "MMD Shader Basic"
+    shader = bpy.data.node_groups.get(group_name)
+    if shader is not None and len(shader.nodes):
+        return shader
+    if shader is None:
+        shader = bpy.data.node_groups.new(name=group_name, type="ShaderNodeTree")
+
+    nodes = shader.nodes
+    links = shader.links
+
+    node_input = nodes.new("NodeGroupInput")
+    node_input.location = (-2 * 210, 0)
+    node_output = nodes.new("NodeGroupOutput")
+    node_output.location = (2 * 210, 0)
+
+    # Principled BSDF
+    node_bsdf = nodes.new("ShaderNodeBsdfPrincipled")
+    node_bsdf.location = (0, 0)
+    node_bsdf.inputs["Specular IOR Level"].default_value = 0.0
+
+    # Output
+    shader.interface.new_socket(name="Shader", in_out="OUTPUT", socket_type="NodeSocketShader")
+    links.new(node_bsdf.outputs["BSDF"], node_output.inputs["Shader"])
+
+    # Input sockets
+    def add_input(name, socket_type, default, target=None, min_val=None, max_val=None):
+        isock = shader.interface.new_socket(name=name, in_out="INPUT", socket_type=socket_type)
+        if default is not None:
+            isock.default_value = default
+        if min_val is not None:
+            isock.min_value = min_val
+        if max_val is not None:
+            isock.max_value = max_val
+        if target is not None:
+            links.new(node_input.outputs[name], target)
+
+    add_input("Color", "NodeSocketColor", (1, 1, 1, 1), node_bsdf.inputs["Base Color"])
+    add_input("Alpha", "NodeSocketFloat", 1.0, node_bsdf.inputs["Alpha"], 0, 1)
+    add_input("Emission", "NodeSocketFloat", 0.3, node_bsdf.inputs["Emission Strength"], 0, 2)
+    add_input("Roughness", "NodeSocketFloat", 0.8, node_bsdf.inputs["Roughness"], 0, 1)
+
+    # Also wire color to emission color for consistency with MMD Shader
+    links.new(node_input.outputs["Color"], node_bsdf.inputs["Emission Color"])
+
+    return shader
+
+
 def _load_image(filepath: str) -> "bpy.types.Image":
     """Load image with dedup by absolute path. Matches mmd_tools."""
     abs_path = os.path.abspath(filepath)
@@ -528,6 +584,7 @@ def create_materials(
     mesh_obj: "bpy.types.Object",
     filepath: str,
     armature_obj: "bpy.types.Object | None" = None,
+    use_toon_sphere: bool = False,
 ) -> None:
     """Create Blender materials from PMX data and assign to mesh faces.
 
@@ -536,6 +593,7 @@ def create_materials(
         mesh_obj: The Blender mesh object.
         filepath: Path to the PMX file (for resolving textures).
         armature_obj: The armature object (for driver setup). Optional.
+        use_toon_sphere: Include toon and sphere texture nodes.
     """
     pmx_dir = os.path.dirname(os.path.abspath(filepath))
     mesh_data = mesh_obj.data
@@ -545,9 +603,13 @@ def create_materials(
     for tex in model.textures:
         tex_paths.append(resolve_texture_path(pmx_dir, tex.path))
 
-    # Get/create node groups
-    uv_group = _get_or_create_uv_group()
-    shader_group = _get_or_create_mmd_shader()
+    # Get/create node groups based on mode
+    if use_toon_sphere:
+        uv_group = _get_or_create_uv_group()
+        shader_group = _get_or_create_mmd_shader()
+    else:
+        uv_group = None
+        shader_group = _get_or_create_basic_shader()
 
     # Set up armature controls if available
     if armature_obj is not None:
@@ -577,11 +639,13 @@ def create_materials(
             node_output = nodes.new("ShaderNodeOutputMaterial")
         node_output.location = (400, 300)
 
-        # UV group node
-        node_uv = nodes.new("ShaderNodeGroup")
-        node_uv.name = "UV"
-        node_uv.node_tree = uv_group
-        node_uv.location = (-5 * 210, -2.5 * 220)
+        # UV group node (only needed for toon/sphere)
+        node_uv = None
+        if uv_group is not None:
+            node_uv = nodes.new("ShaderNodeGroup")
+            node_uv.name = "UV"
+            node_uv.node_tree = uv_group
+            node_uv.location = (-5 * 210, -2.5 * 220)
 
         # Shader group node
         node_shader = nodes.new("ShaderNodeGroup")
@@ -627,9 +691,10 @@ def create_materials(
                     nodes, "Base Texture", "Base Texture", tex_path,
                     node_shader.location + Vector((-4 * 210, -1 * 220)),
                 )
-                links.new(
-                    node_uv.outputs["UV"], base_tex_node.inputs["Vector"]
-                )
+                if node_uv is not None:
+                    links.new(
+                        node_uv.outputs["UV"], base_tex_node.inputs["Vector"]
+                    )
                 links.new(
                     base_tex_node.outputs["Color"],
                     node_shader.inputs["Color"],
@@ -644,16 +709,15 @@ def create_materials(
                     links.new(base_tex_node.outputs["Alpha"], alpha_mul.inputs[1])
                     links.new(alpha_mul.outputs["Value"], node_shader.inputs["Alpha"])
 
-        # --- Toon texture ---
-        has_toon = _setup_toon_texture(
-            mat_data, model, nodes, links, node_shader, node_uv,
-            tex_paths, pmx_dir,
-        ) is not None
-
-        # --- Sphere texture ---
-        has_sphere = _setup_sphere_texture(
-            mat_data, nodes, links, node_shader, node_uv, tex_paths,
-        ) is not None
+        # --- Toon & sphere textures (only when enabled) ---
+        if use_toon_sphere and node_uv is not None:
+            _setup_toon_texture(
+                mat_data, model, nodes, links, node_shader, node_uv,
+                tex_paths, pmx_dir,
+            )
+            _setup_sphere_texture(
+                mat_data, nodes, links, node_shader, node_uv, tex_paths,
+            )
 
         # Append material to mesh
         mesh_data.materials.append(mat)

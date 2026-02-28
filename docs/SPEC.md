@@ -524,6 +524,7 @@ blender_mmd.import_pmx
 Parameters:
 - `filepath`: Path to .pmx file
 - `scale`: Import scale factor (default: 0.08)
+- `use_toon_sphere`: Include toon and sphere texture nodes in materials (default: off)
 
 Behavior:
 1. Parse PMX file (full parse)
@@ -836,11 +837,12 @@ Systematic audit of rigid body build pattern against mmd_tools. Fixes applied to
 **Status:** Done — Principled BSDF-based shader with global controls
 
 **Deliverables:**
-- Single "MMD Shader" node group based on Principled BSDF — handles emission, alpha, roughness natively (5 processing nodes, down from ~20 in the old MMDShaderDev)
-- "MMD UV" node group for UV/sphere/toon coordinate generation
-- Toon texture support with bundled fallback: `blender_mmd/data/toons/toon01-10.bmp` — shared toon textures resolve from PMX dir → parent dir → bundled addon data
-- Sphere texture modes: multiply (sRGB), add (Linear), subtex (UV1) — controlled by Sphere Fac and Sphere Add inputs
-- Global material controls via armature custom properties + drivers: `mmd_emission`, `mmd_toon_fac`, `mmd_sphere_fac` — change one property, all materials update
+- Two shader modes via "Toon & Sphere Textures" checkbox on PMX import (off by default):
+  - **"MMD Shader Basic"** (default): Principled BSDF with Color, Alpha, Emission, Roughness inputs only. No toon/sphere nodes or UV group. Lightweight for rendering and compositing.
+  - **"MMD Shader"** (checkbox on): Full toon/sphere pipeline — 5 processing nodes (toon multiply, sphere multiply/add, sphere select, Principled BSDF). Includes "MMD UV" node group for sphere/toon coordinate generation.
+- Toon texture support (full mode only) with bundled fallback: `blender_mmd/data/toons/toon01-10.bmp` — shared toon textures resolve from PMX dir → parent dir → bundled addon data
+- Sphere texture modes (full mode only): multiply (sRGB), add (Linear), subtex (UV1) — controlled by Sphere Fac and Sphere Add inputs
+- Global material controls via armature custom properties + drivers: `mmd_emission` on both modes; `mmd_toon_fac`, `mmd_sphere_fac` on full mode only
 - Texture loading (diffuse, sphere, toon) with dedup by path
 - Per-face material assignment via `foreach_set`
 - UV V-flip (`V = 1.0 - V`) for PMX DirectX→Blender OpenGL convention

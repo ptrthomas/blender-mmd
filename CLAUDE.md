@@ -84,7 +84,10 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
   - `none` (default): metadata only, no physics objects. Clean import.
   - `rigid_body`: RBW disabled during build, collision layers, non-collision constraints (O(log N) template-and-duplicate), margin 1e-6, dynamic body repositioning, depsgraph flushes. "Good enough" mmd_tools-quality.
 - **MMD4B panel**: N-panel (tab "MMD4B") with sub-panels: Physics (Build/Rebuild/Clear), IK Toggle (per-chain toggles + All On/Off). Rebuild after VMD import to sync physics to starting pose.
-- **Materials**: Single "MMD Shader" node group (Principled BSDF-based) with toon/sphere inputs via `ShaderNodeMix` (not `ShaderNodeMixRGB` which crashes Blender 5.0). Global controls via armature custom properties (`mmd_emission`, `mmd_toon_fac`, `mmd_sphere_fac`) driven to all materials. Drivers are created after import completes (deferred `setup_drivers()`) since the depsgraph must register the armature first. Requires `use_scripts_auto_execute = True` in Blender preferences. Bundled toon textures (toon01-10.bmp) with fallback resolution. Alpha = PMX alpha × texture alpha (matching mmd_tools). Edge color/size stored as material custom properties.
+- **Materials**: Two shader modes controlled by "Toon & Sphere Textures" checkbox on PMX import (off by default):
+  - **Basic** (default): "MMD Shader Basic" node group — Principled BSDF with Color, Alpha, Emission, Roughness. No toon/sphere nodes, no UV group. Lightweight.
+  - **Full** (checkbox on): "MMD Shader" node group with toon/sphere inputs via `ShaderNodeMix`. Adds "MMD UV" group for toon/sphere UVs. Bundled toon textures (toon01-10.bmp) with fallback resolution.
+  - Both modes: Global `mmd_emission` driver on armature. Full mode also drives `mmd_toon_fac`/`mmd_sphere_fac`. Drivers are created after import (deferred `setup_drivers()`). Requires `use_scripts_auto_execute = True`. Alpha = PMX alpha × texture alpha. Edge color/size stored as material custom properties.
 - **Armature visibility**: STICK display, bones hidden by default. All three bone collections start hidden (`is_visible = False`): "Armature" (standard), "Physics" (dynamic RB bones, orange), "mmd_shadow" (helper bones). Unhide from armature properties when needed.
 - **No export**: One-way import only. No PMX/VMD/PMD export.
 - **Logging**: Use blender-agent's log (`output/agent.log`). Python `logging` to stderr for diagnostics.
@@ -92,9 +95,12 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
 ## API usage (inside Blender via blender-agent)
 
 ```python
-# PMX import
+# PMX import (basic shader, no toon/sphere)
 import bl_ext.user_default.blender_mmd.importer as importer
 arm = importer.import_pmx("/path/to/model.pmx")
+
+# PMX import with toon & sphere textures
+arm = importer.import_pmx("/path/to/model.pmx", use_toon_sphere=True)
 
 # VMD import — TWO steps: parse first, then apply to armature
 import bl_ext.user_default.blender_mmd.vmd.parser as vmd_parser
