@@ -198,6 +198,28 @@ class BLENDER_MMD_PT_softbody(bpy.types.Panel):
         armature_obj = _find_mmd_armature_for_panel(context)
         obj = context.active_object
 
+        # --- Physics Section ---
+        if armature_obj:
+            has_physics = armature_obj.get("physics_mode") is not None
+            box = layout.box()
+            box.label(text="Physics", icon="PHYSICS")
+            if has_physics:
+                mode = armature_obj.get("physics_mode", "none")
+                box.label(text=f"Mode: {mode}")
+                box.operator(
+                    "blender_mmd.clear_physics",
+                    text="Clear Physics",
+                    icon="TRASH",
+                )
+            else:
+                row = box.row(align=True)
+                op = row.operator(
+                    "blender_mmd.build_physics",
+                    text="Build Rigid Body",
+                    icon="RIGID_BODY",
+                )
+                op.mode = "rigid_body"
+
         # --- Convert Section (Pose Mode + selection) ---
         if context.mode == "POSE" and context.selected_pose_bones:
             selected = list(context.selected_pose_bones)

@@ -644,69 +644,71 @@ def _apply_soft_constraints(rbc) -> None:
             setattr(rbc, f"limit_ang_{axis}_upper", 0.0)
 
 
-def _create_non_collision_constraints(model, rigid_objects, joint_objects, collection) -> None:
-    """Create non-collision constraints based on PMX collision_group_mask.
+def _create_non_collision_constraints(model, rigid_objects, joint_objects, collection,
+                                     distance_scale: float = 1.5) -> None:
+    """Apply non-collision settings based on PMX collision_group_mask.
 
-    PMX uses a bilateral mask: each body has a 16-bit mask where bit N set
-    means "collide with group N". Blender's collision_collections is symmetric
-    and can't represent this, so all bodies share layer 0 (everything can
-    potentially collide) and we use GENERIC constraints with
-    disable_collisions=True to suppress unwanted pairs.
+    Two-pass approach (matching mmd_tools):
+    1. Joint-connected non-colliding pairs: set disable_collisions on existing joint.
+    2. Non-joint pairs within proximity: create GENERIC constraint empties using
+       a template-and-duplicate pattern (O(log N) operator calls, not O(N)).
 
-    For pairs that already have a joint, we set disable_collisions on the
-    existing joint. For nearby pairs without a joint, we create a new GENERIC
-    constraint empty.
+    Group-based iteration avoids O(n²) distance checks on all pairs.
     """
     import bpy
+    from mathutils import Vector
 
-    # Build group map: group_number → list of rigid indices
+    n_bodies = len(rigid_objects)
+
+    # Group rigid body indices by collision_group_number
     group_map: dict[int, list[int]] = {}
     for i, rigid in enumerate(model.rigid_bodies):
         group_map.setdefault(rigid.collision_group_number, []).append(i)
 
-    # Map joint pairs → joint objects for reusing existing constraints
+    # Map joint pairs → joint objects
     joint_pair_map: dict[frozenset, object] = {}
     for j_idx, joint in enumerate(model.joints):
         src, dst = joint.src_rigid, joint.dest_rigid
-        if 0 <= src < len(rigid_objects) and 0 <= dst < len(rigid_objects):
+        if 0 <= src < n_bodies and 0 <= dst < n_bodies:
             joint_pair_map[frozenset((src, dst))] = joint_objects[j_idx]
 
-    processed: set[frozenset] = set()
-    nc_count = 0
+    # Iterate by group membership (not all pairs) to find non-colliding pairs
+    non_collision_pairs: set[frozenset] = set()
+    non_collision_table: list[tuple] = []  # (obj_a, obj_b) for GENERIC empties
+    joint_nc_count = 0
 
     for i, rigid_a in enumerate(model.rigid_bodies):
-        mask = rigid_a.collision_group_mask
-        for g in range(16):
-            if mask & (1 << g):
-                continue  # bit set = collides with group g
-            # bit unset = should NOT collide with group g
-            for j in group_map.get(g, []):
+        # Check which groups this body EXCLUDES (bit NOT set in mask)
+        for grp in range(16):
+            if rigid_a.collision_group_mask & (1 << grp):
+                continue  # bit set = collides with this group, skip
+            # Body A excludes group `grp` — check all bodies in that group
+            for j in group_map.get(grp, []):
                 if i == j:
                     continue
                 pair = frozenset((i, j))
-                if pair in processed:
+                if pair in non_collision_pairs:
                     continue
-                processed.add(pair)
+                non_collision_pairs.add(pair)
 
                 if pair in joint_pair_map:
-                    # Set disable_collisions on existing joint
-                    joint_obj = joint_pair_map[pair]
-                    joint_obj.rigid_body_constraint.disable_collisions = True
+                    # Existing joint — just flip the flag
+                    joint_pair_map[pair].rigid_body_constraint.disable_collisions = True
+                    joint_nc_count += 1
                 else:
-                    # Check proximity — only create constraint for nearby bodies
-                    obj_a = rigid_objects[i]
-                    obj_b = rigid_objects[j]
+                    # Proximity check: only constrain nearby bodies
+                    obj_a, obj_b = rigid_objects[i], rigid_objects[j]
                     dist = (obj_a.location - obj_b.location).length
-                    range_a = _object_range(obj_a)
-                    range_b = _object_range(obj_b)
-                    threshold = 1.5 * (range_a + range_b) * 0.5
+                    range_sum = _object_range(obj_a) + _object_range(obj_b)
+                    if dist < distance_scale * range_sum * 0.5:
+                        non_collision_table.append((obj_a, obj_b))
 
-                    if dist < threshold:
-                        _create_non_collision_empty(bpy, obj_a, obj_b, collection)
-                        nc_count += 1
+    if joint_nc_count > 0:
+        log.info("Set disable_collisions on %d joint constraints", joint_nc_count)
 
-    if nc_count > 0:
-        log.info("Created %d non-collision constraints", nc_count)
+    # Create GENERIC constraint empties for non-joint non-colliding pairs
+    if non_collision_table:
+        _create_non_collision_empties(bpy, non_collision_table, collection)
 
 
 def _object_range(obj) -> float:
@@ -715,26 +717,63 @@ def _object_range(obj) -> float:
     return (d[0] ** 2 + d[1] ** 2 + d[2] ** 2) ** 0.5
 
 
-def _create_non_collision_empty(bpy, obj_a, obj_b, collection) -> None:
-    """Create a GENERIC constraint empty that disables collision between two bodies."""
-    name = f"NC_{obj_a.name[:15]}_{obj_b.name[:15]}"
-    empty = bpy.data.objects.new(name, None)
-    empty.empty_display_size = 0.01
-    empty.hide_render = True
-    collection.objects.link(empty)
+def _create_non_collision_empties(bpy, pair_table: list[tuple], collection) -> None:
+    """Create GENERIC constraint empties for non-colliding body pairs.
 
-    # Position at midpoint
-    empty.location = (obj_a.location + obj_b.location) / 2
+    Uses mmd_tools' template-and-duplicate pattern: create ONE constraint
+    via bpy.ops, then duplicate with bpy.ops.object.duplicate() (which
+    doubles the selection each iteration → O(log N) operator calls).
+    """
+    total = len(pair_table)
+    if total < 1:
+        return
 
-    bpy.context.view_layer.objects.active = empty
-    empty.select_set(True)
+    # Deselect everything
+    for obj in bpy.context.selected_objects:
+        obj.select_set(False)
+
+    # Create template empty with GENERIC constraint
+    template = bpy.data.objects.new("ncc", None)
+    template.empty_display_size = 0.01
+    template.hide_render = True
+    collection.objects.link(template)
+
+    bpy.context.view_layer.objects.active = template
+    template.select_set(True)
     bpy.ops.rigidbody.constraint_add(type="GENERIC")
-    empty.select_set(False)
+    template.rigid_body_constraint.disable_collisions = True
 
-    rbc = empty.rigid_body_constraint
-    rbc.object1 = obj_a
-    rbc.object2 = obj_b
-    rbc.disable_collisions = True
+    # Duplicate using doubling strategy: select all existing, duplicate,
+    # repeat until we have enough objects
+    all_objs = [template]
+    last_selected = [template]
+    while len(all_objs) < total:
+        bpy.ops.object.duplicate()
+        new_objs = list(bpy.context.selected_objects)
+        all_objs.extend(new_objs)
+        remain = total - len(all_objs) - len(new_objs)
+        if remain < 0:
+            # Too many — deselect extras so next iteration doesn't over-duplicate
+            last_selected = new_objs
+            for k in range(-remain):
+                last_selected[k].select_set(False)
+        else:
+            # Select previous batch too for doubling
+            for k in range(min(remain, len(last_selected))):
+                last_selected[k].select_set(True)
+            last_selected = list(bpy.context.selected_objects)
+
+    # Trim to exact count
+    all_objs = all_objs[:total]
+
+    # Assign pairs to constraint empties
+    for ncc_obj, (obj_a, obj_b) in zip(all_objs, pair_table):
+        rbc = ncc_obj.rigid_body_constraint
+        rbc.object1 = obj_a
+        rbc.object2 = obj_b
+        ncc_obj.hide_set(True)
+
+    log.info("Created %d non-collision constraint empties", total)
 
 
 def _setup_bone_coupling(

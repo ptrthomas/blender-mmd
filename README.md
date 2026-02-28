@@ -28,22 +28,37 @@ mmd_tools is a battle-tested addon that has served the MMD-Blender community for
 | Bone names | Japanese by default (optional translation) | English by default (Japanese stored as `mmd_name_j`) |
 | Coordinate conversion | `.xzy` swizzles scattered across importer, bone, physics code | Done once in parser — downstream is pure Blender coords |
 | IK toggle (VMD) | Custom `mmd_ik_toggle` property + update callback | Constraint influence keyframes (more Blender-native) |
+| Materials | Custom ~20-node shader group per material | Single Principled BSDF group (~7 nodes), global driver controls |
 | Hair/skirt physics | Rigid body only | Rigid body + cloth-on-cage with Surface Deform |
+| Physics workflow | Must build from rest pose, complex UI | Build/clear anytime (even mid-animation), one-click panel |
 | Physics springs | Applied via property update callbacks | Applied directly during joint creation |
-| UI | Sidebar panels, menus, property groups | Minimal — designed for Claude Code |
+| UI | Sidebar panels, menus, property groups | Minimal — designed for Claude Code + MMD4B panel |
 
 Both projects share the same core approach for IK constraints (first link bone placement), IK limits (native properties + LIMIT_ROTATION override), and additional transforms (TRANSFORM constraints + shadow bones).
 
 ## What's implemented
 
 - **PMX import** — full PMX 2.0/2.1 parser, armature, mesh, vertex weights, normals, UVs
-- **Materials** — Principled BSDF-based "MMD Shader" with toon/sphere textures, bundled shared toon files, global controls via armature drivers
+- **Materials** — Principled BSDF-based "MMD Shader" node group with toon/sphere texture support. ~7 internal nodes (vs ~20 in mmd_tools) while preserving the MMD look. Bundled shared toon files (toon01–10.bmp). Global controls via armature custom properties and drivers
 - **VMD motion** — bone keyframes, morph keyframes, IK toggle, bezier interpolation
 - **Morphs** — vertex, UV, bone, material, group morphs as Blender shape keys
-- **Rigid body physics** — three modes: `none`, `rigid_body`, `cloth`
+- **Rigid body physics** — build and clear anytime, even after loading animation on a posed model. Pose-aware repositioning prevents physics explosions on non-rest-pose builds
 - **Cloth physics** — MMD4B panel: select bones, generate cage tube, cloth sim + Surface Deform
 - **Additional transforms** — grant parent system (D bones, shoulder cancel, arm twist, eye tracking)
 - **IK** — correct constraint placement, native limits, per-bone angle conversion
+
+## Customization via armature properties
+
+After import, key settings live as custom properties on the armature object. Change a single value and all materials or IK constraints update via drivers:
+
+| Property | Default | Effect |
+|---|---|---|
+| `mmd_emission` | 0.3 | Emission strength across all materials |
+| `mmd_toon_fac` | 1.0 | Toon texture influence (0 = off, 1 = full) |
+| `mmd_sphere_fac` | 1.0 | Sphere texture influence (0 = off, 1 = full) |
+| `ik_loop_factor` | 1 | Multiplier for IK solver iterations (increase for better foot plant accuracy) |
+
+Per-material override: remove the driver on that material's shader group input and set it manually in the Shader Editor.
 
 ## Requirements
 
