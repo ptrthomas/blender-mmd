@@ -110,6 +110,23 @@ def create_mesh(
                     auv = pmx_verts[vi].additional_uvs[uv_idx]
                     extra_uv.data[li].uv = (auv[0], 1.0 - auv[1])
 
+    # --- Smooth shading on all faces ---
+    mesh_data.polygons.foreach_set(
+        "use_smooth", (True,) * len(mesh_data.polygons)
+    )
+
+    # --- Mark sharp edges before custom normals ---
+    # normals_split_custom_set requires sharp edges to be marked first.
+    # 179° threshold preserves nearly all custom normals (180° misses some).
+    # Matches mmd_tools' __assignCustomNormals pattern.
+    import math
+    bpy.context.view_layer.objects.active = mesh_obj
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="DESELECT")
+    bpy.ops.mesh.edges_select_sharp(sharpness=math.radians(179))
+    bpy.ops.mesh.mark_sharp()
+    bpy.ops.object.mode_set(mode="OBJECT")
+
     # --- Custom split normals ---
     normals = [pmx_verts[v.vertex_index].normal for v in mesh_data.loops]
     mesh_data.normals_split_custom_set(normals)

@@ -75,13 +75,15 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
 
 - **Bone names**: English in Blender, Japanese stored as `mmd_name_j` custom property (for VMD matching)
 - **Coordinate conversion**: Done in parser. Downstream code uses Blender coords only.
-- **IK constraints**: Placed on first link bone (e.g. knee), NOT the end effector (ankle). Uses Blender-native `ik_min_x/max_x` properties instead of `LIMIT_ROTATION` constraints. `ik_loop_factor` param (default 1) multiplies PMX iteration count for better convergence.
-- **IK toggle**: VMD property section parsed and applied as IK constraint `influence` keyframes (0.0/1.0 with CONSTANT interpolation). More Blender-native than mmd_tools' custom property + callback approach.
+- **IK constraints**: Placed on first link bone (e.g. knee), NOT the end effector (ankle). Uses Blender-native `ik_min_x/max_x` properties instead of `LIMIT_ROTATION` constraints. `ik_loop_factor` param (default 5) multiplies PMX iteration count for good foot placement.
+- **IK toggle**: VMD property section parsed and applied as IK constraint `influence` keyframes (0.0/1.0 with CONSTANT interpolation). MMD4B panel provides per-chain toggle buttons and All On/Off.
+- **VMD quality**: Quaternion sign compatibility prevents NLERP long-path artifacts. Interpolation axis remapping via `_InterpolationHelper` (matches mmd_tools). F-curve first/last handle fixing.
+- **Mesh smoothing**: All faces smooth-shaded, sharp edges marked at 179° before custom normals (required for `normals_split_custom_set` to work correctly).
 - **Scene settings**: VMD import sets FPS to 30 (MMD standard) and extends frame range to fit animation.
 - **Physics**: Two modes:
   - `none` (default): metadata only, no physics objects. Clean import.
   - `rigid_body`: RBW disabled during build, collision layers, non-collision constraints (O(log N) template-and-duplicate), margin 1e-6, dynamic body repositioning, depsgraph flushes. "Good enough" mmd_tools-quality.
-- **MMD4B panel**: N-panel (tab "MMD4B") for physics controls. Build/Rebuild/Clear rigid body physics. Rebuild after VMD import to sync physics to starting pose.
+- **MMD4B panel**: N-panel (tab "MMD4B") with sub-panels: Physics (Build/Rebuild/Clear), IK Toggle (per-chain toggles + All On/Off). Rebuild after VMD import to sync physics to starting pose.
 - **Materials**: Single "MMD Shader" node group (Principled BSDF-based) with toon/sphere inputs via `ShaderNodeMix` (not `ShaderNodeMixRGB` which crashes Blender 5.0). Global controls via armature custom properties (`mmd_emission`, `mmd_toon_fac`, `mmd_sphere_fac`) driven to all materials. Drivers are created after import completes (deferred `setup_drivers()`) since the depsgraph must register the armature first. Requires `use_scripts_auto_execute = True` in Blender preferences. Bundled toon textures (toon01-10.bmp) with fallback resolution. Alpha = PMX alpha × texture alpha (matching mmd_tools). Edge color/size stored as material custom properties.
 - **Armature visibility**: STICK display, bones hidden by default. All three bone collections start hidden (`is_visible = False`): "Armature" (standard), "Physics" (dynamic RB bones, orange), "mmd_shadow" (helper bones). Unhide from armature properties when needed.
 - **No export**: One-way import only. No PMX/VMD/PMD export.

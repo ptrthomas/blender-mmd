@@ -205,7 +205,9 @@ This differs from mmd_tools' hierarchy (`Root Empty → Armature → Mesh`) inte
 
 **Face construction**: PMX stores a flat array of vertex indices (every 3 indices = one triangle). Materials reference faces by count: material 0 owns the first N/3 triangles, material 1 owns the next M/3, etc. In milestone 1, faces are created from the full index array but material slot assignment is deferred (single gray material). Per-face material indices will be assigned when materials are implemented in milestone 3.
 
-**Normals**: PMX provides per-vertex normals (already converted to Blender coords by the parser). Apply as custom split normals via the Blender 5.0+ normals API (e.g. `mesh.normals_split_custom_set_from_vertices()` or its current equivalent).
+**Smooth shading**: All faces are set to smooth shading (`use_smooth = True`) via `foreach_set`. Sharp edges are marked at 179° angle threshold before applying custom normals — this is required for `normals_split_custom_set()` to work correctly (undocumented Blender requirement, confirmed by mmd_tools).
+
+**Normals**: PMX provides per-vertex normals (already converted to Blender coords by the parser). Sharp edges are marked first (179° threshold in edit mode), then custom split normals are applied via `mesh.normals_split_custom_set()`.
 
 **UV coordinates**: PMX provides per-vertex UVs. Create a UV map layer and assign coordinates. Additional UV sets (0–4 per vertex, declared in header) are imported as additional UV map layers named `UV1`, `UV2`, etc.
 
@@ -308,7 +310,7 @@ Uses **Blender's native IK solver** with correct constraint placement:
 - Per-link rotation limits use **Blender-native IK properties** (`use_ik_limit_x`, `ik_min_x`, etc.) — more performant and idiomatic. When Blender clamps a value (e.g. `ik_min_x` clamped to [-π,0], losing a positive minimum like 0.0087 rad), a `LIMIT_ROTATION` constraint (`mmd_ik_limit_override`) is added as a fallback override on only the affected axes.
 - IK limits converted from Blender-global to bone-local space via `_convert_ik_limits()`: negate bone matrix, Y↔Z row swap, transpose, snap to axis-aligned permutation (matches mmd_tools' `convertIKLimitAngles`)
 
-**IK iteration multiplier**: Blender's IK solver converges slower than MMD's CCDIK. The `ik_loop_factor` parameter (stored as custom property on armature) multiplies PMX iteration counts. Default 1 uses raw PMX values. mmd_tools users typically set factor=5 for better foot placement precision.
+**IK iteration multiplier**: Blender's IK solver converges slower than MMD's CCDIK. The `ik_loop_factor` parameter (stored as custom property on armature) multiplies PMX iteration counts. Default 5 (matching common mmd_tools usage) gives 200 iterations for typical leg IK (PMX loopCount=40), which provides good foot placement precision.
 
 **VMD IK toggle**: VMD files contain per-frame IK enable/disable states. These are imported as IK constraint `influence` keyframes (0.0/1.0 with CONSTANT interpolation), which is more Blender-native than mmd_tools' custom property + update callback approach.
 
@@ -573,6 +575,12 @@ Behavior:
 
 **Per-bone VMD conversion**: VMD keyframes are in bone-local space. The `_BoneConverter` class constructs a conversion matrix from `bone.matrix_local` (with Y↔Z row swap + transpose) and converts each keyframe via matrix conjugation: `q_mat @ q_vmd @ q_mat.conjugated()`. This depends on correct bone roll (see above).
 
+**Quaternion sign compatibility**: Adjacent quaternion keyframes are checked for sign flips. Since `q` and `-q` represent the same rotation but Blender's NLERP interpolates them differently, we pick the sign closest to the previous keyframe. Without this, bones can take the "long path" (~360° spin instead of staying still). Matches mmd_tools' `__minRotationDiff`.
+
+**Interpolation axis remapping**: VMD Bézier interpolation curves are per-axis (X, Y, Z location + rotation). The `_InterpolationHelper` class computes the correct axis permutation from the bone's conversion matrix, reading from the full 64-byte VMD interpolation block at proper row offsets. Matches mmd_tools' `_InterpolationHelper`. Previous implementation used a hardcoded Y↔Z swap which was incorrect for bones with unusual local axis orientations.
+
+**F-curve handle fixing**: First and last keyframe handles are set explicitly to prevent extrapolation artifacts. Matches mmd_tools' `__fixFcurveHandles`.
+
 ---
 
 ## Helper Functions (for Claude)
@@ -804,15 +812,24 @@ Systematic audit of rigid body build pattern against mmd_tools. Fixes applied to
 - Bone disconnection: all hair chain bones already have `use_connect=False` from PMX data.
 - Soft constraints: mmd_tools doesn't implement inverted-limits workaround either. Springs enabled, soft constraints disabled — matches mmd_tools.
 
-### MMD4B Panel — Physics Controls
+### MMD4B Panel
 
 **N-panel**: Tab "MMD4B" in 3D Viewport sidebar. Visible when active object is an MMD armature (or child mesh).
 
-**Layout:**
+**Layout** (parent panel shows model name, sub-panels below):
+
+**Physics sub-panel:**
 - **No physics state:** "Build Rigid Body" button (calls `build_physics` with `mode=rigid_body`)
 - **Physics active:** Shows rigid body count, "Rebuild" button (re-parses PMX and rebuilds), "Clear" button
 
-**Workflow:** Import PMX → optionally import VMD → click "Build Rigid Body" in MMD4B panel → play animation. If you import a VMD after building physics, click "Rebuild" to sync rigid bodies to the new starting pose.
+**IK Toggle sub-panel:**
+- **All On / All Off** buttons at top
+- Per-chain toggle buttons showing current state (checkbox icon, `depress` for visual feedback)
+- Toggles IK constraint `influence` between 0.0 and 1.0
+- Also toggles `mmd_ik_limit_override` LIMIT_ROTATION constraints in the chain
+- Chains discovered by scanning pose bones for IK constraints
+
+**Workflow:** Import PMX → optionally import VMD → click "Build Rigid Body" in MMD4B panel → play animation. If you import a VMD after building physics, click "Rebuild" to sync rigid bodies to the new starting pose. Use IK Toggle to disable IK chains for non-standard poses.
 
 ### Milestone 5: Materials & Textures ✅
 
