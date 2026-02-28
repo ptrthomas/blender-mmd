@@ -257,7 +257,7 @@ def _get_or_create_mmd_shader() -> "bpy.types.ShaderNodeTree":
     _ai = lambda *a, **kw: _add_group_input(shader, links, node_input, *a, **kw)
     _ai("Color", "NodeSocketColor", (1, 1, 1, 1), node_toon.inputs[_MIX_A])
     _ai("Alpha", "NodeSocketFloat", 1.0, node_bsdf.inputs["Alpha"], 0, 1)
-    _ai("Emission", "NodeSocketFloat", 0.3, node_bsdf.inputs["Emission Strength"], 0, 2)
+    _ai("Emission", "NodeSocketFloat", 1.0, node_bsdf.inputs["Emission Strength"], 0, 2)
     _ai("Roughness", "NodeSocketFloat", 0.8, node_bsdf.inputs["Roughness"], 0, 1)
     _ai("Toon Tex", "NodeSocketColor", (1, 1, 1, 1), node_toon.inputs[_MIX_B])
     _ai("Toon Fac", "NodeSocketFloat", 0.0, node_toon.inputs[_MIX_FAC], 0, 1)
@@ -313,7 +313,7 @@ def _get_or_create_basic_shader() -> "bpy.types.ShaderNodeTree":
     _ai = lambda *a, **kw: _add_group_input(shader, links, node_input, *a, **kw)
     _ai("Color", "NodeSocketColor", (1, 1, 1, 1), node_bsdf.inputs["Base Color"])
     _ai("Alpha", "NodeSocketFloat", 1.0, node_bsdf.inputs["Alpha"], 0, 1)
-    _ai("Emission", "NodeSocketFloat", 0.3, node_bsdf.inputs["Emission Strength"], 0, 2)
+    _ai("Emission", "NodeSocketFloat", 1.0, node_bsdf.inputs["Emission Strength"], 0, 2)
     _ai("Roughness", "NodeSocketFloat", 0.8, node_bsdf.inputs["Roughness"], 0, 1)
 
     # Also wire color to emission color for consistency with MMD Shader
@@ -384,7 +384,7 @@ def _setup_armature_controls(armature_obj: "bpy.types.Object") -> None:
     rna = armature_obj.id_properties_ui
 
     if "mmd_emission" not in armature_obj:
-        armature_obj["mmd_emission"] = 0.3
+        armature_obj["mmd_emission"] = 1.0
         ui = rna("mmd_emission")
         ui.update(min=0.0, max=2.0, soft_min=0.0, soft_max=1.0, description="Emission strength for all materials")
 
@@ -442,7 +442,7 @@ def update_materials(armature_obj: "bpy.types.Object") -> None:
     Call after changing mmd_emission, mmd_toon_fac, or mmd_sphere_fac
     if drivers are not working (e.g. auto-execute scripts is disabled).
     """
-    emission = armature_obj.get("mmd_emission", 0.3)
+    emission = armature_obj.get("mmd_emission", 1.0)
     toon_fac = armature_obj.get("mmd_toon_fac", 1.0)
     sphere_fac = armature_obj.get("mmd_sphere_fac", 1.0)
 
