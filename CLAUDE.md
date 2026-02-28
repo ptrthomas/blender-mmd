@@ -35,6 +35,26 @@ curl -s localhost:5656 --data-binary @- <<< 'bpy.app.version_string'
 # Use blender-agent (port 5656) for execution, screenshots, and log monitoring
 # Module reloading is unreliable — restart Blender for code changes
 
+# Clear default scene objects before importing
+curl -s localhost:5656 --data-binary @- <<'PYEOF'
+import bpy
+for obj in list(bpy.data.objects):
+    bpy.data.objects.remove(obj, do_unlink=True)
+PYEOF
+
+# Zoom to selected object (run after selecting something)
+curl -s localhost:5656 --data-binary @- <<'PYEOF'
+import bpy
+for area in bpy.context.screen.areas:
+    if area.type == 'VIEW_3D':
+        for region in area.regions:
+            if region.type == 'WINDOW':
+                with bpy.context.temp_override(area=area, region=region):
+                    bpy.ops.view3d.view_selected()
+                break
+        break
+PYEOF
+
 # Screenshots: two-step process (NEVER use curl -o to save screenshots)
 # Step 1: Tell Blender to save screenshot to disk
 curl -s localhost:5656 --data-binary @- <<'PYEOF'
@@ -58,10 +78,10 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
 - **Physics**: Three modes, can coexist (rigid_body provides collision surfaces for soft_body cages):
   - `none` (default): metadata only, no physics objects. Clean import.
   - `rigid_body`: M4 implementation. RBW disabled during build, collision layers, non-collision constraints, margin 1e-6, dynamic body repositioning, depsgraph flushes. "Good enough" mmd_tools-quality.
-  - `soft_body`: MMD4B panel. User selects bone chain, algorithm generates octagonal cage tube with gradient density (more rings near root), Cloth modifier on cage + Surface Deform on visible mesh. Gradient pinning `[1.0, 0.8, 0.5]` for smooth transition.
-- **MMD4B panel**: N-panel (tab "MMD4B") for soft body deformation. Select bones in Pose Mode → generate cage → play. Uses Cloth modifier (not Soft Body) because Cloth respects Armature modifier output for pinned vertices.
+  - `soft_body`: MMD4B panel. User selects bone chain, algorithm generates octagonal cage tube with gradient density (more rings near root), Cloth modifier on cage + Surface Deform on visible mesh. Gradient pinning `[1.0, 0.8, 0.5]` for smooth transition. Auto-integrates with rigid_body mode: static RBs get COLLISION modifiers (body collision), dynamic RBs on cage bones are removed (cloth replaces them). Rebuilding rigid body physics preserves existing cages.
+- **MMD4B panel**: N-panel (tab "MMD4B") for soft body deformation. Select bones in Pose Mode → generate cage → play. Uses Cloth modifier (not Soft Body) because Cloth respects Armature modifier output for pinned vertices. Collision is auto-detected from static rigid bodies (no manual picker).
 - **Materials**: Single "MMD Shader" node group (Principled BSDF-based) with toon/sphere inputs. Global controls via armature custom properties (`mmd_emission`, `mmd_toon_fac`, `mmd_sphere_fac`) driven to all materials. Bundled toon textures (toon01-10.bmp) with fallback resolution. Alpha = PMX alpha × texture alpha (matching mmd_tools). Edge color/size stored as material custom properties.
-- **Armature visibility**: Hidden by default on import (`hide_set(True)`, wire display). Unhide from outliner when needed.
+- **Armature visibility**: Hidden by default on import (`hide_set(True)`, STICK display). Unhide from outliner when needed. Bones split into three collections: "Armature" (standard), "Physics" (dynamic RB bones, orange), "mmd_shadow" (hidden helper bones).
 - **No export**: One-way import only. No PMX/VMD/PMD export.
 - **Logging**: Use blender-agent's session log. Python `logging` to stderr for diagnostics.
 

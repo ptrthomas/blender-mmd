@@ -217,23 +217,29 @@ class BLENDER_MMD_OT_generate_cage(bpy.types.Operator):
         )
 
     def execute(self, context):
-        from .panels import validate_bone_chain
+        from .panels import validate_bone_tree
         from .softbody import generate_cage
 
         armature_obj = context.active_object
         selected = list(context.selected_pose_bones)
-        valid, sorted_bones, msg = validate_bone_chain(selected)
+        valid, spine_names, all_names, pin_bone, msg = validate_bone_tree(
+            selected, armature_obj
+        )
         if not valid:
             self.report({"ERROR"}, msg)
             return {"CANCELLED"}
 
-        bone_names = [pb.name for pb in sorted_bones]
         stiffness = context.scene.mmd4b_stiffness
-        collision = context.scene.mmd4b_collision_mesh
 
         try:
-            cage = generate_cage(armature_obj, bone_names, stiffness, collision)
-            self.report({"INFO"}, f"Generated cage: {cage.name}")
+            cage, removed_rb_count = generate_cage(
+                armature_obj, spine_names, stiffness,
+                all_bone_names=all_names,
+            )
+            msg = f"Generated cage: {cage.name}"
+            if removed_rb_count > 0:
+                msg += f" (removed {removed_rb_count} rigid bodies)"
+            self.report({"INFO"}, msg)
             return {"FINISHED"}
         except Exception as e:
             log.exception("Cage generation failed")

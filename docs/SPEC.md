@@ -854,7 +854,7 @@ Systematic audit of rigid body build pattern against mmd_tools. Fixes applied to
 4. Pin bone = parent of root selected bone (Head for hair, Hips for skirt) — always unambiguous
 5. Soft Body modifier on cage, top ring pinned to pin bone via goal vertex group
 6. Surface Deform modifier on the mesh → bound to cage, limited to affected vertices via `vertex_group`
-7. Optional: collision mesh (body) for the cage to collide with
+7. Cage generation auto-handles rigid body integration: adds COLLISION modifiers to static RBs (head, body), removes dynamic RBs on cage bones (replaced by cloth sim)
 8. Play animation — cage deforms under soft body physics, mesh vertices follow
 9. User can edit cage mesh (add loop cuts, adjust shape) for fine control
 
@@ -903,7 +903,7 @@ At default stiffness 0.7: tension=36.5, bending=3.5, damping=11.1. These are int
 - Quality: 10 substeps
 - Mass: 0.3 (fixed)
 - Point cache: frame_end extended to 10000 (or scene end, whichever is larger)
-- Collision: optional, enabled if collision_obj provided
+- Collision: auto-enabled; static rigid bodies get COLLISION modifiers automatically
 
 #### Surface Deform binding
 
@@ -918,8 +918,7 @@ The visible mesh gets a Surface Deform modifier targeting the cage:
 
 **Convert section (Pose Mode, bones selected):**
 - Bone selection info (count, chain range, pin bone)
-- Collision mesh picker (PointerProperty)
-- Stiffness slider (0.0–1.0, default 0.5)
+- Stiffness slider (0.0–1.0, default 0.7)
 - "Generate Cage" button
 - Reuses existing `validate_bone_chain` / `validate_bone_group` from cloth code
 

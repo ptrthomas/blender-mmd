@@ -22,31 +22,37 @@ log = logging.getLogger("blender_mmd")
 
 # Cage geometry
 _HEX_SIDES = 8
-_RADIUS_MARGIN = 1.15  # 15% oversizing for reliable Surface Deform bind
+_RADIUS_MARGIN = 1.05  # 5% oversizing — percentile radius already excludes outliers
 
 
 def generate_cage(
     armature_obj,
-    bone_names: list[str],
+    spine_names: list[str],
     stiffness: float = 0.7,
-    collision_obj=None,
-) -> object:
-    """Generate a Soft Body cage tube along a bone chain.
+    all_bone_names: list[str] | None = None,
+) -> tuple[object, int]:
+    """Generate a Soft Body cage tube along a bone chain or tree spine.
+
+    Automatically handles rigid body integration:
+    - Adds COLLISION modifiers to static RBs (head, body) for cloth collision
+    - Removes dynamic RBs on cage bones (replaced by cloth sim)
 
     Args:
         armature_obj: The MMD armature object.
-        bone_names: Ordered root→tip bone names (from validate_bone_chain).
+        spine_names: Ordered root→tip bone names for the centerline.
         stiffness: 0.0–1.0 stiffness slider value.
-        collision_obj: Optional collision mesh for Soft Body.
+        all_bone_names: All bone names for vertex collection (tree mode).
+            If None, falls back to spine_names (linear chain mode).
 
     Returns:
-        The created cage object.
+        Tuple of (cage_object, removed_rb_count).
     """
     import bmesh
     import bpy
     from mathutils import Matrix, Vector
 
     arm_data = armature_obj.data
+    collect_names = all_bone_names if all_bone_names is not None else spine_names
 
     # --- 1. Find the visible mesh parented to this armature ---
     mesh_obj = _find_mesh_child(armature_obj)
@@ -54,61 +60,78 @@ def generate_cage(
         raise RuntimeError("No mesh child found on armature")
 
     # --- 2. Collect affected vertices (weighted to selected bones) ---
-    affected_indices = _collect_affected_vertices(mesh_obj, bone_names)
-    if not affected_indices:
+    affected = _collect_affected_vertices(mesh_obj, collect_names)
+    if not affected:
         raise RuntimeError("No vertices weighted to selected bones")
+    affected_indices = [vi for vi, _w in affected]
 
     # --- 3. Determine pin bone (parent of root selected bone) ---
-    root_bone = arm_data.bones[bone_names[0]]
-    pin_bone_name = root_bone.parent.name if root_bone.parent else bone_names[0]
+    root_bone = arm_data.bones[spine_names[0]]
+    pin_bone_name = root_bone.parent.name if root_bone.parent else spine_names[0]
 
-    # --- 4. Build centerline from bone chain head→tail positions ---
-    # Use rest-pose (edit bone) positions in armature local space
+    # --- 4. Build centerline from spine head→tail positions ---
+    # Use rest-pose (edit bone) positions in armature local space.
+    # Prepend pin bone head so the cage extends into the anchor region —
+    # this ensures the pinned rings sit inside the parent bone, creating
+    # a smooth transition instead of a gap at the attachment point.
     centerline = []
-    for name in bone_names:
+    pin_bone = arm_data.bones[pin_bone_name]
+    root_bone_obj = arm_data.bones[spine_names[0]]
+    if pin_bone_name != spine_names[0]:
+        centerline.append(Vector(pin_bone.head_local))
+    for name in spine_names:
         bone = arm_data.bones[name]
         centerline.append(Vector(bone.head_local))
     # Add tail of last bone
-    last_bone = arm_data.bones[bone_names[-1]]
+    last_bone = arm_data.bones[spine_names[-1]]
     centerline.append(Vector(last_bone.tail_local))
 
     # --- 5. Compute per-ring cage radius from affected vertex positions ---
     ring_radii = _compute_per_ring_radius(
-        mesh_obj, affected_indices, centerline, armature_obj
+        mesh_obj, affected, centerline, armature_obj
     )
     ring_radii = [max(r * _RADIUS_MARGIN, 0.01) for r in ring_radii]
 
     # --- 6. Build cage mesh ---
     cage_obj = _build_cage_mesh(
-        armature_obj, bone_names, centerline, ring_radii, pin_bone_name
+        armature_obj, spine_names, centerline, ring_radii, pin_bone_name
     )
 
     # --- 7. Apply Armature modifier (before Cloth, so pinned verts follow bone) ---
     _apply_armature_modifier(cage_obj, armature_obj, pin_bone_name)
 
-    # --- 8. Apply Cloth modifier on cage ---
-    _apply_cloth(cage_obj, stiffness, collision_obj)
+    # --- 8. Auto-detect static RBs for collision ---
+    _setup_collision_from_rigid_bodies(armature_obj)
 
-    # --- 9. Create affected vertex group on visible mesh + Surface Deform ---
+    # --- 9. Apply Cloth modifier on cage ---
+    _apply_cloth(cage_obj, stiffness)
+
+    # --- 10. Create affected vertex group on visible mesh + Surface Deform ---
     sd_mod_name = _apply_surface_deform(mesh_obj, cage_obj, affected_indices)
 
-    # --- 10. Store metadata on armature ---
+    # --- 11. Store metadata on armature ---
     _store_cage_metadata(
-        armature_obj, cage_obj.name, bone_names, pin_bone_name,
+        armature_obj, cage_obj.name, collect_names, pin_bone_name,
         len(affected_indices), sd_mod_name, mesh_obj.name,
     )
 
-    # --- 11. Place cage in Soft Body subcollection ---
+    # --- 12. Place cage in Soft Body subcollection ---
     _move_to_softbody_collection(armature_obj, cage_obj)
 
+    # --- 13. Remove dynamic RBs on cage bones (cloth replaces them) ---
+    from .physics import remove_rigid_bodies_for_bones
+    removed_count = remove_rigid_bodies_for_bones(armature_obj, set(collect_names))
+
     log.info(
-        "Generated cage '%s': %d bones, %d affected verts, radius=%.4f–%.4f, "
-        "stiffness=%.2f, pin=%s",
-        cage_obj.name, len(bone_names), len(affected_indices),
+        "Generated cage '%s': %d bones (%d spine), %d affected verts, "
+        "radius=%.4f–%.4f, stiffness=%.2f, pin=%s, removed %d rigid bodies",
+        cage_obj.name, len(collect_names), len(spine_names),
+        len(affected_indices),
         min(ring_radii), max(ring_radii), stiffness, pin_bone_name,
+        removed_count,
     )
 
-    return cage_obj
+    return cage_obj, removed_count
 
 
 def remove_cage(armature_obj, cage_name: str) -> None:
@@ -201,9 +224,15 @@ def _find_mesh_child(armature_obj):
 
 def _collect_affected_vertices(
     mesh_obj, bone_names: list[str]
-) -> list[int]:
-    """Collect vertex indices with non-zero weight in any of the given bone groups."""
-    affected = set()
+) -> list[tuple[int, float]]:
+    """Collect vertices weighted to any of the given bone groups.
+
+    Returns:
+        List of (vertex_index, max_weight) tuples, sorted by index.
+        max_weight is the highest weight across all matching bone groups.
+    """
+    # vertex_index → max weight across all bone groups
+    weight_map: dict[int, float] = {}
     for name in bone_names:
         vg = mesh_obj.vertex_groups.get(name)
         if vg is None:
@@ -212,31 +241,37 @@ def _collect_affected_vertices(
         for v in mesh_obj.data.vertices:
             for g in v.groups:
                 if g.group == vg_index and g.weight > 0.001:
-                    affected.add(v.index)
+                    cur = weight_map.get(v.index, 0.0)
+                    if g.weight > cur:
+                        weight_map[v.index] = g.weight
                     break
-    return sorted(affected)
+    return sorted(weight_map.items(), key=lambda x: x[0])
 
 
 def _compute_per_ring_radius(
-    mesh_obj, affected_indices: list[int], centerline: list, armature_obj
+    mesh_obj, affected: list[tuple[int, float]], centerline: list, armature_obj
 ) -> list[float]:
-    """Compute per-ring radius as the max perpendicular distance from affected verts.
+    """Compute per-ring radius using weighted 85th percentile of perpendicular distance.
 
-    Each ring point on the centerline gets its own radius based on nearby vertices,
-    so the cage hugs the mesh profile instead of using a single worst-case radius.
+    For each ring slab, collects (distance, weight) pairs from affected vertices,
+    sorts by distance, and finds the distance at which 85% of total slab weight
+    is reached. This produces a tighter cage that encloses high-influence geometry
+    while ignoring low-weight outlier strands.
     """
     from mathutils import Vector
+
+    _WEIGHT_PERCENTILE = 0.85
 
     mesh_to_arm = armature_obj.matrix_world.inverted() @ mesh_obj.matrix_world
     verts = mesh_obj.data.vertices
     n_rings = len(centerline)
 
-    # Per-ring max distances (one per centerline point)
-    ring_max = [0.0] * n_rings
+    # Per-ring list of (perpendicular_distance, weight) pairs
+    ring_samples: list[list[tuple[float, float]]] = [[] for _ in range(n_rings)]
 
-    for vi in affected_indices:
+    for vi, w in affected:
         v_pos = mesh_to_arm @ verts[vi].co
-        # Find closest segment and attribute distance to nearest ring
+        # Find closest segment and attribute to nearest ring
         best_seg = 0
         best_t = 0.0
         best_perp = float("inf")
@@ -255,33 +290,52 @@ def _compute_per_ring_radius(
                 best_perp = perp
                 best_seg = i
                 best_t = t
-        # Attribute to the nearest ring endpoint
         ring_idx = best_seg if best_t < 0.5 else best_seg + 1
-        ring_max[ring_idx] = max(ring_max[ring_idx], best_perp)
+        ring_samples[ring_idx].append((best_perp, w))
 
-    # Fill in any rings with zero radius (no vertices nearby) by interpolating
-    # from neighbours
+    # Compute weighted percentile radius per ring
+    ring_radii = [0.0] * n_rings
     for i in range(n_rings):
-        if ring_max[i] < 1e-6:
-            # Look left and right for non-zero
+        samples = ring_samples[i]
+        if not samples:
+            continue
+        # Sort by distance ascending
+        samples.sort(key=lambda x: x[0])
+        total_weight = sum(w for _, w in samples)
+        if total_weight < 1e-9:
+            continue
+        threshold = total_weight * _WEIGHT_PERCENTILE
+        accum = 0.0
+        for dist, w in samples:
+            accum += w
+            if accum >= threshold:
+                ring_radii[i] = dist
+                break
+        else:
+            # All accumulated but never crossed threshold (shouldn't happen)
+            ring_radii[i] = samples[-1][0]
+
+    # Fill in any rings with zero radius by interpolating from neighbours
+    for i in range(n_rings):
+        if ring_radii[i] < 1e-6:
             left = right = None
             for j in range(i - 1, -1, -1):
-                if ring_max[j] > 1e-6:
+                if ring_radii[j] > 1e-6:
                     left = j
                     break
             for j in range(i + 1, n_rings):
-                if ring_max[j] > 1e-6:
+                if ring_radii[j] > 1e-6:
                     right = j
                     break
             if left is not None and right is not None:
                 t = (i - left) / (right - left)
-                ring_max[i] = ring_max[left] * (1 - t) + ring_max[right] * t
+                ring_radii[i] = ring_radii[left] * (1 - t) + ring_radii[right] * t
             elif left is not None:
-                ring_max[i] = ring_max[left]
+                ring_radii[i] = ring_radii[left]
             elif right is not None:
-                ring_max[i] = ring_max[right]
+                ring_radii[i] = ring_radii[right]
 
-    return ring_max
+    return ring_radii
 
 
 def _build_cage_mesh(
@@ -456,12 +510,37 @@ def _apply_armature_modifier(cage_obj, armature_obj, pin_bone_name: str) -> None
     arm_mod.use_vertex_groups = True
 
 
-def _apply_cloth(cage_obj, stiffness: float, collision_obj=None) -> None:
+def _setup_collision_from_rigid_bodies(armature_obj) -> None:
+    """Add COLLISION modifiers to static rigid bodies for cloth collision.
+
+    Blender's Cloth solver automatically checks all scene objects with
+    COLLISION modifiers, so we just need to tag the static RBs.
+    """
+    from .physics import get_static_collision_objects
+
+    static_objs = get_static_collision_objects(armature_obj)
+    if not static_objs:
+        return
+
+    count = 0
+    for obj in static_objs:
+        if not any(m.type == "COLLISION" for m in obj.modifiers):
+            obj.modifiers.new("Collision", "COLLISION")
+            count += 1
+
+    if count > 0:
+        log.info("Added COLLISION modifiers to %d static rigid bodies", count)
+
+
+def _apply_cloth(cage_obj, stiffness: float) -> None:
     """Apply Cloth modifier with stiffness-mapped parameters.
 
     Cloth respects the Armature modifier output for pinned vertices (unlike
     Soft Body which only anchors to rest shape), so pinned ring follows the
     bone correctly during animation.
+
+    Collision is handled automatically — Blender's Cloth solver checks all
+    scene objects with COLLISION modifiers.
 
     Stiffness mapping (0.0–1.0 slider → Cloth parameters):
         tension/compression: 5 + stiffness * 45   (range 5–50)
@@ -484,7 +563,16 @@ def _apply_cloth(cage_obj, stiffness: float, collision_obj=None) -> None:
 
     # General
     cs.quality = 10
-    cs.mass = 0.3
+    cs.mass = 0.08
+
+    # Pressure — resists tube collapse/squashing without internal geometry
+    cs.use_pressure = True
+    cs.uniform_pressure_force = 2.0
+    cs.use_pressure_volume = True
+
+    # Internal springs — virtual springs between opposite verts for volume
+    cs.use_internal_springs = True
+    cs.internal_spring_max_diversion = 0.785  # ~45 degrees
 
     # Extend cache well beyond typical scene length so it doesn't cut short
     # if VMD is imported after cage generation.
@@ -492,11 +580,8 @@ def _apply_cloth(cage_obj, stiffness: float, collision_obj=None) -> None:
     pc = cloth_mod.point_cache
     pc.frame_end = max(bpy.context.scene.frame_end, 10000)
 
-    # Collision
-    if collision_obj is not None:
-        if not any(m.type == "COLLISION" for m in collision_obj.modifiers):
-            collision_obj.modifiers.new("Collision", "COLLISION")
-        cloth_mod.collision_settings.use_collision = True
+    # Enable cloth collision — Blender solver checks all COLLISION objects
+    cloth_mod.collision_settings.use_collision = True
 
 
 

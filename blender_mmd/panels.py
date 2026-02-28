@@ -6,7 +6,7 @@ import json
 import math
 
 import bpy
-from bpy.props import FloatProperty, PointerProperty
+from bpy.props import FloatProperty
 
 
 def _is_mmd_armature(obj) -> bool:
@@ -71,6 +71,94 @@ def validate_bone_chain(pose_bones) -> tuple[bool, list, str]:
             )
 
     return True, sorted_bones, ""
+
+
+def validate_bone_tree(
+    pose_bones, armature_obj
+) -> tuple[bool, list[str], list[str], str, str]:
+    """Validate that selected pose bones form a tree (or linear chain).
+
+    At each branch point, follows the child with the most weighted vertices
+    to build the spine (longest/heaviest path).
+
+    Args:
+        pose_bones: Selected pose bones.
+        armature_obj: The armature object (needed to find mesh for weight counts).
+
+    Returns:
+        (valid, spine_names, all_names, pin_bone, message)
+        spine_names: ordered root→tip heaviest path (for centerline).
+        all_names: every selected bone name (for vertex collection + radius).
+        pin_bone: root's parent name (or root itself if no parent).
+    """
+    if len(pose_bones) < 2:
+        return False, [], [], "", "Select at least 2 bones"
+
+    names = {pb.name for pb in pose_bones}
+    pb_lookup = {pb.name: pb for pb in pose_bones}
+
+    # Find root: selected bone whose parent is NOT in the selection
+    roots = [pb for pb in pose_bones if pb.parent is None or pb.parent.name not in names]
+    if len(roots) == 0:
+        return False, [], [], "", "No root bone found (cycle?)"
+    if len(roots) > 1:
+        return False, [], [], "", f"Multiple roots: {', '.join(r.name for r in roots)}"
+
+    root = roots[0]
+    all_names = sorted(names)
+
+    # Count weighted vertices per bone from the mesh
+    mesh_obj = _find_mesh_child_for_tree(armature_obj)
+    vert_counts: dict[str, int] = {}
+    if mesh_obj:
+        for bone_name in names:
+            vg = mesh_obj.vertex_groups.get(bone_name)
+            if vg is None:
+                vert_counts[bone_name] = 0
+                continue
+            count = 0
+            vg_index = vg.index
+            for v in mesh_obj.data.vertices:
+                for g in v.groups:
+                    if g.group == vg_index and g.weight > 0.001:
+                        count += 1
+                        break
+            vert_counts[bone_name] = count
+
+    # Walk tree from root, at each branch follow the child with most weighted verts
+    spine = [root.name]
+    current = root
+    while True:
+        children_in_sel = [c for c in current.children if c.name in names]
+        if not children_in_sel:
+            break
+        if len(children_in_sel) == 1:
+            current = children_in_sel[0]
+        else:
+            # Follow child with most weighted vertices (subtree total)
+            current = max(children_in_sel, key=lambda c: _subtree_vert_count(c, names, vert_counts))
+        spine.append(current.name)
+
+    pin_bone = root.parent.name if root.parent else root.name
+
+    return True, spine, all_names, pin_bone, ""
+
+
+def _find_mesh_child_for_tree(armature_obj):
+    """Find the largest mesh child of the armature (for vertex counting)."""
+    mesh_children = [c for c in armature_obj.children if c.type == "MESH"]
+    if not mesh_children:
+        return None
+    return max(mesh_children, key=lambda m: len(m.data.vertices))
+
+
+def _subtree_vert_count(pb, names: set[str], vert_counts: dict[str, int]) -> int:
+    """Recursively count weighted vertices in a subtree within the selection."""
+    total = vert_counts.get(pb.name, 0)
+    for child in pb.children:
+        if child.name in names:
+            total += _subtree_vert_count(child, names, vert_counts)
+    return total
 
 
 def validate_bone_group(
@@ -157,10 +245,6 @@ def validate_bone_group(
     return True, chains, sorted(strut_names), ""
 
 
-def _collision_mesh_poll(self, obj):
-    return obj.type == "MESH"
-
-
 def _get_panel_cage_list(armature_obj) -> list[dict]:
     """Get cage metadata list from armature for panel display."""
     raw = armature_obj.get("mmd_softbody_cages") if armature_obj else None
@@ -224,58 +308,17 @@ class BLENDER_MMD_PT_softbody(bpy.types.Panel):
         if context.mode == "POSE" and context.selected_pose_bones:
             selected = list(context.selected_pose_bones)
 
-            # Try single chain first
-            chain_ok, sorted_bones, chain_msg = validate_bone_chain(selected)
-            # Try group if single chain fails
-            group_ok, chains, struts, group_msg = (
-                (False, [], [], "")
-                if chain_ok
-                else validate_bone_group(selected, armature_obj)
-            )
-
             box = layout.box()
-            if chain_ok:
-                first = sorted_bones[0].name
-                last = sorted_bones[-1].name
-                pin_bone = (
-                    sorted_bones[0].parent.name
-                    if sorted_bones[0].parent
-                    else sorted_bones[0].name
-                )
-                box.label(
-                    text=f"Chain: {len(sorted_bones)} bones "
-                    f"({first} \u2192 {last})"
-                )
-                box.label(text=f"Pin bone: {pin_bone}", icon="PINNED")
-                box.prop(context.scene, "mmd4b_stiffness", text="Stiffness")
-                box.prop(
-                    context.scene, "mmd4b_collision_mesh", text="Collision"
-                )
-                box.operator(
-                    "blender_mmd.generate_cage",
-                    text="Generate Cage",
-                    icon="MESH_CYLINDER",
-                )
-            elif group_ok:
-                total = sum(len(c) for c in chains)
-                depths = ", ".join(str(len(c)) for c in chains)
-                box.label(
-                    text=f"Group: {len(chains)} chains, {total} bones",
-                    icon="MESH_CYLINDER",
-                )
-                box.label(text=f"Depths: {depths}")
-                if struts:
-                    box.label(text=f"Struts: {len(struts)}")
-                box.prop(context.scene, "mmd4b_stiffness", text="Stiffness")
-                box.prop(
-                    context.scene, "mmd4b_collision_mesh", text="Collision"
-                )
-                box.label(text="Group mode: Phase 2", icon="INFO")
-            else:
-                box.label(
-                    text=f"Selected: {len(selected)} bones", icon="ERROR"
-                )
-                box.label(text=chain_msg or group_msg)
+            box.label(
+                text=f"Selected: {len(selected)} bones",
+                icon="BONE_DATA",
+            )
+            box.prop(context.scene, "mmd4b_stiffness", text="Stiffness")
+            box.operator(
+                "blender_mmd.generate_cage",
+                text="Generate Cage",
+                icon="MESH_CYLINDER",
+            )
         elif context.mode == "POSE":
             layout.label(text="Select bones to convert", icon="INFO")
         elif (
@@ -365,11 +408,6 @@ def register():
         max=1.0,
         subtype="FACTOR",
     )
-    bpy.types.Scene.mmd4b_collision_mesh = PointerProperty(
-        name="Collision Mesh",
-        type=bpy.types.Object,
-        poll=_collision_mesh_poll,
-    )
     for cls in _classes:
         bpy.utils.register_class(cls)
 
@@ -377,5 +415,4 @@ def register():
 def unregister():
     for cls in reversed(_classes):
         bpy.utils.unregister_class(cls)
-    del bpy.types.Scene.mmd4b_collision_mesh
     del bpy.types.Scene.mmd4b_stiffness
