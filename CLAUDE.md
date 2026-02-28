@@ -11,9 +11,9 @@ Read `docs/SPEC.md` first. It is the single source of truth for architecture, de
 - **Milestone 3.5** (done): IK fix — correct constraint placement, native limits, VMD IK toggle
 - **Milestone 4** (done): Rigid body physics — functional but limited by Blender's RB solver
 - **Milestone 4b** (done): Cloth on cage tube + Surface Deform for hair/skirt/tie. Three physics modes coexist: none, rigid_body, soft_body.
-- **Milestone 5** (done): Materials & textures — two shader modes (mmd/simple), texture loading, per-face assignment, UV V-flip, overlapping face blend_method fix. Visually matches mmd_tools baseline.
+- **Milestone 5** (done): Materials & textures — Principled BSDF-based "MMD Shader" node group, bundled toon textures with fallback, global controls via armature drivers (emission/toon/sphere), per-face assignment, UV V-flip, overlapping face fix.
 - **Milestone 6** (in progress): Animation polish — additional transforms done (grant parent, shadow bones). Remaining: VMD camera, CCD IK
-- **Milestone 7** (planned): Custom shader & creative tools — independent of MMD compatibility
+- **Milestone 7** (planned): Creative tools — edge/outline rendering, material morphs
 
 ## Reference repos (siblings in ../  )
 
@@ -60,6 +60,8 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
   - `rigid_body`: M4 implementation. RBW disabled during build, collision layers, non-collision constraints, margin 1e-6, dynamic body repositioning, depsgraph flushes. "Good enough" mmd_tools-quality.
   - `soft_body`: MMD4B panel. User selects bone chain, algorithm generates octagonal cage tube with gradient density (more rings near root), Cloth modifier on cage + Surface Deform on visible mesh. Gradient pinning `[1.0, 0.8, 0.5]` for smooth transition.
 - **MMD4B panel**: N-panel (tab "MMD4B") for soft body deformation. Select bones in Pose Mode → generate cage → play. Uses Cloth modifier (not Soft Body) because Cloth respects Armature modifier output for pinned vertices.
+- **Materials**: Single "MMD Shader" node group (Principled BSDF-based) with toon/sphere inputs. Global controls via armature custom properties (`mmd_emission`, `mmd_toon_fac`, `mmd_sphere_fac`) driven to all materials. Bundled toon textures (toon01-10.bmp) with fallback resolution. Alpha = PMX alpha × texture alpha (matching mmd_tools). Edge color/size stored as material custom properties.
+- **Armature visibility**: Hidden by default on import (`hide_set(True)`, wire display). Unhide from outliner when needed.
 - **No export**: One-way import only. No PMX/VMD/PMD export.
 - **Logging**: Use blender-agent's session log. Python `logging` to stderr for diagnostics.
 
@@ -68,7 +70,7 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
 ```python
 # PMX import
 import bl_ext.user_default.blender_mmd.importer as importer
-arm = importer.import_pmx("/path/to/model.pmx", shader_mode="mmd")
+arm = importer.import_pmx("/path/to/model.pmx")
 
 # VMD import — TWO steps: parse first, then apply to armature
 import bl_ext.user_default.blender_mmd.vmd.parser as vmd_parser

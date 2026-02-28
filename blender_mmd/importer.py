@@ -18,7 +18,7 @@ DEFAULT_SCALE = 0.08
 
 
 def import_pmx(
-    filepath: str, scale: float = DEFAULT_SCALE, shader_mode: str = "mmd"
+    filepath: str, scale: float = DEFAULT_SCALE
 ) -> bpy.types.Object:
     """Import a PMX file into the current scene.
 
@@ -39,11 +39,16 @@ def import_pmx(
     # Build mesh
     mesh_obj = create_mesh(model, armature_obj, scale)
 
-    # Create materials and assign to faces
-    create_materials(model, mesh_obj, filepath, shader_mode=shader_mode)
+    # Create materials and assign to faces (pass armature for driver setup)
+    create_materials(model, mesh_obj, filepath, armature_obj=armature_obj)
 
     # Store filepath for deferred physics build
     armature_obj["pmx_filepath"] = filepath
+
+    # Hide armature bones in viewport (less clutter, still selectable in outliner)
+    armature_obj.data.display_type = "WIRE"
+    armature_obj.show_in_front = False
+    armature_obj.hide_set(True)
 
     # Select armature as active
     bpy.context.view_layer.objects.active = armature_obj

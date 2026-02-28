@@ -1008,22 +1008,20 @@ Single chain cage (tube along one bone chain) is Phase 1. Group mode handles par
 
 ### Milestone 5: Materials & Textures ✅
 
-**Status:** Done — visually matches mmd_tools baseline
+**Status:** Done — Principled BSDF-based shader with global controls
 
 **Deliverables:**
-- Material creation from PMX data with two shader modes
-- `"mmd"` (default): Full MMDShaderDev node group — toon, sphere, specular, backface culling, alpha chains
-- `"simple"`: TransEmission node group — clean Diffuse+Emission+Transparency
+- Single "MMD Shader" node group based on Principled BSDF — handles emission, alpha, roughness natively (5 processing nodes, down from ~20 in the old MMDShaderDev)
+- "MMD UV" node group for UV/sphere/toon coordinate generation
+- Toon texture support with bundled fallback: `blender_mmd/data/toons/toon01-10.bmp` — shared toon textures resolve from PMX dir → parent dir → bundled addon data
+- Sphere texture modes: multiply (sRGB), add (Linear), subtex (UV1) — controlled by Sphere Fac and Sphere Add inputs
+- Global material controls via armature custom properties + drivers: `mmd_emission`, `mmd_toon_fac`, `mmd_sphere_fac` — change one property, all materials update
 - Texture loading (diffuse, sphere, toon) with dedup by path
-- Shared toon texture support (toon01.bmp–toon10.bmp)
-- Sphere texture modes: multiply (sRGB), add (Linear), subtex (UV1)
 - Per-face material assignment via `foreach_set`
-- MMDTexUV node group for UV/sphere coordinate generation
-- `shader_mode` parameter on PMX import operator
 - UV V-flip (`V = 1.0 - V`) for PMX DirectX→Blender OpenGL convention
 - Overlapping face detection: overlay materials (eye highlights, layers) auto-set to `blend_method="BLEND"` with `show_transparent_back=False` to prevent z-fighting
-- Texture Fac defaults match mmd_tools: always 1.0 (multiply by white = identity when no texture loaded)
-- Sphere Mul/Add and default color set from PMX `sphere_mode`, independent of texture file existence
+- Material flag properties: `enabled_toon_edge`, `enabled_drop_shadow`, `enabled_self_shadow_map`, `enabled_self_shadow`
+- Edge color/size stored as custom properties on Blender materials for future outline support
 
 **Not yet done (optimization):**
 - `foreach_set` for UV assignment (currently per-loop Python iteration — slow on large models)
@@ -1031,11 +1029,10 @@ Single chain cage (tube along one bone chain) is Phase 1. Group mode handles par
 - Sharp edge detection from normals (mmd_tools marks sharp edges at angle threshold)
 
 **Deferred to future milestones:**
-- Edge/outline (solidify + edge materials)
+- Edge/outline (solidify + edge materials, using stored `mmd_edge_color`/`mmd_edge_size`)
 - Material morphs (VMD keyframes driving material properties)
-- Shader-swap UI panel (switch between mmd/simple after import)
 - Per-material mesh split (needed for selective outline rendering)
-- Custom simplified shader (see Milestone 7)
+- Light linking (Principled BSDF compatible, but needs per-object mesh split)
 
 ### Milestone 6: Animation Polish
 

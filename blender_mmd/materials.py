@@ -1,8 +1,8 @@
 """Materials & textures — create Blender materials from PMX data.
 
-Supports two shader modes:
-- "mmd": Full MMDShaderDev node group (toon, sphere, specular, backface culling)
-- "simple": TransEmission node group (diffuse + emission + transparency)
+Uses a single Principled BSDF-based "MMD Shader" node group with optional
+toon and sphere texture inputs. Global controls (emission, toon, sphere)
+are driven from armature custom properties.
 """
 
 from __future__ import annotations
@@ -14,6 +14,9 @@ from pathlib import Path
 from .pmx.types import Material, Model
 
 log = logging.getLogger("blender_mmd")
+
+# Path to bundled toon textures shipped with the addon
+_BUNDLED_TOONS_DIR = os.path.join(os.path.dirname(__file__), "data", "toons")
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +60,30 @@ def shared_toon_filename(index: int) -> str:
     return f"toon{index + 1:02d}.bmp"
 
 
+def resolve_shared_toon(pmx_dir: str, toon_idx: int) -> str | None:
+    """Resolve shared toon texture path with bundled fallback.
+
+    Search order:
+    1. PMX directory
+    2. Parent directory
+    3. Bundled addon data/toons/
+    """
+    filename = shared_toon_filename(toon_idx)
+    # PMX dir
+    path = os.path.join(pmx_dir, filename)
+    if os.path.exists(path):
+        return path
+    # Parent dir
+    path = os.path.join(os.path.dirname(pmx_dir), filename)
+    if os.path.exists(path):
+        return path
+    # Bundled fallback
+    path = os.path.join(_BUNDLED_TOONS_DIR, filename)
+    if os.path.exists(path):
+        return path
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Blender-dependent code below
 # ---------------------------------------------------------------------------
@@ -71,8 +98,8 @@ except ImportError:
 
 
 def _get_or_create_uv_group() -> "bpy.types.ShaderNodeTree":
-    """Get or create the MMDTexUV node group. Matches mmd_tools."""
-    group_name = "MMDTexUV"
+    """Get or create the MMD UV node group."""
+    group_name = "MMD UV"
     shader = bpy.data.node_groups.get(group_name)
     if shader is not None and len(shader.nodes):
         return shader
@@ -102,17 +129,25 @@ def _get_or_create_uv_group() -> "bpy.types.ShaderNodeTree":
     links.new(tex_coord.outputs["Normal"], vec_trans.inputs["Vector"])
     links.new(vec_trans.outputs["Vector"], node_vector.inputs["Vector"])
 
-    ng.new_output_socket("Base UV", tex_coord.outputs["UV"])
-    ng.new_output_socket("Toon UV", node_vector.outputs["Vector"])
-    ng.new_output_socket("Sphere UV", node_vector.outputs["Vector"])
-    ng.new_output_socket("SubTex UV", tex_coord1.outputs["UV"])
+    ng.new_output_socket("UV", tex_coord.outputs["UV"])
+    ng.new_output_socket("Toon", node_vector.outputs["Vector"])
+    ng.new_output_socket("Sphere", node_vector.outputs["Vector"])
+    ng.new_output_socket("SubTex", tex_coord1.outputs["UV"])
 
     return shader
 
 
 def _get_or_create_mmd_shader() -> "bpy.types.ShaderNodeTree":
-    """Get or create the MMDShaderDev node group. Matches mmd_tools."""
-    group_name = "MMDShaderDev"
+    """Get or create the MMD Shader node group (Principled BSDF-based).
+
+    Inputs: Color, Alpha, Emission, Roughness,
+            Toon Tex, Toon Fac, Sphere Tex, Sphere Fac, Sphere Add
+    Output: Shader
+
+    When Toon Fac=0 and Sphere Fac=0, all MixRGB nodes pass Color through
+    unchanged — no performance cost for simple materials.
+    """
+    group_name = "MMD Shader"
     shader = bpy.data.node_groups.get(group_name)
     if shader is not None and len(shader.nodes):
         return shader
@@ -121,157 +156,73 @@ def _get_or_create_mmd_shader() -> "bpy.types.ShaderNodeTree":
 
     ng = _NodeGroupUtils(shader)
 
-    node_input = ng.new_node("NodeGroupInput", (-5, -1))
-    node_output = ng.new_node("NodeGroupOutput", (11, 1))
+    node_input = ng.new_node("NodeGroupInput", (-5, 0))
+    node_output = ng.new_node("NodeGroupOutput", (5, 0))
 
-    # Color chain: Ambient + Diffuse → ×BaseTex → ×ToonTex → Sphere
-    node_diffuse = ng.new_mix_node("ADD", (-3, 4), fac=0.6)
-    node_diffuse.use_clamp = True
+    # --- Color chain: Color × Toon × Sphere → Principled BSDF ---
 
-    node_tex = ng.new_mix_node("MULTIPLY", (-2, 3.5))
-    node_toon = ng.new_mix_node("MULTIPLY", (-1, 3))
-    node_sph = ng.new_mix_node("MULTIPLY", (0, 2.5))
-    node_spa = ng.new_mix_node("ADD", (0, 1.5))
-    node_sphere = ng.new_mix_node("MIX", (1, 1))
+    # 1. Toon multiply: Color × Toon Tex (controlled by Toon Fac)
+    node_toon = ng.new_mix_node("MULTIPLY", (-3, 2))
 
-    # Backface culling
-    node_geo = ng.new_node("ShaderNodeNewGeometry", (6, 3.5))
-    node_invert = ng.new_math_node("LESS_THAN", (7, 3))
-    node_cull = ng.new_math_node("MAXIMUM", (8, 2.5))
-    node_alpha = ng.new_math_node("MINIMUM", (9, 2))
-    node_alpha.use_clamp = True
+    # 2. Sphere multiply path: toon_result × Sphere Tex
+    node_sph_mul = ng.new_mix_node("MULTIPLY", (-1, 3))
 
-    # Alpha chain
-    node_alpha_tex = ng.new_math_node("MULTIPLY", (-1, -2))
-    node_alpha_toon = ng.new_math_node("MULTIPLY", (0, -2.5))
-    node_alpha_sph = ng.new_math_node("MULTIPLY", (1, -3))
+    # 3. Sphere add path: toon_result + Sphere Tex
+    node_sph_add = ng.new_mix_node("ADD", (-1, 1))
 
-    # Roughness from Reflect
-    node_reflect = ng.new_math_node("DIVIDE", (7, -1.5), value1=1)
-    node_reflect.use_clamp = True
+    # 4. Sphere mode select: mix between multiply and add result
+    node_sphere_select = ng.new_mix_node("MIX", (1, 2))
 
-    # Shader nodes
-    shader_diffuse = ng.new_node("ShaderNodeBsdfDiffuse", (8, 0))
-    shader_glossy = ng.new_node("ShaderNodeBsdfAnisotropic", (8, -1))
-    shader_base_mix = ng.new_node("ShaderNodeMixShader", (9, 0))
-    shader_base_mix.inputs["Fac"].default_value = 0.02
-    shader_trans = ng.new_node("ShaderNodeBsdfTransparent", (9, 1))
-    shader_alpha_mix = ng.new_node("ShaderNodeMixShader", (10, 1))
+    # 5. Principled BSDF
+    node_bsdf = ng.new_node("ShaderNodeBsdfPrincipled", (3, 0))
+    node_bsdf.inputs["Specular IOR Level"].default_value = 0.0
 
+    # --- Links ---
     links = ng.links
 
-    # Roughness → Glossy
-    links.new(node_reflect.outputs["Value"], shader_glossy.inputs["Roughness"])
-    links.new(shader_diffuse.outputs["BSDF"], shader_base_mix.inputs[1])
-    links.new(shader_glossy.outputs["BSDF"], shader_base_mix.inputs[2])
+    # Toon multiply: Color1=Color input, Color2=Toon Tex, Fac=Toon Fac
+    # (wired via input sockets below)
 
-    # Color chain links
-    links.new(node_diffuse.outputs["Color"], node_tex.inputs["Color1"])
-    links.new(node_tex.outputs["Color"], node_toon.inputs["Color1"])
-    links.new(node_toon.outputs["Color"], node_sph.inputs["Color1"])
-    links.new(node_toon.outputs["Color"], node_spa.inputs["Color1"])
-    links.new(node_sph.outputs["Color"], node_sphere.inputs["Color1"])
-    links.new(node_spa.outputs["Color"], node_sphere.inputs["Color2"])
-    links.new(node_sphere.outputs["Color"], shader_diffuse.inputs["Color"])
+    # Sphere multiply: toon_result × Sphere Tex
+    links.new(node_toon.outputs["Color"], node_sph_mul.inputs["Color1"])
+    # Sphere Tex wired via input socket
 
-    # Backface culling links
-    links.new(node_geo.outputs["Backfacing"], node_invert.inputs[0])
-    links.new(node_invert.outputs["Value"], node_cull.inputs[0])
-    links.new(node_cull.outputs["Value"], node_alpha.inputs[0])
+    # Sphere add: toon_result + Sphere Tex
+    links.new(node_toon.outputs["Color"], node_sph_add.inputs["Color1"])
+    # Sphere Tex wired via input socket
 
-    # Alpha chain links
-    links.new(node_alpha_tex.outputs["Value"], node_alpha_toon.inputs[0])
-    links.new(node_alpha_toon.outputs["Value"], node_alpha_sph.inputs[0])
-    links.new(node_alpha_sph.outputs["Value"], node_alpha.inputs[1])
+    # Sphere mode select: MIX between multiply result (Color1) and add result (Color2)
+    links.new(node_sph_mul.outputs["Color"], node_sphere_select.inputs["Color1"])
+    links.new(node_sph_add.outputs["Color"], node_sphere_select.inputs["Color2"])
 
-    # Alpha → transparency mix
-    links.new(node_alpha.outputs["Value"], shader_alpha_mix.inputs["Fac"])
-    links.new(shader_trans.outputs["BSDF"], shader_alpha_mix.inputs[1])
-    links.new(shader_base_mix.outputs["Shader"], shader_alpha_mix.inputs[2])
+    # Final color → Principled BSDF
+    links.new(node_sphere_select.outputs["Color"], node_bsdf.inputs["Base Color"])
+    links.new(node_sphere_select.outputs["Color"], node_bsdf.inputs["Emission Color"])
+
+    # BSDF → Group Output
+    links.new(node_bsdf.outputs["BSDF"], node_output.inputs[0] if node_output.inputs else node_output.inputs)
 
     # --- Input sockets ---
-    ng.new_input_socket(
-        "Ambient Color", node_diffuse.inputs["Color1"], (0.4, 0.4, 0.4, 1)
-    )
-    ng.new_input_socket(
-        "Diffuse Color", node_diffuse.inputs["Color2"], (0.8, 0.8, 0.8, 1)
-    )
-    ng.new_input_socket(
-        "Specular Color", shader_glossy.inputs["Color"], (0.0, 0.0, 0.0, 1)
-    )
-    ng.new_input_socket("Reflect", node_reflect.inputs[1], 50, min_max=(1, 512))
-    ng.new_input_socket("Base Tex Fac", node_tex.inputs["Fac"], 1)
-    ng.new_input_socket("Base Tex", node_tex.inputs["Color2"], (1, 1, 1, 1))
-    ng.new_input_socket("Toon Tex Fac", node_toon.inputs["Fac"], 1)
+    ng.new_input_socket("Color", node_toon.inputs["Color1"], (1, 1, 1, 1))
+    ng.new_input_socket("Alpha", node_bsdf.inputs["Alpha"], 1.0, min_max=(0, 1))
+    ng.new_input_socket("Emission", node_bsdf.inputs["Emission Strength"], 0.3, min_max=(0, 2))
+    ng.new_input_socket("Roughness", node_bsdf.inputs["Roughness"], 0.8, min_max=(0, 1))
     ng.new_input_socket("Toon Tex", node_toon.inputs["Color2"], (1, 1, 1, 1))
-    ng.new_input_socket("Sphere Tex Fac", node_sph.inputs["Fac"], 1)
-    ng.new_input_socket("Sphere Tex", node_sph.inputs["Color2"], (1, 1, 1, 1))
-    ng.new_input_socket("Sphere Mul/Add", node_sphere.inputs["Fac"], 0)
-    ng.new_input_socket("Double Sided", node_cull.inputs[1], 0, min_max=(0, 1))
-    ng.new_input_socket("Alpha", node_alpha_tex.inputs[0], 1, min_max=(0, 1))
-    ng.new_input_socket("Base Alpha", node_alpha_tex.inputs[1], 1, min_max=(0, 1))
-    ng.new_input_socket("Toon Alpha", node_alpha_toon.inputs[1], 1, min_max=(0, 1))
-    ng.new_input_socket("Sphere Alpha", node_alpha_sph.inputs[1], 1, min_max=(0, 1))
+    ng.new_input_socket("Toon Fac", node_toon.inputs["Fac"], 0.0, min_max=(0, 1))
+    ng.new_input_socket("Sphere Tex", None, (1, 1, 1, 1))  # wired manually below
+    ng.new_input_socket("Sphere Fac", None, 0.0, min_max=(0, 1))  # wired manually below
+    ng.new_input_socket("Sphere Add", node_sphere_select.inputs["Fac"], 0.0, min_max=(0, 1))
 
-    # Extra links for sphere add path
-    links.new(node_input.outputs["Sphere Tex Fac"], node_spa.inputs["Fac"])
-    links.new(node_input.outputs["Sphere Tex"], node_spa.inputs["Color2"])
+    # Wire Sphere Tex to both multiply and add paths
+    links.new(node_input.outputs["Sphere Tex"], node_sph_mul.inputs["Color2"])
+    links.new(node_input.outputs["Sphere Tex"], node_sph_add.inputs["Color2"])
 
-    # --- Output sockets ---
-    ng.new_output_socket("Shader", shader_alpha_mix.outputs["Shader"])
-    ng.new_output_socket("Color", node_sphere.outputs["Color"])
-    ng.new_output_socket("Alpha", node_alpha.outputs["Value"])
-
-    return shader
-
-
-def _get_or_create_simple_shader() -> "bpy.types.ShaderNodeTree":
-    """Get or create TransEmission node group (simple shader)."""
-    group_name = "TransEmission"
-    shader = bpy.data.node_groups.get(group_name)
-    if shader is not None and len(shader.nodes):
-        return shader
-    if shader is None:
-        shader = bpy.data.node_groups.new(name=group_name, type="ShaderNodeTree")
-
-    ng = _NodeGroupUtils(shader)
-
-    node_input = ng.new_node("NodeGroupInput", (-3, 0))
-    node_output = ng.new_node("NodeGroupOutput", (4, 0))
-
-    # Diffuse BSDF
-    shader_diffuse = ng.new_node("ShaderNodeBsdfDiffuse", (-1, 1))
-    # Emission
-    shader_emission = ng.new_node("ShaderNodeEmission", (-1, 0))
-    # Mix diffuse + emission (fac = Emission input)
-    mix_emission = ng.new_node("ShaderNodeMixShader", (1, 1))
-    # Transparent BSDF
-    shader_trans = ng.new_node("ShaderNodeBsdfTransparent", (1, -1))
-    # Mix (diffuse+emission) with transparent (fac = Alpha)
-    mix_alpha = ng.new_node("ShaderNodeMixShader", (3, 0))
-
-    links = ng.links
-
-    # Diffuse + Emission → mix
-    links.new(shader_diffuse.outputs["BSDF"], mix_emission.inputs[1])
-    links.new(shader_emission.outputs["Emission"], mix_emission.inputs[2])
-
-    # Transparent + combined → final mix
-    links.new(shader_trans.outputs["BSDF"], mix_alpha.inputs[1])
-    links.new(mix_emission.outputs["Shader"], mix_alpha.inputs[2])
-
-    # --- Input sockets ---
-    ng.new_input_socket("Color", shader_diffuse.inputs["Color"], (1, 1, 1, 1))
-    ng.new_input_socket("Alpha", mix_alpha.inputs["Fac"], 0.0, min_max=(0, 1))
-    ng.new_input_socket("Emission", mix_emission.inputs["Fac"], 0.5, min_max=(0, 1))
-
-    # Color also drives emission color
-    links.new(node_input.outputs["Color"], shader_emission.inputs["Color"])
-    # Emission strength = 1.0 (mixing handled by fac)
-    shader_emission.inputs["Strength"].default_value = 1.0
+    # Wire Sphere Fac to both multiply and add paths
+    links.new(node_input.outputs["Sphere Fac"], node_sph_mul.inputs["Fac"])
+    links.new(node_input.outputs["Sphere Fac"], node_sph_add.inputs["Fac"])
 
     # --- Output socket ---
-    ng.new_output_socket("Shader", mix_alpha.outputs["Shader"])
+    ng.new_output_socket("Shader", node_bsdf.outputs["BSDF"])
 
     return shader
 
@@ -361,7 +312,7 @@ class _NodeGroupUtils:
             if socket is not None:
                 idname = socket.bl_idname
             else:
-                idname = "NodeSocketFloat"
+                idname = "NodeSocketColor" if isinstance(default_val, tuple) and len(default_val) == 4 else "NodeSocketFloat"
             socket_type = SOCKET_TYPE_MAPPING.get(idname, idname)
             interface_socket = self.shader.interface.new_socket(
                 name=io_name, in_out="INPUT", socket_type=socket_type
@@ -418,6 +369,155 @@ class _NodeGroupUtils:
 
 
 # ---------------------------------------------------------------------------
+# Driver helpers
+# ---------------------------------------------------------------------------
+
+
+def _add_driver(
+    node_shader: "bpy.types.ShaderNode",
+    input_name: str,
+    armature_obj: "bpy.types.Object",
+    prop_name: str,
+) -> None:
+    """Add a driver to a shader group node input, targeting an armature custom property."""
+    fcurve = node_shader.inputs[input_name].driver_add("default_value")
+    drv = fcurve.driver
+    drv.type = "AVERAGE"
+    var = drv.variables.new()
+    var.name = "val"
+    var.type = "SINGLE_PROP"
+    target = var.targets[0]
+    target.id_type = "OBJECT"
+    target.id = armature_obj
+    target.data_path = f'["{prop_name}"]'
+
+
+def _setup_armature_controls(armature_obj: "bpy.types.Object") -> None:
+    """Add global material control custom properties to the armature."""
+    rna = armature_obj.id_properties_ui
+
+    if "mmd_emission" not in armature_obj:
+        armature_obj["mmd_emission"] = 0.3
+        ui = rna("mmd_emission")
+        ui.update(min=0.0, max=2.0, soft_min=0.0, soft_max=1.0, description="Emission strength for all materials")
+
+    if "mmd_toon_fac" not in armature_obj:
+        armature_obj["mmd_toon_fac"] = 1.0
+        ui = rna("mmd_toon_fac")
+        ui.update(min=0.0, max=1.0, description="Toon texture influence for all materials")
+
+    if "mmd_sphere_fac" not in armature_obj:
+        armature_obj["mmd_sphere_fac"] = 1.0
+        ui = rna("mmd_sphere_fac")
+        ui.update(min=0.0, max=1.0, description="Sphere texture influence for all materials")
+
+
+# ---------------------------------------------------------------------------
+# Texture node helpers
+# ---------------------------------------------------------------------------
+
+
+def _create_tex_node(nodes, name, label, filepath, location):
+    """Create a ShaderNodeTexImage with loaded image."""
+    tex_node = nodes.new("ShaderNodeTexImage")
+    tex_node.name = name
+    tex_node.label = label
+    tex_node.location = location
+    tex_node.image = _load_image(filepath)
+    return tex_node
+
+
+def _setup_toon_texture(
+    mat_data: Material,
+    model: Model,
+    nodes,
+    links,
+    node_shader,
+    node_uv,
+    tex_paths: list,
+    pmx_dir: str,
+) -> "bpy.types.ShaderNode | None":
+    """Set up toon texture node. Returns the tex node or None."""
+    toon_path = None
+
+    if mat_data.toon_sharing == 0:
+        # Individual toon texture
+        if 0 <= mat_data.toon_texture_index < len(tex_paths):
+            candidate = tex_paths[mat_data.toon_texture_index]
+            if candidate and os.path.exists(candidate):
+                toon_path = candidate
+    else:
+        # Shared toon texture — with bundled fallback
+        toon_path = resolve_shared_toon(pmx_dir, mat_data.toon_texture_index)
+
+    if toon_path is None:
+        return None
+
+    toon_tex_node = _create_tex_node(
+        nodes, "Toon Texture", "Toon Texture", toon_path,
+        node_shader.location + Vector((-3 * 210, -1.5 * 220)),
+    )
+    links.new(toon_tex_node.outputs["Color"], node_shader.inputs["Toon Tex"])
+    links.new(node_uv.outputs["Toon"], toon_tex_node.inputs["Vector"])
+    return toon_tex_node
+
+
+def _setup_sphere_texture(
+    mat_data: Material,
+    nodes,
+    links,
+    node_shader,
+    node_uv,
+    tex_paths: list,
+) -> "bpy.types.ShaderNode | None":
+    """Set up sphere texture node. Returns the tex node or None."""
+    if mat_data.sphere_mode not in (1, 2, 3):
+        return None
+
+    sphere_tex_node = None
+    if 0 <= mat_data.sphere_texture_index < len(tex_paths):
+        sphere_path = tex_paths[mat_data.sphere_texture_index]
+        if sphere_path and os.path.exists(sphere_path):
+            sphere_tex_node = _create_tex_node(
+                nodes, "Sphere Texture", "Sphere Texture", sphere_path,
+                node_shader.location + Vector((-2 * 210, -2 * 220)),
+            )
+
+            # Color space: Add mode uses Linear
+            is_sph_add = mat_data.sphere_mode == 2
+            if hasattr(sphere_tex_node.image, "colorspace_settings"):
+                sphere_tex_node.image.colorspace_settings.name = (
+                    "Linear Rec.709" if is_sph_add else "sRGB"
+                )
+
+            # UV mapping: subtex uses UV1, others use Sphere UV
+            if mat_data.sphere_mode == 3:
+                links.new(
+                    node_uv.outputs["SubTex"],
+                    sphere_tex_node.inputs["Vector"],
+                )
+            else:
+                links.new(
+                    node_uv.outputs["Sphere"],
+                    sphere_tex_node.inputs["Vector"],
+                )
+
+            links.new(
+                sphere_tex_node.outputs["Color"],
+                node_shader.inputs["Sphere Tex"],
+            )
+
+    # Set sphere mode defaults
+    is_sph_add = mat_data.sphere_mode == 2
+    node_shader.inputs["Sphere Add"].default_value = 1.0 if is_sph_add else 0.0
+    if is_sph_add and sphere_tex_node is None:
+        # Additive mode with no texture: default black (add identity)
+        node_shader.inputs["Sphere Tex"].default_value = (0, 0, 0, 1)
+
+    return sphere_tex_node
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -426,7 +526,7 @@ def create_materials(
     model: Model,
     mesh_obj: "bpy.types.Object",
     filepath: str,
-    shader_mode: str = "mmd",
+    armature_obj: "bpy.types.Object | None" = None,
 ) -> None:
     """Create Blender materials from PMX data and assign to mesh faces.
 
@@ -434,7 +534,7 @@ def create_materials(
         model: Parsed PMX model.
         mesh_obj: The Blender mesh object.
         filepath: Path to the PMX file (for resolving textures).
-        shader_mode: "mmd" for full MMDShaderDev, "simple" for TransEmission.
+        armature_obj: The armature object (for driver setup). Optional.
     """
     pmx_dir = os.path.dirname(os.path.abspath(filepath))
     mesh_data = mesh_obj.data
@@ -446,10 +546,11 @@ def create_materials(
 
     # Get/create node groups
     uv_group = _get_or_create_uv_group()
-    if shader_mode == "mmd":
-        shader_group = _get_or_create_mmd_shader()
-    else:
-        shader_group = _get_or_create_simple_shader()
+    shader_group = _get_or_create_mmd_shader()
+
+    # Set up armature controls if available
+    if armature_obj is not None:
+        _setup_armature_controls(armature_obj)
 
     for mat_data in model.materials:
         mat_name = mat_data.name_e if mat_data.name_e else mat_data.name
@@ -475,13 +576,13 @@ def create_materials(
 
         # UV group node
         node_uv = nodes.new("ShaderNodeGroup")
-        node_uv.name = "mmd_tex_uv"
+        node_uv.name = "UV"
         node_uv.node_tree = uv_group
         node_uv.location = (-5 * 210, -2.5 * 220)
 
         # Shader group node
         node_shader = nodes.new("ShaderNodeGroup")
-        node_shader.name = "mmd_shader"
+        node_shader.name = "Shader"
         node_shader.location = (0, 300)
         node_shader.width = 200
         node_shader.node_tree = shader_group
@@ -492,10 +593,16 @@ def create_materials(
         # Compute derived values
         mixed_color = mix_diffuse_ambient(mat_data.diffuse[:3], mat_data.ambient)
         alpha = mat_data.diffuse[3]
+        roughness = roughness_from_shininess(mat_data.shininess)
+
+        # Set shader inputs
+        node_shader.inputs["Color"].default_value = (*mixed_color, 1.0)
+        node_shader.inputs["Alpha"].default_value = alpha
+        node_shader.inputs["Roughness"].default_value = roughness
 
         # Material viewport properties
         mat.diffuse_color = (*mixed_color, alpha)
-        mat.roughness = roughness_from_shininess(mat_data.shininess)
+        mat.roughness = roughness
         mat.metallic = 0.0
         mat.use_backface_culling = not mat_data.is_double_sided
         if hasattr(mat, "blend_method"):
@@ -504,33 +611,54 @@ def create_materials(
         if hasattr(mat, "shadow_method"):
             mat.shadow_method = "HASHED" if cast_shadows else "NONE"
 
+        # Store edge data as custom properties for future outline support
+        mat["mmd_edge_color"] = list(mat_data.edge_color)
+        mat["mmd_edge_size"] = mat_data.edge_size
+
         # --- Base texture ---
         base_tex_node = None
         if 0 <= mat_data.texture_index < len(tex_paths):
             tex_path = tex_paths[mat_data.texture_index]
             if tex_path and os.path.exists(tex_path):
-                base_tex_node = nodes.new("ShaderNodeTexImage")
-                base_tex_node.name = "mmd_base_tex"
-                base_tex_node.label = "Base Tex"
-                base_tex_node.location = node_shader.location + Vector(
-                    (-4 * 210, -1 * 220)
+                base_tex_node = _create_tex_node(
+                    nodes, "Base Texture", "Base Texture", tex_path,
+                    node_shader.location + Vector((-4 * 210, -1 * 220)),
                 )
-                base_tex_node.image = _load_image(tex_path)
-                # Wire UV
                 links.new(
-                    node_uv.outputs["Base UV"], base_tex_node.inputs["Vector"]
+                    node_uv.outputs["UV"], base_tex_node.inputs["Vector"]
                 )
+                links.new(
+                    base_tex_node.outputs["Color"],
+                    node_shader.inputs["Color"],
+                )
+                # Multiply PMX alpha with texture alpha (matching mmd_tools)
+                if base_tex_node.image and base_tex_node.image.depth == 32 and base_tex_node.image.file_format != "BMP":
+                    alpha_mul = nodes.new("ShaderNodeMath")
+                    alpha_mul.name = "Alpha Multiply"
+                    alpha_mul.operation = "MULTIPLY"
+                    alpha_mul.location = node_shader.location + Vector((-1 * 210, -2.5 * 220))
+                    alpha_mul.inputs[0].default_value = alpha
+                    links.new(base_tex_node.outputs["Alpha"], alpha_mul.inputs[1])
+                    links.new(alpha_mul.outputs["Value"], node_shader.inputs["Alpha"])
 
-        if shader_mode == "mmd":
-            _setup_mmd_material(
-                mat, mat_data, model, nodes, links, node_shader, node_uv,
-                base_tex_node, tex_paths, pmx_dir,
-            )
-        else:
-            _setup_simple_material(
-                mat, mat_data, nodes, links, node_shader, base_tex_node,
-                mixed_color, alpha,
-            )
+        # --- Toon texture ---
+        has_toon = _setup_toon_texture(
+            mat_data, model, nodes, links, node_shader, node_uv,
+            tex_paths, pmx_dir,
+        ) is not None
+
+        # --- Sphere texture ---
+        has_sphere = _setup_sphere_texture(
+            mat_data, nodes, links, node_shader, node_uv, tex_paths,
+        ) is not None
+
+        # --- Drivers from armature custom properties ---
+        if armature_obj is not None:
+            _add_driver(node_shader, "Emission", armature_obj, "mmd_emission")
+            if has_toon:
+                _add_driver(node_shader, "Toon Fac", armature_obj, "mmd_toon_fac")
+            if has_sphere:
+                _add_driver(node_shader, "Sphere Fac", armature_obj, "mmd_sphere_fac")
 
         # Append material to mesh
         mesh_data.materials.append(mat)
@@ -542,13 +670,11 @@ def create_materials(
         mesh_data.update()
 
     # Fix overlapping face materials (z-fighting layers like eye highlights)
-    # Matches mmd_tools __fixOverlappingFaceMaterials
     _fix_overlapping_face_materials(mesh_data)
 
     log.info(
-        "Created %d materials (mode=%s), assigned to %d faces",
+        "Created %d materials, assigned to %d faces",
         len(model.materials),
-        shader_mode,
         len(indices),
     )
 
@@ -585,168 +711,3 @@ def _fix_overlapping_face_materials(mesh_data: "bpy.types.Mesh") -> None:
             mat.show_transparent_back = False
             mi_skip = mi
             log.debug("Set BLEND for overlapping material: %s", mat.name)
-
-
-def _setup_mmd_material(
-    mat,
-    mat_data: Material,
-    model: Model,
-    nodes,
-    links,
-    node_shader,
-    node_uv,
-    base_tex_node,
-    tex_paths: list,
-    pmx_dir: str,
-) -> None:
-    """Set up MMDShaderDev shader inputs and texture nodes."""
-    # Set shader inputs
-    node_shader.inputs["Ambient Color"].default_value = (
-        *mat_data.ambient, 1.0
-    )
-    node_shader.inputs["Diffuse Color"].default_value = (
-        *mat_data.diffuse[:3], 1.0
-    )
-    node_shader.inputs["Specular Color"].default_value = (
-        *mat_data.specular, 1.0
-    )
-    node_shader.inputs["Reflect"].default_value = mat_data.shininess
-    node_shader.inputs["Alpha"].default_value = mat_data.diffuse[3]
-    node_shader.inputs["Double Sided"].default_value = (
-        1.0 if mat_data.is_double_sided else 0.0
-    )
-
-    # Base texture wiring (Fac always 1.0 to match mmd_tools — multiplying
-    # by the default white texture is identity when no file is loaded)
-    if base_tex_node is not None:
-        links.new(
-            base_tex_node.outputs["Color"], node_shader.inputs["Base Tex"]
-        )
-        links.new(
-            base_tex_node.outputs["Alpha"], node_shader.inputs["Base Alpha"]
-        )
-
-    # --- Toon texture ---
-    toon_tex_node = None
-    if mat_data.toon_sharing == 0:
-        # Individual toon texture
-        if 0 <= mat_data.toon_texture_index < len(tex_paths):
-            toon_path = tex_paths[mat_data.toon_texture_index]
-            if toon_path and os.path.exists(toon_path):
-                toon_tex_node = _create_tex_node(
-                    nodes, "mmd_toon_tex", "Toon Tex", toon_path,
-                    node_shader.location + Vector((-3 * 210, -1.5 * 220)),
-                )
-    else:
-        # Shared toon texture
-        toon_filename = shared_toon_filename(mat_data.toon_texture_index)
-        # Search in PMX dir first, then common locations
-        toon_path = os.path.join(pmx_dir, toon_filename)
-        if not os.path.exists(toon_path):
-            # Try parent directory
-            toon_path = os.path.join(os.path.dirname(pmx_dir), toon_filename)
-        if os.path.exists(toon_path):
-            toon_tex_node = _create_tex_node(
-                nodes, "mmd_toon_tex", "Toon Tex", toon_path,
-                node_shader.location + Vector((-3 * 210, -1.5 * 220)),
-            )
-
-    if toon_tex_node is not None:
-        links.new(
-            toon_tex_node.outputs["Color"], node_shader.inputs["Toon Tex"]
-        )
-        links.new(
-            toon_tex_node.outputs["Alpha"], node_shader.inputs["Toon Alpha"]
-        )
-        links.new(
-            node_uv.outputs["Toon UV"], toon_tex_node.inputs["Vector"]
-        )
-    # Toon Tex Fac stays at default 1.0 (multiply by white = identity when no texture)
-
-    # --- Sphere texture ---
-    sphere_tex_node = None
-    if mat_data.sphere_mode in (1, 2, 3):
-        if 0 <= mat_data.sphere_texture_index < len(tex_paths):
-            sphere_path = tex_paths[mat_data.sphere_texture_index]
-            if sphere_path and os.path.exists(sphere_path):
-                sphere_tex_node = _create_tex_node(
-                    nodes, "mmd_sphere_tex", "Sphere Tex", sphere_path,
-                    node_shader.location + Vector((-2 * 210, -2 * 220)),
-                )
-
-                # Color space: Add mode uses Linear
-                is_sph_add = mat_data.sphere_mode == 2
-                if hasattr(sphere_tex_node.image, "colorspace_settings"):
-                    sphere_tex_node.image.colorspace_settings.name = (
-                        "Linear Rec.709" if is_sph_add else "sRGB"
-                    )
-
-                # UV mapping: subtex uses UV1, others use Sphere UV
-                if mat_data.sphere_mode == 3:
-                    links.new(
-                        node_uv.outputs["SubTex UV"],
-                        sphere_tex_node.inputs["Vector"],
-                    )
-                else:
-                    links.new(
-                        node_uv.outputs["Sphere UV"],
-                        sphere_tex_node.inputs["Vector"],
-                    )
-
-    # Set sphere mode/defaults based on PMX data, regardless of texture existence
-    if mat_data.sphere_mode in (1, 2, 3):
-        is_sph_add = mat_data.sphere_mode == 2
-        node_shader.inputs["Sphere Mul/Add"].default_value = (
-            1.0 if is_sph_add else 0.0
-        )
-        if is_sph_add:
-            node_shader.inputs["Sphere Tex"].default_value = (0, 0, 0, 1)
-    else:
-        node_shader.inputs["Sphere Tex Fac"].default_value = 0.0
-
-    if sphere_tex_node is not None:
-        links.new(
-            sphere_tex_node.outputs["Color"],
-            node_shader.inputs["Sphere Tex"],
-        )
-        links.new(
-            sphere_tex_node.outputs["Alpha"],
-            node_shader.inputs["Sphere Alpha"],
-        )
-
-
-def _setup_simple_material(
-    mat,
-    mat_data: Material,
-    nodes,
-    links,
-    node_shader,
-    base_tex_node,
-    mixed_color: tuple,
-    alpha: float,
-) -> None:
-    """Set up TransEmission (simple) shader inputs."""
-    node_shader.inputs["Alpha"].default_value = alpha
-    node_shader.inputs["Emission"].default_value = 0.5
-
-    if base_tex_node is not None:
-        # Wire texture color and alpha to shader
-        links.new(
-            base_tex_node.outputs["Color"], node_shader.inputs["Color"]
-        )
-        links.new(
-            base_tex_node.outputs["Alpha"], node_shader.inputs["Alpha"]
-        )
-    else:
-        # No texture — use mixed diffuse+ambient color
-        node_shader.inputs["Color"].default_value = (*mixed_color, 1.0)
-
-
-def _create_tex_node(nodes, name, label, filepath, location):
-    """Create a ShaderNodeTexImage with loaded image."""
-    tex_node = nodes.new("ShaderNodeTexImage")
-    tex_node.name = name
-    tex_node.label = label
-    tex_node.location = location
-    tex_node.image = _load_image(filepath)
-    return tex_node

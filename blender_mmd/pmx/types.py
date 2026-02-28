@@ -160,6 +160,22 @@ class Material:
     def is_double_sided(self) -> bool:
         return bool(self.flags & 0x01)
 
+    @property
+    def enabled_drop_shadow(self) -> bool:
+        return bool(self.flags & 0x02)
+
+    @property
+    def enabled_self_shadow_map(self) -> bool:
+        return bool(self.flags & 0x04)
+
+    @property
+    def enabled_self_shadow(self) -> bool:
+        return bool(self.flags & 0x08)
+
+    @property
+    def enabled_toon_edge(self) -> bool:
+        return bool(self.flags & 0x10)
+
 
 # ---------------------------------------------------------------------------
 # Bone

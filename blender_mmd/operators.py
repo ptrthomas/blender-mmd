@@ -29,21 +29,11 @@ class BLENDER_MMD_OT_import_pmx(bpy.types.Operator, ImportHelper):
         max=10.0,
     )
 
-    shader_mode: EnumProperty(
-        name="Shader",
-        description="Material shader mode",
-        items=[
-            ("mmd", "MMD", "Full MMD shader with toon/sphere effects"),
-            ("simple", "Simple", "Clean diffuse + emission + transparency"),
-        ],
-        default="mmd",
-    )
-
     def execute(self, context):
         from .importer import import_pmx
 
         try:
-            armature = import_pmx(self.filepath, self.scale, self.shader_mode)
+            armature = import_pmx(self.filepath, self.scale)
             self.report({"INFO"}, f"Imported: {armature.name}")
             return {"FINISHED"}
         except Exception as e:

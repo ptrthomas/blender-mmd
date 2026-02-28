@@ -9,6 +9,7 @@ import pytest
 from blender_mmd.materials import (
     build_material_indices,
     mix_diffuse_ambient,
+    resolve_shared_toon,
     resolve_texture_path,
     roughness_from_shininess,
     shared_toon_filename,
@@ -98,6 +99,63 @@ class TestSharedToonFilename:
 
     def test_index_4(self):
         assert shared_toon_filename(4) == "toon05.bmp"
+
+
+class TestResolveSharedToon:
+    def test_bundled_fallback(self, tmp_path):
+        """When toon isn't in PMX dir, falls back to bundled toons."""
+        result = resolve_shared_toon(str(tmp_path), 0)
+        assert result is not None
+        assert result.endswith("toon01.bmp")
+
+    def test_all_bundled_toons_exist(self):
+        for i in range(10):
+            result = resolve_shared_toon("/nonexistent", i)
+            assert result is not None, f"toon{i+1:02d}.bmp not found"
+
+    def test_pmx_dir_takes_priority(self, tmp_path):
+        """Toon in PMX dir should be found before bundled."""
+        local_toon = tmp_path / "toon01.bmp"
+        local_toon.write_bytes(b"fake")
+        result = resolve_shared_toon(str(tmp_path), 0)
+        assert result == str(local_toon)
+
+
+class TestMaterialFlags:
+    def _mat(self, flags: int) -> Material:
+        return Material(
+            name="test", name_e="", diffuse=(1, 1, 1, 1), specular=(0, 0, 0),
+            shininess=50, ambient=(0.5, 0.5, 0.5), flags=flags,
+            edge_color=(0, 0, 0, 1), edge_size=1.0, texture_index=-1,
+            sphere_texture_index=-1, sphere_mode=0, toon_sharing=0,
+            toon_texture_index=-1, comment="", face_count=3,
+        )
+
+    def test_double_sided(self):
+        assert self._mat(0x01).is_double_sided
+        assert not self._mat(0x00).is_double_sided
+
+    def test_drop_shadow(self):
+        assert self._mat(0x02).enabled_drop_shadow
+        assert not self._mat(0x00).enabled_drop_shadow
+
+    def test_self_shadow_map(self):
+        assert self._mat(0x04).enabled_self_shadow_map
+
+    def test_self_shadow(self):
+        assert self._mat(0x08).enabled_self_shadow
+
+    def test_toon_edge(self):
+        assert self._mat(0x10).enabled_toon_edge
+        assert not self._mat(0x00).enabled_toon_edge
+
+    def test_combined_flags(self):
+        m = self._mat(0x1F)
+        assert m.is_double_sided
+        assert m.enabled_drop_shadow
+        assert m.enabled_self_shadow_map
+        assert m.enabled_self_shadow
+        assert m.enabled_toon_edge
 
 
 class TestSampleMaterials:

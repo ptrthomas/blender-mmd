@@ -37,7 +37,7 @@ Both projects share the same core approach for IK constraints (first link bone p
 ## What's implemented
 
 - **PMX import** — full PMX 2.0/2.1 parser, armature, mesh, vertex weights, normals, UVs
-- **Materials** — two shader modes: `mmd` (full toon/sphere pipeline) and `simple` (clean diffuse+emission)
+- **Materials** — Principled BSDF-based "MMD Shader" with toon/sphere textures, bundled shared toon files, global controls via armature drivers
 - **VMD motion** — bone keyframes, morph keyframes, IK toggle, bezier interpolation
 - **Morphs** — vertex, UV, bone, material, group morphs as Blender shape keys
 - **Rigid body physics** — three modes: `none`, `rigid_body`, `cloth`
@@ -62,7 +62,7 @@ scripts/setup.sh
 ```python
 # PMX import
 import bl_ext.user_default.blender_mmd.importer as importer
-arm = importer.import_pmx("/path/to/model.pmx", shader_mode="mmd")
+arm = importer.import_pmx("/path/to/model.pmx")
 
 # VMD import
 import bl_ext.user_default.blender_mmd.vmd.parser as vmd_parser
