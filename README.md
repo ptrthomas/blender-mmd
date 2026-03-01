@@ -28,7 +28,9 @@ mmd_tools is a battle-tested addon that has served the MMD-Blender community for
 | IK toggle (VMD) | Custom `mmd_ik_toggle` property + update callback | Constraint influence keyframes (more Blender-native) |
 | Materials | Custom ~20-node shader group per material | Bare Principled BSDF (default) — native Blender shader, responds to scene lighting and reflections. Optional toon/sphere mode for full MMD look |
 | Hair/skirt physics | Rigid body only | Rigid body (cloth-on-cage planned) |
-| Physics workflow | Must build from rest pose, complex UI | Build/rebuild/clear anytime, one-click MMD4B panel |
+| Collision filtering | Proximity-filtered — drops distant pairs that may collide during animation | Exact bilateral mask check — all excluded pairs enforced, no false collisions |
+| Physics workflow | Must build from rest pose, complex UI | Build/reset/clear anytime, auto-resets after VMD import |
+| Physics debugging | None | Inspect (clipboard report), Select Colliders, Select Contacts |
 | Physics springs | Applied via property update callbacks | Applied directly during joint creation |
 | UI | Sidebar panels, menus, property groups | Minimal — designed for Claude Code + MMD4B panel |
 
@@ -40,9 +42,19 @@ Both projects share the same core approach for IK constraints (first link bone p
 - **Materials** — Default mode uses a bare Principled BSDF (no node group) with PMX specular/shininess mapped to native properties — models respond to scene lighting, reflections, and environment out of the box, without toon/sphere textures. Optional "Toon & Sphere" mode adds the full MMD look via a ~7-node group (vs ~20 in mmd_tools). Bundled shared toon files (toon01–10.bmp). Global controls via armature drivers, per-material override by removing driver
 - **VMD motion** — bone keyframes, morph keyframes, IK toggle, bezier interpolation
 - **Morphs** — vertex, UV, bone, material, group morphs as Blender shape keys
-- **Rigid body physics** — build/rebuild/clear via MMD4B panel, even after loading animation. Rebuild after VMD import to sync physics to starting pose
+- **Rigid body physics** — correct PMX collision group/mask enforcement via bilateral check (both masks must agree), all joints `disable_collisions=True`, 3-phase build pipeline, auto-reset after VMD import. Debug tools: Inspect (copies full diagnostic to clipboard), Select Colliders (highlights eligible collision partners), Select Contacts (highlights bodies in contact at current frame). MMD4B panel for build/reset/clear with per-chain management
 - **Additional transforms** — grant parent system (D bones, shoulder cancel, arm twist, eye tracking)
 - **IK** — correct constraint placement, native limits, per-bone angle conversion
+
+## Physics: correct collision filtering
+
+MMD uses 16 collision groups with a bilateral mask: bodies A and B collide only if A's mask includes B's group AND B's mask includes A's group. Blender's `collision_collections` is symmetric — it uses the same bitmask for both group and mask — so PMX masks cannot be mapped to Blender layers directly.
+
+mmd_tools works around this with a proximity filter that skips non-collision constraints for distant body pairs. This drops pairs that are far apart at rest but may collide during animation (e.g., twin tails swinging into the body). The result is occasional false collisions during dynamic motion.
+
+Blender MMD enforces **every** excluded pair via `GENERIC` constraints with `disable_collisions=True` — no proximity filter, no dropped pairs. Additionally, all joint-connected body pairs get `disable_collisions=True` (connected bodies should never collide; the joint manages their relationship). This produces higher-quality simulation where hair, skirt, and accessories interact correctly without fighting or clipping through each other.
+
+The debug inspector helps diagnose physics issues: select any rigid body and use **Inspect** (copies a full diagnostic report to clipboard), **Select Colliders** (highlights all bodies that can collide with it based on PMX masks), or **Select Contacts** (highlights bodies actually in contact at the current frame).
 
 ## Customization via armature properties
 
