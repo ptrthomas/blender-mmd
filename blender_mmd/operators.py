@@ -398,6 +398,7 @@ class BLENDER_MMD_OT_clear_animation(bpy.types.Operator):
             pb.scale = (1, 1, 1)
 
         # Clear shape key animation on child meshes
+        morph_cleared = False
         for child in armature_obj.children:
             if child.type != "MESH":
                 continue
@@ -409,11 +410,13 @@ class BLENDER_MMD_OT_clear_animation(bpy.types.Operator):
                 sk.animation_data.action = None
                 if action.users == 0:
                     bpy.data.actions.remove(action)
-                cleared.append("morph keyframes")
+                morph_cleared = True
             # Reset shape key values to 0
             for kb in sk.key_blocks:
                 if kb != sk.reference_key:
                     kb.value = 0.0
+        if morph_cleared:
+            cleared.append("morph keyframes")
 
         # Go to frame 1 for clean state
         bpy.context.scene.frame_set(1)
@@ -423,6 +426,177 @@ class BLENDER_MMD_OT_clear_animation(bpy.types.Operator):
         else:
             self.report({"INFO"}, "No animation to clear.")
         return {"FINISHED"}
+
+
+class BLENDER_MMD_OT_inspect_physics(bpy.types.Operator):
+    """Inspect a rigid body's properties, connections, and collision groups"""
+
+    bl_idname = "blender_mmd.inspect_physics"
+    bl_label = "Inspect Rigid Body"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        from .physics import inspect_rigid_body
+
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        obj = context.active_object
+        if obj is None or obj.get("mmd_rigid_index") is None:
+            self.report({"ERROR"}, "Select a rigid body object first.")
+            return {"CANCELLED"}
+
+        idx = obj["mmd_rigid_index"]
+        report = inspect_rigid_body(armature_obj, idx)
+        context.window_manager.clipboard = report
+        first_line = report.split("\n")[0] if report else "No data"
+        self.report({"INFO"}, f"{first_line} — copied to clipboard")
+        return {"FINISHED"}
+
+
+class BLENDER_MMD_OT_select_colliders(bpy.types.Operator):
+    """Select all rigid bodies that can collide with the active one"""
+
+    bl_idname = "blender_mmd.select_colliders"
+    bl_label = "Select Colliders"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        from .physics import get_collision_eligible_indices
+
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        obj = context.active_object
+        if obj is None or obj.get("mmd_rigid_index") is None:
+            self.report({"ERROR"}, "Select a rigid body object first.")
+            return {"CANCELLED"}
+
+        idx = obj["mmd_rigid_index"]
+        eligible = get_collision_eligible_indices(armature_obj, idx)
+
+        col_name = armature_obj.get("physics_collection")
+        if not col_name:
+            return {"CANCELLED"}
+        col = bpy.data.collections.get(col_name)
+        if not col:
+            return {"CANCELLED"}
+
+        # Unhide physics collection
+        vl_col = context.view_layer.layer_collection.children.get(col_name)
+        if vl_col and vl_col.hide_viewport:
+            vl_col.hide_viewport = False
+
+        bpy.ops.object.select_all(action="DESELECT")
+        rb_col = col.children.get("Rigid Bodies")
+        count = 0
+        if rb_col:
+            for rb_obj in rb_col.objects:
+                rb_idx = rb_obj.get("mmd_rigid_index")
+                if rb_idx is not None and rb_idx in eligible:
+                    rb_obj.select_set(True)
+                    count += 1
+
+        # Keep the original object selected and active
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+
+        self.report({"INFO"}, f"Selected {count} collision-eligible bodies")
+        return {"FINISHED"}
+
+
+class BLENDER_MMD_OT_select_contacts(bpy.types.Operator):
+    """Select rigid bodies currently in contact with the active one"""
+
+    bl_idname = "blender_mmd.select_contacts"
+    bl_label = "Select Contacts"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        from .physics import get_collision_eligible_indices
+
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        obj = context.active_object
+        if obj is None or obj.get("mmd_rigid_index") is None:
+            self.report({"ERROR"}, "Select a rigid body object first.")
+            return {"CANCELLED"}
+
+        idx = obj["mmd_rigid_index"]
+        eligible = get_collision_eligible_indices(armature_obj, idx)
+
+        col_name = armature_obj.get("physics_collection")
+        if not col_name:
+            return {"CANCELLED"}
+        col = bpy.data.collections.get(col_name)
+        if not col:
+            return {"CANCELLED"}
+
+        # Unhide physics collection
+        vl_col = context.view_layer.layer_collection.children.get(col_name)
+        if vl_col and vl_col.hide_viewport:
+            vl_col.hide_viewport = False
+
+        # Find contacts using bounding box overlap
+        rb_col = col.children.get("Rigid Bodies")
+        if not rb_col:
+            return {"CANCELLED"}
+
+        # Build index → object map for eligible bodies
+        eligible_objs = {}
+        for rb_obj in rb_col.objects:
+            rb_idx = rb_obj.get("mmd_rigid_index")
+            if rb_idx is not None and rb_idx in eligible:
+                eligible_objs[rb_idx] = rb_obj
+
+        # Shape-aware contact detection using collision shape radii
+        import json
+        phys_data = json.loads(armature_obj["mmd_physics_data"])
+        rbs_data = phys_data["rigid_bodies"]
+        import_scale = armature_obj.get("import_scale", 0.08)
+        margin = 0.005  # small contact threshold
+
+        bpy.ops.object.select_all(action="DESELECT")
+        count = 0
+        pos_a = obj.matrix_world.translation
+        radius_a = _shape_radius(rbs_data[idx], import_scale)
+
+        for rb_idx, rb_obj in eligible_objs.items():
+            pos_b = rb_obj.matrix_world.translation
+            radius_b = _shape_radius(rbs_data[rb_idx], import_scale)
+            dist = (pos_a - pos_b).length
+            if dist < radius_a + radius_b + margin:
+                rb_obj.select_set(True)
+                count += 1
+
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+
+        self.report({"INFO"}, f"Selected {count} bodies in contact")
+        return {"FINISHED"}
+
+
+def _shape_radius(rb_data: dict, scale: float) -> float:
+    """Approximate bounding radius of a rigid body shape."""
+    import math
+    sx, sy, sz = rb_data["size"]
+    shape = rb_data["shape"]
+    if shape == 0:  # SPHERE
+        return sx * scale
+    elif shape == 1:  # BOX
+        return math.sqrt((sx * scale) ** 2 + (sy * scale) ** 2 + (sz * scale) ** 2)
+    elif shape == 2:  # CAPSULE
+        r = sx * scale
+        h = sy * scale
+        return r + h / 2
+    return 0.01
 
 
 def menu_func_import(self, context):
@@ -447,6 +621,9 @@ _classes = (
     BLENDER_MMD_OT_clear_animation,
     BLENDER_MMD_OT_toggle_ik,
     BLENDER_MMD_OT_toggle_all_ik,
+    BLENDER_MMD_OT_inspect_physics,
+    BLENDER_MMD_OT_select_colliders,
+    BLENDER_MMD_OT_select_contacts,
 )
 
 

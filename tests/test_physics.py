@@ -55,8 +55,9 @@ class TestCollisionCollections:
     def test_shared_layer_always_set(self):
         """Layer 0 (shared) is always set so all bodies can potentially collide.
 
-        Actual non-collision is handled by GENERIC constraints with
-        disable_collisions=True, not by collision layers.
+        Blender's collision_collections uses the same bitmask for Bullet's
+        group AND mask (symmetric), so PMX masks cannot be encoded in layers.
+        Non-collision is handled by GENERIC constraint empties instead.
         """
         rigid = _make_rigid(group=3, mask=0x0000)
         cols = build_collision_collections(rigid)
@@ -64,7 +65,7 @@ class TestCollisionCollections:
         assert cols[3] is True
         assert sum(cols) == 2  # shared layer + own group
 
-    def test_group_0_two_layers_overlap(self):
+    def test_group_0_layers_overlap(self):
         """Group 0 body: shared layer and own group are the same layer."""
         rigid = _make_rigid(group=0, mask=0xFFFF)
         cols = build_collision_collections(rigid)

@@ -82,8 +82,10 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
 - **Scene settings**: VMD import sets FPS to 30 (MMD standard) and extends frame range to fit animation.
 - **Physics**: Two modes:
   - `none` (default): metadata only, no physics objects. Clean import.
-  - `rigid_body`: RBW disabled during build, collision layers, non-collision constraints (O(log N) template-and-duplicate), margin 1e-6, dynamic body repositioning, depsgraph flushes. "Good enough" mmd_tools-quality.
-- **MMD4B panel**: N-panel (tab "MMD4B") with sub-panels: Physics (Build/Rebuild/Clear), IK Toggle (per-chain toggles + All On/Off). Rebuild after VMD import to sync physics to starting pose.
+  - `rigid_body`: RBW disabled during build, collision layers (shared layer 0 + own group), non-collision constraint empties for all excluded pairs (no proximity filter — correctness over count), all joints `disable_collisions=True`, margin 1e-6, dynamic body repositioning, depsgraph flushes. Build restructured into 3 phases (CREATE → POSITION → COUPLE & ACTIVATE). Blender's `collision_collections` is symmetric (shared layer = collide) while PMX masks are asymmetric (bilateral check: `A.group & B.mask && B.group & A.mask`), so NCC empties are required for correct exclusion.
+  - **Debug inspector**: Select a rigid body → Inspect (copies full diagnostic report to clipboard), Select Colliders (highlights collision-eligible bodies), Select Contacts (highlights bodies in contact at current frame using shape-aware distance check).
+  - **Auto-reset**: VMD import automatically resets physics if rigid bodies exist.
+- **MMD4B panel**: N-panel (tab "MMD4B") with sub-panels: Physics (Build/Reset/Remove, selected RB info with Inspect/Colliders/Contacts, per-chain list), IK Toggle (per-chain toggles + All On/Off), Animation (action name, Clear Animation).
 - **Materials**: Two shader modes controlled by "Toon & Sphere Textures" checkbox on PMX import (off by default):
   - **Basic** (default): Bare Principled BSDF named "MMD Shader" — no node group. PMX specular mapped to native BSDF: `specular` luminance → `Specular IOR Level` (0–0.5), `specular` color → `Specular Tint`, `shininess` → `Roughness`. Models respond to scene lighting and reflections out of the box.
   - **Full** (checkbox on): "MMD Shader" node group with toon/sphere inputs via `ShaderNodeMix`. Adds "MMD UV" group for toon/sphere UVs. Bundled toon textures (toon01-10.bmp) with fallback resolution. Specular IOR Level = 0.0 (toon textures provide specular control).

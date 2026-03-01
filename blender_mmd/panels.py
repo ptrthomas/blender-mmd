@@ -73,6 +73,39 @@ class BLENDER_MMD_PT_physics(bpy.types.Panel):
                 icon="TRASH",
             )
 
+            # Selected rigid body info
+            active = context.active_object
+            if active and active.get("mmd_rigid_index") is not None:
+                rb_idx = active["mmd_rigid_index"]
+                phys_json = armature_obj.get("mmd_physics_data")
+                if phys_json:
+                    phys_data = json.loads(phys_json)
+                    rbs = phys_data.get("rigid_bodies", [])
+                    if 0 <= rb_idx < len(rbs):
+                        rb = rbs[rb_idx]
+                        mode_names = {0: "STATIC", 1: "DYNAMIC", 2: "DYNAMIC_BONE"}
+                        box = layout.box()
+                        box.label(text=f"Selected: {active.name}", icon="OBJECT_DATA")
+                        box.label(
+                            text=f"Mode: {mode_names.get(rb['mode'], '?')} | "
+                            f"Mass: {rb['mass']:.2f} | "
+                            f"Group: {rb['collision_group_number']}"
+                        )
+                        # Chain membership
+                        chains_json = armature_obj.get("mmd_physics_chains")
+                        if chains_json:
+                            for chain in json.loads(chains_json):
+                                if rb_idx in chain.get("rigid_indices", []):
+                                    box.label(
+                                        text=f"Chain: {chain['name']} ({chain.get('group', '?')})",
+                                        icon="LINKED",
+                                    )
+                                    break
+                        row = box.row(align=True)
+                        row.operator("blender_mmd.inspect_physics", text="Inspect", icon="VIEWZOOM")
+                        row.operator("blender_mmd.select_colliders", text="Colliders", icon="SHADING_BBOX")
+                        row.operator("blender_mmd.select_contacts", text="Contacts", icon="MOD_PHYSICS")
+
             # Per-chain list with select and remove buttons
             chains = _get_physics_chains(armature_obj)
             if chains:

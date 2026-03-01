@@ -80,17 +80,21 @@ def _chain_to_dict(chain) -> dict:
 def _build_rigid_body_physics(armature_obj, model, scale: float) -> None:
     """Create rigid bodies, joints, bone coupling, and configure physics world.
 
+    Three-phase build:
+      Phase 1 (CREATE): Collections, rigid bodies, joints, joint non-collisions.
+      Phase 2 (POSITION): Reposition dynamic bodies and tracking empties.
+      Phase 3 (COUPLE & ACTIVATE): Bone coupling, world setup, chains.
+
     The rigid body world is disabled during setup (following mmd_tools' approach)
     to prevent the solver from computing forces while bodies are being added.
-    Scene updates (frame_set) flush the depsgraph at key points.
     """
     import bpy
 
-    # Disable rigid body world during setup to prevent solver interference.
-    rbw_was_enabled = _set_rigid_body_world_enabled(bpy.context.scene, False)
+    _set_rigid_body_world_enabled(bpy.context.scene, False)
 
     try:
-        # Create physics collection with subcollections
+        # --- Phase 1: CREATE (no depsgraph needed) ---
+
         col_name = f"{armature_obj.name}_Physics"
         collection = bpy.data.collections.new(col_name)
         bpy.context.scene.collection.children.link(collection)
@@ -103,76 +107,46 @@ def _build_rigid_body_physics(armature_obj, model, scale: float) -> None:
         track_col = bpy.data.collections.new("Tracking")
         collection.children.link(track_col)
 
-        # Build bone name lookup: bone_index → Blender bone name
         bone_names = _build_bone_name_map(armature_obj)
 
-        # Pre-build: mute IK constraints on physics bones to prevent
-        # IK solver from fighting during depsgraph flushes (mmd_tools pattern)
-        _mute_physics_ik_constraints(armature_obj, model, bone_names, mute=True)
-
-        # Step 1: Rigid bodies (with collision margin fix)
         rigid_objects = _create_rigid_bodies(model, armature_obj, scale, rb_col)
-
-        # Step 2: Reposition dynamic bodies to match current bone pose
-        _reposition_dynamic_bodies(model, armature_obj, rigid_objects, bone_names, scale)
-
-        # Flush depsgraph so matrix_world is up to date for joint/coupling steps
-        bpy.context.scene.frame_set(bpy.context.scene.frame_current)
-
-        # Step 3: Joints (with repositioning for dynamic body bones)
         joint_objects = _create_joints(model, armature_obj, rigid_objects, bone_names, scale, joint_col)
-
-        # Step 4: Non-collision constraints (mask-based)
         _create_non_collision_constraints(model, rigid_objects, joint_objects, joint_col)
 
-        # Flush depsgraph before bone coupling (tracking empties need correct matrix_world)
+        # --- Phase 2: POSITION (needs depsgraph for matrix_world) ---
+
+        _mute_physics_ik_constraints(armature_obj, model, bone_names, mute=True)
+        _reposition_dynamic_bodies(model, armature_obj, rigid_objects, bone_names, scale)
+
+        # Flush so matrix_world is current for tracking empty creation
         bpy.context.scene.frame_set(bpy.context.scene.frame_current)
 
-        # Step 5: Bone↔rigid body coupling (constraints created muted,
-        # tracking empties NOT yet parented to rigid bodies)
         empty_parent_map = _setup_bone_coupling(
             armature_obj, model, rigid_objects, bone_names, scale, track_col,
         )
 
-        # Flush depsgraph so tracking empties have correct matrix_world
+        # Flush so tracking empties have correct matrix_world before reparenting
         bpy.context.scene.frame_set(bpy.context.scene.frame_current)
 
-        # Post-build: reparent tracking empties to rigid bodies in batch
-        # (preserving matrix_world through reparenting, mmd_tools pattern)
         _reparent_tracking_empties(empty_parent_map)
 
-        # Flush depsgraph after reparenting
+        # Flush after reparenting so parent inverse matrices are evaluated
         bpy.context.scene.frame_set(bpy.context.scene.frame_current)
 
-        # Post-build: unmute tracking constraints now that empties are parented
+        # --- Phase 3: COUPLE & ACTIVATE ---
+
         _unmute_tracking_constraints(armature_obj)
-
-        # Unmute IK constraints now that physics setup is complete.
-        # They were muted to prevent IK solver from fighting depsgraph
-        # flushes during body positioning. Physics COPY_TRANSFORMS/
-        # COPY_ROTATION constraints on dynamic bones will override IK
-        # output at evaluation time, so unmuting is safe.
         _mute_physics_ik_constraints(armature_obj, model, bone_names, mute=False)
-
-        # Flush depsgraph after unmuting IK so the viewport shows correct
-        # IK-solved poses immediately (without this, legs appear straight
-        # until the next manual frame change).
-        bpy.context.scene.frame_set(bpy.context.scene.frame_current)
-
-        # Step 6: Physics world settings
         _setup_physics_world(bpy.context.scene, scale)
 
-        # Hide physics collection in viewport (less clutter)
         vl_col = bpy.context.view_layer.layer_collection.children.get(col_name)
         if vl_col:
             vl_col.hide_viewport = True
 
     finally:
-        # Always enable rigid body world after build — we just created physics,
-        # so it should be active.
         _set_rigid_body_world_enabled(bpy.context.scene, True)
 
-    # Detect and store chains for per-chain UI (removal, etc.)
+    # Detect and store chains for per-chain UI
     from .chains import detect_chains
     chains = detect_chains(model)
     armature_obj["mmd_physics_chains"] = json.dumps(
@@ -724,6 +698,12 @@ def _build_collision_collections(rigid: RigidBody) -> list[bool]:
     Each body also gets its own group layer. Non-collision pairs are then
     suppressed via GENERIC constraints with disable_collisions=True
     (see _create_non_collision_constraints).
+
+    Blender's collision_collections uses the SAME bitmask for both Bullet's
+    collisionFilterGroup and collisionFilterMask, making it symmetric —
+    two bodies collide if they share ANY layer. PMX's model is asymmetric
+    (both masks must agree), so we cannot encode PMX masks in Blender layers.
+    Instead, we use shared layer 0 + NCC constraint empties for exclusion.
     """
     cols = [False] * 20
     cols[0] = True  # shared layer — all bodies can potentially collide
@@ -931,43 +911,53 @@ def _apply_soft_constraints(rbc) -> None:
             setattr(rbc, f"limit_ang_{axis}_upper", 0.0)
 
 
-def _create_non_collision_constraints(model, rigid_objects, joint_objects, collection,
-                                     distance_scale: float = 1.5) -> None:
+def _create_non_collision_constraints(model, rigid_objects, joint_objects, collection) -> None:
     """Apply non-collision settings based on PMX collision_group_mask.
 
-    Two-pass approach (matching mmd_tools):
-    1. Joint-connected non-colliding pairs: set disable_collisions on existing joint.
-    2. Non-joint pairs within proximity: create GENERIC constraint empties using
-       a template-and-duplicate pattern (O(log N) operator calls, not O(N)).
+    Blender's collision_collections uses the SAME bitmask for Bullet's group
+    AND mask, making it symmetric. PMX requires asymmetric checking (both
+    masks must agree). We solve this with shared layer 0 + GENERIC constraint
+    empties that suppress specific pairs.
 
-    Group-based iteration avoids O(n^2) distance checks on all pairs.
+    All joints get disable_collisions=True (adjacent bodies should never
+    collide — the joint constraint manages their relationship). Non-joint
+    excluded pairs get NCC empties via template-and-duplicate (O(log N) ops).
     """
     import bpy
 
     n_bodies = len(rigid_objects)
 
+    # Pass 1: Set disable_collisions=True on ALL joints.
+    # Adjacent bodies connected by joints should never collide — letting them
+    # collide causes instability since they overlap at the joint pivot point.
+    for j_obj in joint_objects:
+        rbc = j_obj.rigid_body_constraint
+        if rbc:
+            rbc.disable_collisions = True
+    log.info("Set disable_collisions on all %d joints", len(joint_objects))
+
+    # Pass 2: Build NCC empties for non-joint non-colliding pairs.
     # Group rigid body indices by collision_group_number
     group_map: dict[int, list[int]] = {}
     for i, rigid in enumerate(model.rigid_bodies):
         group_map.setdefault(rigid.collision_group_number, []).append(i)
 
-    # Map joint pairs -> joint objects
-    joint_pair_map: dict[frozenset, object] = {}
+    # Map joint pairs → joint objects (already handled above)
+    joint_pair_set: set[frozenset] = set()
     for j_idx, joint in enumerate(model.joints):
         src, dst = joint.src_rigid, joint.dest_rigid
         if 0 <= src < n_bodies and 0 <= dst < n_bodies:
-            joint_pair_map[frozenset((src, dst))] = joint_objects[j_idx]
+            joint_pair_set.add(frozenset((src, dst)))
 
-    # Iterate by group membership (not all pairs) to find non-colliding pairs
+    # Find non-colliding pairs that need NCC empties
     non_collision_pairs: set[frozenset] = set()
-    non_collision_table: list[tuple] = []  # (obj_a, obj_b) for GENERIC empties
-    joint_nc_count = 0
+    non_collision_table: list[tuple] = []
 
     for i, rigid_a in enumerate(model.rigid_bodies):
         for grp in range(16):
             if rigid_a.collision_group_mask & (1 << grp):
                 continue  # bit set = collides with this group, skip
-            # Body A excludes group `grp` -- check all bodies in that group
+            # Body A excludes group `grp` — check all bodies in that group
             for j in group_map.get(grp, []):
                 if i == j:
                     continue
@@ -976,38 +966,20 @@ def _create_non_collision_constraints(model, rigid_objects, joint_objects, colle
                     continue
                 non_collision_pairs.add(pair)
 
-                if pair in joint_pair_map:
-                    # Existing joint -- just flip the flag
-                    joint_pair_map[pair].rigid_body_constraint.disable_collisions = True
-                    joint_nc_count += 1
-                else:
-                    # Proximity check: only constrain nearby bodies
-                    obj_a, obj_b = rigid_objects[i], rigid_objects[j]
-                    dist = (obj_a.location - obj_b.location).length
-                    range_sum = _object_range(obj_a) + _object_range(obj_b)
-                    if dist < distance_scale * range_sum * 0.5:
-                        non_collision_table.append((obj_a, obj_b))
+                if pair not in joint_pair_set:
+                    non_collision_table.append((rigid_objects[i], rigid_objects[j]))
 
-    if joint_nc_count > 0:
-        log.info("Set disable_collisions on %d joint constraints", joint_nc_count)
-
-    # Create GENERIC constraint empties for non-joint non-colliding pairs
+    # Create NCC empties for all non-joint excluded pairs (no proximity filter)
     if non_collision_table:
         _create_non_collision_empties(bpy, non_collision_table, collection)
-
-
-def _object_range(obj) -> float:
-    """Bounding box diagonal of a Blender object."""
-    d = obj.dimensions
-    return (d[0] ** 2 + d[1] ** 2 + d[2] ** 2) ** 0.5
 
 
 def _create_non_collision_empties(bpy, pair_table: list[tuple], collection) -> None:
     """Create GENERIC constraint empties for non-colliding body pairs.
 
-    Uses mmd_tools' template-and-duplicate pattern: create ONE constraint
-    via bpy.ops, then duplicate with bpy.ops.object.duplicate() (which
-    doubles the selection each iteration -> O(log N) operator calls).
+    Uses template-and-duplicate pattern: create ONE constraint via bpy.ops,
+    then duplicate with bpy.ops.object.duplicate() using a doubling strategy
+    (O(log N) operator calls instead of O(N)).
     """
     total = len(pair_table)
     if total < 1:
@@ -1019,7 +991,7 @@ def _create_non_collision_empties(bpy, pair_table: list[tuple], collection) -> N
 
     # Create template empty with GENERIC constraint
     template = bpy.data.objects.new("ncc", None)
-    template.empty_display_size = 0.01
+    template.empty_display_size = 0.001
     template.hide_render = True
     collection.objects.link(template)
 
@@ -1028,28 +1000,24 @@ def _create_non_collision_empties(bpy, pair_table: list[tuple], collection) -> N
     bpy.ops.rigidbody.constraint_add(type="GENERIC")
     template.rigid_body_constraint.disable_collisions = True
 
-    # Duplicate using doubling strategy: select all existing, duplicate,
-    # repeat until we have enough objects
+    # Duplicate using doubling strategy
     all_objs = [template]
-    last_selected = [template]
     while len(all_objs) < total:
+        needed = total - len(all_objs)
+        for obj in bpy.context.selected_objects:
+            obj.select_set(False)
+        to_dup = min(needed, len(all_objs))
+        for obj in all_objs[:to_dup]:
+            obj.select_set(True)
         bpy.ops.object.duplicate()
         new_objs = list(bpy.context.selected_objects)
         all_objs.extend(new_objs)
-        remain = total - len(all_objs) - len(new_objs)
-        if remain < 0:
-            # Too many -- deselect extras so next iteration doesn't over-duplicate
-            last_selected = new_objs
-            for k in range(-remain):
-                last_selected[k].select_set(False)
-        else:
-            # Select previous batch too for doubling
-            for k in range(min(remain, len(last_selected))):
-                last_selected[k].select_set(True)
-            last_selected = list(bpy.context.selected_objects)
 
     # Trim to exact count
+    extras = all_objs[total:]
     all_objs = all_objs[:total]
+    for obj in extras:
+        bpy.data.objects.remove(obj, do_unlink=True)
 
     # Assign pairs to constraint empties
     for ncc_obj, (obj_a, obj_b) in zip(all_objs, pair_table):
@@ -1268,3 +1236,196 @@ def _set_rigid_body_world_enabled(scene, enable: bool) -> bool:
     was_enabled = rbw.enabled
     rbw.enabled = enable
     return was_enabled
+
+
+def inspect_rigid_body(armature_obj, rb_name_or_index) -> str:
+    """Generate a diagnostic report for a rigid body.
+
+    Args:
+        rb_name_or_index: RB object name (e.g. "RB_042_右HairA22") or PMX index (int).
+
+    Returns multi-line string with physics properties, connections, and warnings.
+    """
+    import math
+
+    phys_json = armature_obj.get("mmd_physics_data")
+    if not phys_json:
+        return "No physics data on armature"
+
+    data = json.loads(phys_json)
+    rigid_bodies = data["rigid_bodies"]
+    joints = data.get("joints", [])
+
+    # Resolve index
+    if isinstance(rb_name_or_index, int):
+        idx = rb_name_or_index
+    elif isinstance(rb_name_or_index, str):
+        # Try to extract index from name like "RB_042_name"
+        if rb_name_or_index.startswith("RB_"):
+            try:
+                idx = int(rb_name_or_index[3:6])
+            except (ValueError, IndexError):
+                idx = -1
+        else:
+            # Search by PMX name
+            idx = next(
+                (i for i, rb in enumerate(rigid_bodies) if rb["name"] == rb_name_or_index),
+                -1,
+            )
+    else:
+        return f"Invalid input: {rb_name_or_index!r}"
+
+    if idx < 0 or idx >= len(rigid_bodies):
+        return f"Rigid body index {idx} out of range (0-{len(rigid_bodies)-1})"
+
+    rb = rigid_bodies[idx]
+    mode_names = {0: "STATIC", 1: "DYNAMIC", 2: "DYNAMIC_BONE"}
+    shape_names = {0: "SPHERE", 1: "BOX", 2: "CAPSULE"}
+    mode_str = mode_names.get(rb["mode"], f"UNKNOWN({rb['mode']})")
+    shape_str = shape_names.get(rb["shape"], f"UNKNOWN({rb['shape']})")
+
+    bone_names = _build_bone_name_map(armature_obj)
+    bone_name = bone_names.get(rb["bone_index"], f"(index {rb['bone_index']})")
+
+    lines = []
+    lines.append(f"=== RB_{idx:03d}_{rb['name']} ===")
+    lines.append(f"PMX: {rb['name']} (index {idx}), bone: {bone_name}, mode: {mode_str}")
+
+    # Chain membership
+    chains_json = armature_obj.get("mmd_physics_chains")
+    if chains_json:
+        chains = json.loads(chains_json)
+        for chain in chains:
+            if idx in chain.get("rigid_indices", []):
+                n_bodies = len(chain["rigid_indices"])
+                lines.append(f"Chain: {chain['name']} ({chain.get('group', '?')}, {n_bodies} bodies)")
+                break
+
+    lines.append("")
+    lines.append(
+        f"Physics: mass={rb['mass']:.2f}, friction={rb['friction']:.2f}, "
+        f"bounce={rb['bounce']:.2f}"
+    )
+    lines.append(
+        f"         linear_damp={rb['linear_damping']:.2f}, "
+        f"angular_damp={rb['angular_damping']:.2f}"
+    )
+    lines.append(f"         shape={shape_str}")
+
+    # Collision info
+    grp = rb["collision_group_number"]
+    mask = rb["collision_group_mask"]
+    collides = [str(g) for g in range(16) if mask & (1 << g)]
+    excludes = [str(g) for g in range(16) if not (mask & (1 << g))]
+    lines.append("")
+    lines.append(
+        f"Collision: group={grp}, mask=0b{mask:016b} "
+        f"(collides: {','.join(collides) or 'none'}, "
+        f"excludes: {','.join(excludes) or 'none'})"
+    )
+
+    # Joint connections
+    lines.append("")
+    lines.append("Joints:")
+    has_joints = False
+    for j_idx, joint in enumerate(joints):
+        if joint["src_rigid"] == idx:
+            dest = joint["dest_rigid"]
+            dest_name = rigid_bodies[dest]["name"] if 0 <= dest < len(rigid_bodies) else "?"
+            _append_joint_line(lines, "→", j_idx, f"RB_{dest:03d}_{dest_name}", joint)
+            has_joints = True
+        elif joint["dest_rigid"] == idx:
+            src = joint["src_rigid"]
+            src_name = rigid_bodies[src]["name"] if 0 <= src < len(rigid_bodies) else "?"
+            _append_joint_line(lines, "←", j_idx, f"RB_{src:03d}_{src_name}", joint)
+            has_joints = True
+    if not has_joints:
+        lines.append("  (none)")
+
+    # Live position from Blender object
+    col_name = armature_obj.get("physics_collection")
+    if col_name:
+        import bpy
+        col = bpy.data.collections.get(col_name)
+        if col:
+            rb_col = col.children.get("Rigid Bodies")
+            if rb_col:
+                for obj in rb_col.objects:
+                    if obj.get("mmd_rigid_index") == idx:
+                        pos = obj.matrix_world.translation
+                        lines.append("")
+                        lines.append(f"Position: world=({pos.x:.3f}, {pos.y:.3f}, {pos.z:.3f})")
+                        break
+
+    # Warnings
+    warnings = []
+    if rb["mass"] == 0 and rb["mode"] != 0:
+        warnings.append("mass=0 on dynamic body")
+    if rb["angular_damping"] > 0.95:
+        warnings.append(f"angular_damping={rb['angular_damping']:.2f} (very high, rigid feel)")
+    if rb["linear_damping"] > 0.95:
+        warnings.append(f"linear_damping={rb['linear_damping']:.2f} (very high, frozen feel)")
+    if mask == 0:
+        warnings.append("collision mask is empty (collides with nothing)")
+
+    if warnings:
+        lines.append("")
+        for w in warnings:
+            lines.append(f"⚠ {w}")
+
+    return "\n".join(lines)
+
+
+def _append_joint_line(lines: list, arrow: str, j_idx: int, target: str, joint: dict) -> None:
+    """Append a formatted joint info line to the report."""
+    import math
+
+    lo_m = joint["limit_move_lower"]
+    hi_m = joint["limit_move_upper"]
+    lo_r = joint["limit_rotate_lower"]
+    hi_r = joint["limit_rotate_upper"]
+    sp_m = joint["spring_constant_move"]
+    sp_r = joint["spring_constant_rotate"]
+
+    def _fmt_range(lo, hi):
+        return f"±{abs(hi - lo) / 2:.2f}"
+
+    def _fmt_deg(lo, hi):
+        return f"±{math.degrees(abs(hi - lo) / 2):.1f}°"
+
+    move = ",".join(_fmt_range(lo_m[i], hi_m[i]) for i in range(3))
+    rot = ",".join(_fmt_deg(lo_r[i], hi_r[i]) for i in range(3))
+    sm = ",".join(f"{sp_m[i]:.0f}" for i in range(3))
+    sr = ",".join(f"{sp_r[i]:.0f}" for i in range(3))
+
+    lines.append(
+        f"  {arrow} J_{j_idx:03d} to {target}: "
+        f"move({move}) rot({rot}) spring_m({sm}) spring_r({sr})"
+    )
+
+
+def get_collision_eligible_indices(armature_obj, rb_index: int) -> set[int]:
+    """Return indices of rigid bodies that can collide with rb_index per PMX masks.
+
+    PMX collision: A and B collide iff A.mask has B.group bit AND B.mask has A.group bit.
+    """
+    phys_json = armature_obj.get("mmd_physics_data")
+    if not phys_json:
+        return set()
+
+    data = json.loads(phys_json)
+    rigid_bodies = data["rigid_bodies"]
+    if rb_index < 0 or rb_index >= len(rigid_bodies):
+        return set()
+
+    rb = rigid_bodies[rb_index]
+    result = set()
+    for i, other in enumerate(rigid_bodies):
+        if i == rb_index:
+            continue
+        # Both masks must agree for collision
+        a_hits_b = rb["collision_group_mask"] & (1 << other["collision_group_number"])
+        b_hits_a = other["collision_group_mask"] & (1 << rb["collision_group_number"])
+        if a_hits_b and b_hits_a:
+            result.add(i)
+    return result

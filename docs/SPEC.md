@@ -395,7 +395,7 @@ Use Blender's `collision_collections` property (20-element boolean array on `Rig
 
 MMD uses 16 collision groups with a bilateral "non-collision mask" (bit set = don't collide). Blender uses "collision collections" where objects sharing ANY layer collide (symmetric). This asymmetry means PMX's bilateral mask system cannot be directly mapped — adding mask-based layers causes false cross-group collisions.
 
-**Current approach: shared layer + own group + non-collision constraints.** Each body is placed on shared layer 0 (so everything potentially collides) plus its own collision group layer. Non-colliding pairs are then suppressed via `GENERIC` constraints with `disable_collisions=True`, same pattern as mmd_tools. For pairs that already have a joint, the existing joint's `disable_collisions` is set instead of creating a new object. A proximity filter (1.5x average range) avoids creating constraints for distant bodies that would never collide anyway.
+**Current approach: shared layer + own group + non-collision constraints.** Each body is placed on shared layer 0 (so everything potentially collides) plus its own collision group layer.
 
 ```python
 blender_collections = [False] * 20
@@ -403,7 +403,13 @@ blender_collections[0] = True  # shared layer — all bodies can potentially col
 blender_collections[pmx_rigid.collision_group_number] = True  # own group
 ```
 
-**Future improvement**: A more accurate approach would analyze the collision graph to find groups that mutually want to collide and merge them onto shared layers, while keeping non-colliding groups separated. This could reduce or eliminate the need for non-collision constraint objects.
+Non-colliding pairs are suppressed via `GENERIC` constraints with `disable_collisions=True` (same pattern as mmd_tools). **All joints** get `disable_collisions=True` — connected bodies should never collide (the joint manages their relationship). For non-joint excluded pairs, NCC empties are created using a template-and-duplicate O(log N) doubling strategy.
+
+**No proximity filter.** Earlier versions skipped NCC empties for distant pairs, but bodies that are far apart at rest may collide during animation (e.g. twin tails swinging). All excluded pairs now get NCC empties (~13K for a 265-body model, created in ~3 seconds). This trades object count for correctness.
+
+**Why not mask-based layers?** Blender's `collision_collections` uses the SAME bitmask for both Bullet's `collisionFilterGroup` AND `collisionFilterMask` (symmetric). PMX's system is asymmetric — both masks must agree: `(A.group & B.mask) && (B.group & A.mask)`. Placing bodies on mask-derived layers causes false cross-group collisions because shared layers are bidirectional. For example, skirt bodies (group 14, mask excludes group 14) would all collide with each other since they share the same layers. NCC empties remain the only correct approach in Blender.
+
+**Future improvement**: Geometry Nodes data sheets, per-frame Python physics, or custom collision filtering could reduce the NCC empty count while preserving correct bilateral mask checking.
 
 ### Rigid body creation
 
@@ -445,7 +451,7 @@ For each PMX joint:
 4. Enable all 6 DOF limits (`use_limit_lin_x/y/z`, `use_limit_ang_x/y/z`)
 5. Set translation limits from PMX `limit_move_lower/upper` (scaled by import scale)
 6. Set rotation limits: **swap min/max AND negate** — `limit_ang_x_lower = -joint.limit_rotate_upper[0]`, etc. This matches mmd_tools' pattern: `minimum_rotation = joint.maximum_rotation.xzy * -1`
-7. Set `disable_collisions = False` on joint constraints (connected bodies should still collide)
+7. Set `disable_collisions = True` on all joint constraints (connected bodies should not collide — the joint manages their relationship)
 7. Enable all 6 spring axes (`use_spring_x/y/z`, `use_spring_ang_x/y/z`)
 8. **Actually set spring stiffness and damping values** from PMX `spring_constant_move` and `spring_constant_rotate`
 
@@ -546,6 +552,9 @@ blender_mmd.reset_physics              # Reposition rigid bodies to current bone
 blender_mmd.clear_physics              # Remove all physics objects and metadata
 blender_mmd.select_chain               # Select rigid bodies for a chain (chain_index)
 blender_mmd.remove_chain               # Remove a single physics chain (chain_index)
+blender_mmd.inspect_physics            # Copy full RB diagnostic report to clipboard
+blender_mmd.select_colliders           # Select all collision-eligible RBs for active RB
+blender_mmd.select_contacts            # Select RBs in contact with active RB at current frame
 blender_mmd.clear_animation            # Clear bone/morph keyframes, reset to rest pose
 blender_mmd.toggle_ik                  # Toggle IK for one chain (target_bone)
 blender_mmd.toggle_all_ik              # Enable/disable all IK (enable: bool)
@@ -583,7 +592,8 @@ Behavior:
 6. Apply VMD Bézier interpolation handles to F-curves
 7. Apply IK toggle keyframes as constraint influence F-curves (CONSTANT interpolation)
 8. Set scene FPS to 30 (MMD standard) and extend frame range to fit animation
-9. Log summary of matched/unmatched bones and morphs
+9. Auto-reset physics if rigid bodies exist (repositions dynamic bodies to match animation start pose)
+10. Log summary of matched/unmatched bones and morphs
 
 **Per-bone VMD conversion**: VMD keyframes are in bone-local space. The `_BoneConverter` class constructs a conversion matrix from `bone.matrix_local` (with Y↔Z row swap + transpose) and converts each keyframe via matrix conjugation: `q_mat @ q_vmd @ q_mat.conjugated()`. This depends on correct bone roll (see above).
 
@@ -655,7 +665,7 @@ VMD parser, bone/morph keyframes as F-curves, IK toggle via constraint influence
 
 ### Milestone 4: Rigid Body Physics ✅
 
-Rigid body creation, GENERIC_SPRING joints with spring values, collision layers, non-collision constraints, bone coupling (STATIC/DYNAMIC/DYNAMIC_BONE). Springs enabled, soft constraints disabled (oscillation issues). MMD4B panel for Build/Rebuild/Clear.
+Rigid body creation, GENERIC_SPRING joints with spring values, collision layers (shared layer 0 + own group), non-collision constraint empties for all excluded pairs (no proximity filter), all joints `disable_collisions=True`, bone coupling (STATIC/DYNAMIC/DYNAMIC_BONE). Springs enabled, soft constraints disabled (oscillation issues). Build restructured into 3 phases. Debug inspector (inspect/colliders/contacts operators). Auto-reset after VMD import. MMD4B panel for Build/Reset/Remove with per-chain management and selected RB diagnostics.
 
 **Test data (`tests/samples/`):**
 - `初音ミク.pmx` — simple Miku model (122 bones, 45 rigid bodies, 27 joints)
@@ -676,6 +686,10 @@ Rigid body creation, GENERIC_SPRING joints with spring values, collision layers,
 **Physics sub-panel:**
 - **No physics state:** "Build Rigid Bodies" button (calls `build_physics` with `mode=rigid_body`)
 - **Physics active:** Shows rigid body count, "Reset" button (repositions existing rigid bodies to match current bone pose without rebuild — fast), "Remove" button (deletes all physics objects)
+- **Selected RB info:** When a rigid body is selected (has `mmd_rigid_index`), shows a box with name, mode/mass/group, chain membership, and three debug buttons:
+  - **Inspect**: Copies full diagnostic report to clipboard (PMX data, joints, collision mask, position, warnings)
+  - **Colliders**: Selects all RBs that share at least one collision-eligible group (bidirectional PMX mask check)
+  - **Contacts**: Selects RBs in contact at current frame (shape-aware centroid distance check, not AABB)
 - **Chain list:** Detected chains shown in a box below controls. Each chain row shows name, group classification (hair/skirt/accessory/other), and body count. Clicking the chain name selects its rigid body objects (unhides physics collection automatically). X button removes that individual chain (rigid bodies, joints, tracking empties, bone constraints) and flushes depsgraph so freed bones snap back to rest pose.
 - Chain data is detected via `chains.py` during physics build and stored as `mmd_physics_chains` JSON on the armature
 
@@ -686,7 +700,7 @@ Rigid body creation, GENERIC_SPRING joints with spring values, collision layers,
 - Also toggles `mmd_ik_limit_override` LIMIT_ROTATION constraints in the chain
 - Chains discovered by scanning pose bones for IK constraints
 
-**Workflow:** Import PMX → optionally import VMD → click "Build Rigid Bodies" in MMD4B panel → play animation. Use "Reset" after changing pose/animation to reposition rigid bodies without full rebuild. Use "Clear Animation" to strip all keyframes and reload a different VMD. Use per-chain X buttons to remove physics from specific parts (e.g. remove skirt physics to replace with cloth sim). Use IK Toggle to disable IK chains for non-standard poses.
+**Workflow:** Import PMX → click "Build Rigid Bodies" in MMD4B panel → optionally import VMD (physics auto-resets) → play animation. Use "Reset" after changing pose to reposition rigid bodies without full rebuild. Use "Clear Animation" to strip all keyframes and reload a different VMD. Use per-chain X buttons to remove physics from specific parts (e.g. remove skirt physics to replace with cloth sim). Use IK Toggle to disable IK chains for non-standard poses. Select a rigid body and use Inspect/Colliders/Contacts for debugging collision issues.
 
 ### Milestone 5: Materials & Textures ✅
 

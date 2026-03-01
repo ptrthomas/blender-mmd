@@ -99,6 +99,13 @@ def import_vmd(
     # Set scene FPS to 30 (MMD standard) and adjust frame range
     _setup_scene_settings(armature_obj)
 
+    # Auto-reset physics if rigid bodies are built — prevents displaced bodies
+    # after VMD import without requiring manual reset
+    if armature_obj.get("physics_mode") == "rigid_body":
+        from ..physics import reset_physics
+        count = reset_physics(armature_obj)
+        log.info("Auto-reset %d rigid bodies after VMD import", count)
+
     log.info(
         "VMD applied: %d/%d bones matched, %d morph channels, %d IK toggles, "
         "%d total bone keyframes",
