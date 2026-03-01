@@ -88,6 +88,7 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
   - **Basic** (default): Bare Principled BSDF named "MMD Shader" — no node group. PMX specular mapped to native BSDF: `specular` luminance → `Specular IOR Level` (0–0.5), `specular` color → `Specular Tint`, `shininess` → `Roughness`. Models respond to scene lighting and reflections out of the box.
   - **Full** (checkbox on): "MMD Shader" node group with toon/sphere inputs via `ShaderNodeMix`. Adds "MMD UV" group for toon/sphere UVs. Bundled toon textures (toon01-10.bmp) with fallback resolution. Specular IOR Level = 0.0 (toon textures provide specular control).
   - Both modes: Global `mmd_emission` driver on armature (`Emission Strength` for basic, `Emission` group input for full). Full mode also drives `mmd_toon_fac`/`mmd_sphere_fac`. Drivers are created after import (deferred `setup_drivers()`). Requires `use_scripts_auto_execute = True`. Alpha = PMX alpha × texture alpha. Edge color/size stored as material custom properties. Node lookup key: `"MMD Shader"` (both modes).
+- **Split by material**: Mesh is split into per-material objects after import (default on). Enables per-object modifiers (cloth, solidify for outlines), light linking, and per-object `visible_shadow` (honors `mmd_drop_shadow`). Custom normals backed up as `mmd_normal` attribute before split, restored after. `mmd_morph_map` moved to armature for VMD import. All objects organized into a collection named after the model. VMD morph action shared across all split meshes (shape key names preserved by `mesh.separate`).
 - **Armature visibility**: STICK display, bones hidden by default. All three bone collections start hidden (`is_visible = False`): "Armature" (standard), "Physics" (dynamic RB bones, orange), "mmd_shadow" (helper bones). Unhide from armature properties when needed.
 - **No export**: One-way import only. No PMX/VMD/PMD export.
 - **Logging**: Use blender-agent's log (`output/agent.log`). Python `logging` to stderr for diagnostics.
@@ -95,12 +96,15 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
 ## API usage (inside Blender via blender-agent)
 
 ```python
-# PMX import (basic shader, no toon/sphere)
+# PMX import (basic shader, no toon/sphere, split by material)
 import bl_ext.user_default.blender_mmd.importer as importer
 arm = importer.import_pmx("/path/to/model.pmx")
 
 # PMX import with toon & sphere textures
 arm = importer.import_pmx("/path/to/model.pmx", use_toon_sphere=True)
+
+# PMX import as single mesh (no split)
+arm = importer.import_pmx("/path/to/model.pmx", split_by_material=False)
 
 # VMD import — TWO steps: parse first, then apply to armature
 import bl_ext.user_default.blender_mmd.vmd.parser as vmd_parser

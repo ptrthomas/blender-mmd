@@ -37,11 +37,22 @@ class BLENDER_MMD_OT_import_pmx(bpy.types.Operator, ImportHelper):
         default=False,
     )
 
+    split_by_material: BoolProperty(
+        name="Split by Material",
+        description="Split mesh into per-material objects (enables per-object modifiers and shadow control)",
+        default=True,
+    )
+
     def execute(self, context):
         from .importer import import_pmx
 
         try:
-            armature = import_pmx(self.filepath, self.scale, use_toon_sphere=self.use_toon_sphere)
+            armature = import_pmx(
+                self.filepath,
+                self.scale,
+                use_toon_sphere=self.use_toon_sphere,
+                split_by_material=self.split_by_material,
+            )
             self.report({"INFO"}, f"Imported: {armature.name}")
             return {"FINISHED"}
         except Exception as e:

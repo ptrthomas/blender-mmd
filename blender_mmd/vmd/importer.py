@@ -415,29 +415,35 @@ def _apply_morph_keyframes(
     morph_keyframes: list[MorphKeyframe],
     armature_obj: bpy.types.Object,
 ) -> int:
-    """Apply morph keyframes to shape key F-curves on the child mesh.
+    """Apply morph keyframes to shape key F-curves on child meshes.
+
+    Supports both single-mesh and split-by-material layouts. When meshes are
+    split, a single morph action is created from the first mesh and shared
+    across all meshes (F-curve data paths like key_blocks["name"].value match
+    because Blender preserves shape key names during separate).
 
     Returns the number of morph channels applied.
     """
-    # Find the child mesh with shape keys
-    mesh_obj = None
-    for child in armature_obj.children:
-        if child.type == "MESH" and child.data.shape_keys:
-            mesh_obj = child
-            break
-
-    if mesh_obj is None:
+    # Find all child meshes with shape keys
+    mesh_objs = [
+        c for c in armature_obj.children
+        if c.type == "MESH" and c.data.shape_keys
+    ]
+    if not mesh_objs:
         log.warning("VMD: No child mesh with shape keys found on armature")
         return 0
 
-    shape_keys = mesh_obj.data.shape_keys
+    # Use the first mesh's shape keys as reference for building F-curves
+    primary_mesh = mesh_objs[0]
+    shape_keys = primary_mesh.data.shape_keys
 
-    # Load morph name mapping (Japanese → shape key name)
-    morph_map_json = mesh_obj.get("mmd_morph_map")
+    # Load morph name mapping — check armature first (split mesh), then mesh (legacy)
+    morph_map_json = armature_obj.get("mmd_morph_map")
+    if not morph_map_json:
+        morph_map_json = primary_mesh.get("mmd_morph_map")
     if morph_map_json:
         morph_map: dict[str, str] = json.loads(morph_map_json)
     else:
-        # Fallback: try matching morph names directly to shape key names
         morph_map = {}
         log.warning("VMD: No mmd_morph_map found, trying direct name match")
 
@@ -449,7 +455,7 @@ def _apply_morph_keyframes(
     for group in morph_groups.values():
         group.sort(key=lambda kf: kf.frame)
 
-    # Create morph action on the shape key datablock
+    # Create morph action on the primary mesh's shape key datablock
     morph_action = bpy.data.actions.new(f"{armature_obj.name}_VMD_Morphs")
     if shape_keys.animation_data is None:
         shape_keys.animation_data_create()
@@ -462,14 +468,21 @@ def _apply_morph_keyframes(
         # Find the shape key name
         sk_name = morph_map.get(jp_name)
         if sk_name is None:
-            # Try direct match
-            if jp_name in shape_keys.key_blocks:
-                sk_name = jp_name
-            else:
+            # Try direct match on any mesh
+            found = False
+            for obj in mesh_objs:
+                if jp_name in obj.data.shape_keys.key_blocks:
+                    sk_name = jp_name
+                    found = True
+                    break
+            if not found:
                 unmatched.append(jp_name)
                 continue
 
-        if sk_name not in shape_keys.key_blocks:
+        # Check if this shape key exists on at least one mesh
+        if not any(
+            sk_name in obj.data.shape_keys.key_blocks for obj in mesh_objs
+        ):
             unmatched.append(jp_name)
             continue
 
@@ -489,6 +502,13 @@ def _apply_morph_keyframes(
         fc.update()
         applied += 1
 
+    # Share the same action across all other meshes with shape keys
+    for obj in mesh_objs[1:]:
+        sk = obj.data.shape_keys
+        if sk.animation_data is None:
+            sk.animation_data_create()
+        sk.animation_data.action = morph_action
+
     if unmatched:
         log.warning(
             "VMD: %d morph names unmatched: %s",
@@ -497,7 +517,10 @@ def _apply_morph_keyframes(
             + ("..." if len(unmatched) > 10 else ""),
         )
 
-    log.info("VMD morphs: %d/%d channels applied", applied, len(morph_groups))
+    log.info(
+        "VMD morphs: %d/%d channels applied across %d meshes",
+        applied, len(morph_groups), len(mesh_objs),
+    )
     return applied
 
 

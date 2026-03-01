@@ -190,14 +190,36 @@ Dataclasses for: `Header`, `Vertex`, `BoneWeight` (BDEF1/2/4, SDEF), `Material`,
 
 ### Structure
 
+Default (split by material):
+```
+Scene Collection
+  └── "Model Name" (collection)
+        ├── Armature (top-level, named after model)
+        ├── body (mesh, Armature modifier)
+        ├── hair (mesh, Armature modifier)
+        ├── eyes (mesh, Armature modifier)
+        └── ...
+```
+
+Single mesh fallback (`split_by_material=False`):
 ```
 Armature (top-level, named after model)
   └── Mesh (child, with Armature modifier)
 ```
 
-No root empty object. The armature is the top-level object. Model-level metadata (original PMX name, import scale) stored as custom properties on the armature.
+No root empty object. The armature is the top-level object. Model-level metadata (original PMX name, import scale) stored as custom properties on the armature. Split meshes are named after their first material.
 
 This differs from mmd_tools' hierarchy (`Root Empty → Armature → Mesh`) intentionally, so both addons can coexist without object naming conflicts.
+
+### Mesh split by material
+
+After materials are assigned, the single mesh is split into per-material objects using `bpy.ops.mesh.separate(type='MATERIAL')`. This enables:
+- Per-object modifiers (cloth sim on skirt, solidify for outlines)
+- Light linking (per-object in Blender 5.0)
+- Per-object `visible_shadow` (honors PMX `mmd_drop_shadow` flag)
+- Selective outline rendering
+
+Custom split normals are backed up as an `mmd_normal` FLOAT_VECTOR attribute on CORNER domain before splitting (since `mesh.separate()` does not preserve custom normals), then restored on each resulting mesh. The `mmd_morph_map` is moved from the mesh to the armature so VMD import can find it after split. Shape key names are preserved by `mesh.separate()`, so a single VMD morph action can be shared across all split meshes.
 
 ### Mesh construction
 
@@ -506,13 +528,15 @@ Parameters:
 - `filepath`: Path to .pmx file
 - `scale`: Import scale factor (default: 0.08)
 - `use_toon_sphere`: Include toon and sphere texture nodes in materials (default: off)
+- `split_by_material`: Split mesh into per-material objects (default: on)
 
 Behavior:
 1. Parse PMX file (full parse)
 2. Create armature with bones
 3. Create mesh with vertex weights
 4. Set up IK constraints
-5. Log summary of what was imported/skipped
+5. Split mesh by material (back up normals, split, restore, organize into collection)
+6. Log summary of what was imported/skipped
 
 ### Physics operators
 
@@ -689,7 +713,7 @@ Additional transforms done (grant parent, shadow bones). Remaining: VMD camera m
 
 - Edge/outline rendering (solidify + inverted-normals material, per-material control)
 - Material morphs (VMD material keyframes → Blender property drivers)
-- Per-material mesh split (needed for selective outline rendering)
+- Per-material mesh split ✅ (done — default on import, enables per-object modifiers/shadows)
 
 ### Future Roadmap
 
