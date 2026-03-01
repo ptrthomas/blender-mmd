@@ -228,6 +228,16 @@ def clear_physics(armature_obj) -> None:
             del armature_obj[key]
 
 
+def _mute_tracking_constraints(armature_obj, mute: bool = True) -> None:
+    """Mute or unmute mmd_dynamic / mmd_dynamic_bone constraints on pose bones."""
+    if not armature_obj.pose:
+        return
+    for pb in armature_obj.pose.bones:
+        for c in pb.constraints:
+            if c.name in ("mmd_dynamic", "mmd_dynamic_bone"):
+                c.mute = mute
+
+
 def reset_physics(armature_obj) -> int:
     """Reset existing rigid bodies to match current bone pose.
 
@@ -271,6 +281,22 @@ def reset_physics(armature_obj) -> int:
         if idx is not None:
             rb_objects[idx] = obj
 
+    # Mute dynamic tracking constraints before computing bone deltas.
+    # Without this, pose bones are pulled toward displaced rigid bodies
+    # (via COPY_ROTATION/COPY_TRANSFORMS), making the delta non-identity
+    # even when bones should be at rest. This creates a circular dependency
+    # where reset computes positions matching the already-displaced state.
+    _mute_tracking_constraints(armature_obj, mute=True)
+    bpy.context.view_layer.update()
+
+    # Disable rigid body world to prevent cache from overriding positions
+    scene = bpy.context.scene
+    rbw = scene.rigidbody_world
+    rbw_was_enabled = False
+    if rbw:
+        rbw_was_enabled = rbw.enabled
+        rbw.enabled = False
+
     # Reposition dynamic rigid bodies
     count = 0
     for i, rb_data in enumerate(rigid_bodies):
@@ -306,6 +332,10 @@ def reset_physics(armature_obj) -> int:
         obj.location = t
         obj.rotation_euler = r.to_euler(obj.rotation_mode)
         count += 1
+
+    # Flush RB positions to depsgraph — tracking empties are parented to RBs,
+    # so parent matrix_world must be current before we set empty.matrix_world
+    bpy.context.view_layer.update()
 
     # Reposition tracking empties to match bone world positions
     track_col = collection.children.get("Tracking")
@@ -358,11 +388,20 @@ def reset_physics(armature_obj) -> int:
             obj.location = t
             obj.rotation_euler = r.to_euler(obj.rotation_mode)
 
-    # Free rigid body world cache so physics re-simulates
-    scene = bpy.context.scene
-    if scene.rigidbody_world and scene.rigidbody_world.point_cache:
-        # Setting frame forces cache invalidation
-        bpy.context.scene.frame_set(bpy.context.scene.frame_current)
+    # Flush repositioned transforms to depsgraph while physics is still disabled
+    bpy.context.view_layer.update()
+
+    # Re-enable rigid body world with cleared cache
+    if rbw and rbw_was_enabled:
+        rbw.enabled = True
+        if rbw.point_cache:
+            rbw.point_cache.frame_start = scene.frame_start
+            rbw.point_cache.frame_end = scene.frame_end
+    _mute_tracking_constraints(armature_obj, mute=False)
+
+    # Go to start frame — Blender initializes RB positions from transforms
+    # at frame_start (no simulation step), so bodies stay where we put them.
+    bpy.context.scene.frame_set(scene.frame_start)
 
     log.info("Reset %d dynamic rigid bodies to current pose", count)
     return count
