@@ -476,7 +476,11 @@ def build_physics(armature_obj, model, scale: float, mode: str = "none") -> None
 | `none` (default) | Store rigid body/joint data as custom properties on armature. No Blender physics objects created. Clean scene. | Default import |
 | `rigid_body` | Create Blender rigid bodies, joints, bone coupling. Matches mmd_tools quality. | Standard physics for hair/skirt/accessories |
 
-The MMD4B panel in the N-panel provides Build/Rebuild/Clear buttons. Rebuild after VMD import or pose changes to sync rigid bodies to the current bone pose.
+Additional physics operations (no re-parse of PMX needed):
+
+- `reset_physics(armature_obj)` — Reposition existing dynamic rigid bodies, tracking empties, and joints to match current bone pose. Fast alternative to full rebuild.
+- `remove_chain(armature_obj, chain_index)` — Remove a single physics chain (rigid bodies, joints, tracking empties, bone constraints). Chain data stored as `mmd_physics_chains` JSON on armature during build.
+- `clear_physics(armature_obj)` — Remove all physics objects and metadata. Only removes `mmd_dynamic`/`mmd_dynamic_bone` constraints (not import-time constraints like `mmd_at_dummy`).
 
 ---
 
@@ -514,7 +518,13 @@ Behavior:
 
 ```
 blender_mmd.build_physics              # Build physics (mode: none/rigid_body)
+blender_mmd.reset_physics              # Reposition rigid bodies to current bone pose
 blender_mmd.clear_physics              # Remove all physics objects and metadata
+blender_mmd.select_chain               # Select rigid bodies for a chain (chain_index)
+blender_mmd.remove_chain               # Remove a single physics chain (chain_index)
+blender_mmd.clear_animation            # Clear bone/morph keyframes, reset to rest pose
+blender_mmd.toggle_ik                  # Toggle IK for one chain (target_bone)
+blender_mmd.toggle_all_ik              # Enable/disable all IK (enable: bool)
 ```
 
 ### VMD binary format
@@ -635,18 +645,24 @@ Rigid body creation, GENERIC_SPRING joints with spring values, collision layers,
 
 **Layout** (parent panel shows model name, sub-panels below):
 
-**Physics sub-panel:**
-- **No physics state:** "Build Rigid Body" button (calls `build_physics` with `mode=rigid_body`)
-- **Physics active:** Shows rigid body count, "Rebuild" button (re-parses PMX and rebuilds), "Clear" button
+**Animation sub-panel:**
+- Shows current action name when animation is loaded
+- "Clear Animation" button: removes bone keyframes (armature action) and morph keyframes (shape key action), resets all pose bones to rest position, resets shape key values to 0, returns to frame 1
 
-**IK Toggle sub-panel:**
-- **All On / All Off** buttons at top
-- Per-chain toggle buttons showing current state (checkbox icon, `depress` for visual feedback)
+**Physics sub-panel:**
+- **No physics state:** "Build Rigid Bodies" button (calls `build_physics` with `mode=rigid_body`)
+- **Physics active:** Shows rigid body count, "Reset" button (repositions existing rigid bodies to match current bone pose without rebuild — fast), "Remove" button (deletes all physics objects)
+- **Chain list:** Detected chains shown in a box below controls. Each chain row shows name, group classification (hair/skirt/accessory/other), and body count. Clicking the chain name selects its rigid body objects (unhides physics collection automatically). X button removes that individual chain (rigid bodies, joints, tracking empties, bone constraints) and flushes depsgraph so freed bones snap back to rest pose.
+- Chain data is detected via `chains.py` during physics build and stored as `mmd_physics_chains` JSON on the armature
+
+**IK Toggle sub-panel** (collapsed by default):
+- **All On / All Off** buttons at top (eye icons)
+- Per-chain toggle buttons showing current state (eye icon, `depress` for visual feedback)
 - Toggles IK constraint `influence` between 0.0 and 1.0
 - Also toggles `mmd_ik_limit_override` LIMIT_ROTATION constraints in the chain
 - Chains discovered by scanning pose bones for IK constraints
 
-**Workflow:** Import PMX → optionally import VMD → click "Build Rigid Body" in MMD4B panel → play animation. If you import a VMD after building physics, click "Rebuild" to sync rigid bodies to the new starting pose. Use IK Toggle to disable IK chains for non-standard poses.
+**Workflow:** Import PMX → optionally import VMD → click "Build Rigid Bodies" in MMD4B panel → play animation. Use "Reset" after changing pose/animation to reposition rigid bodies without full rebuild. Use "Clear Animation" to strip all keyframes and reload a different VMD. Use per-chain X buttons to remove physics from specific parts (e.g. remove skirt physics to replace with cloth sim). Use IK Toggle to disable IK chains for non-standard poses.
 
 ### Milestone 5: Materials & Textures ✅
 
