@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 import bpy
-from bpy.props import EnumProperty
+from bpy.props import EnumProperty, FloatProperty
 
 from .helpers import find_mmd_armature
 
@@ -68,8 +68,14 @@ class BLENDER_MMD_PT_physics(bpy.types.Panel):
                         if obj.get("mmd_joint_index") is None and obj.rigid_body_constraint:
                             ncc_count += 1
 
-            quality = armature_obj.get("collision_quality", "high")
-            quality_label = "High" if quality == "high" else "Draft"
+            ncc_mode = armature_obj.get("mmd_ncc_mode", "proximity")
+            proximity = armature_obj.get("mmd_ncc_proximity", 1.5)
+            if ncc_mode == "draft":
+                quality_label = "Draft"
+            elif ncc_mode == "all":
+                quality_label = "All"
+            else:
+                quality_label = f"{proximity:.1f}"
             layout.label(
                 text=f"Active: {rb_count} bodies ({quality_label}, {ncc_count} NCCs)",
                 icon="PHYSICS",
@@ -134,9 +140,6 @@ class BLENDER_MMD_PT_physics(bpy.types.Panel):
                 physics_disabled = set(json.loads(
                     armature_obj.get("mmd_chain_physics_disabled", "[]")
                 ))
-                self_collision_disabled = set(json.loads(
-                    armature_obj.get("mmd_chain_self_collision_disabled", "[]")
-                ))
 
                 box = layout.box()
                 for i, chain in enumerate(chains):
@@ -174,16 +177,6 @@ class BLENDER_MMD_PT_physics(bpy.types.Panel):
                     )
                     op.chain_index = i
 
-                    # Self-collision toggle
-                    self_col_enabled = chain_name not in self_collision_disabled
-                    op = row.operator(
-                        "blender_mmd.toggle_chain_self_collision",
-                        text="",
-                        icon="LINKED" if self_col_enabled else "UNLINKED",
-                        depress=self_col_enabled,
-                    )
-                    op.chain_index = i
-
                     # Remove
                     op = row.operator(
                         "blender_mmd.remove_chain",
@@ -194,14 +187,18 @@ class BLENDER_MMD_PT_physics(bpy.types.Panel):
         else:
             layout.label(text="No physics", icon="INFO")
             row = layout.row(align=True)
-            row.prop(context.scene, "mmd_collision_quality", text="Quality")
-            op = row.operator(
+            row.prop(context.scene, "mmd_ncc_mode", text="NCC")
+            sub = row.row(align=True)
+            sub.enabled = context.scene.mmd_ncc_mode == "proximity"
+            sub.prop(context.scene, "mmd_ncc_proximity", text="Proximity")
+            op = layout.operator(
                 "blender_mmd.build_physics",
                 text="Build Rigid Bodies",
                 icon="PHYSICS",
             )
             op.mode = "rigid_body"
-            op.collision_quality = context.scene.mmd_collision_quality
+            op.ncc_mode = context.scene.mmd_ncc_mode
+            op.ncc_proximity = context.scene.mmd_ncc_proximity
 
 
 class BLENDER_MMD_PT_ik_toggle(bpy.types.Panel):
@@ -312,18 +309,30 @@ _classes = (
 def register():
     for cls in _classes:
         bpy.utils.register_class(cls)
-    bpy.types.Scene.mmd_collision_quality = EnumProperty(
-        name="Collision Quality",
+    bpy.types.Scene.mmd_ncc_mode = EnumProperty(
+        name="NCC Mode",
+        description="Non-collision constraint mode",
         items=[
-            ("high", "High", "Full collision detection. Best for final baking"),
-            ("draft", "Draft", "No collisions. Fastest preview"),
+            ("draft", "Draft", "No NCCs. Fast preview, bodies pass through each other"),
+            ("proximity", "Proximity", "Distance-filtered NCCs. Faster builds, may miss distant collisions"),
+            ("all", "All", "Every excluded pair gets an NCC. Most correct, most objects"),
         ],
-        default="high",
+        default="all",
+    )
+    bpy.types.Scene.mmd_ncc_proximity = FloatProperty(
+        name="NCC Proximity",
+        description="Distance factor for NCC filtering. Higher = wider radius = more NCCs",
+        default=1.5,
+        min=1.0,
+        max=10.0,
+        step=10,
     )
 
 
 def unregister():
-    if hasattr(bpy.types.Scene, "mmd_collision_quality"):
-        del bpy.types.Scene.mmd_collision_quality
+    if hasattr(bpy.types.Scene, "mmd_ncc_proximity"):
+        del bpy.types.Scene.mmd_ncc_proximity
+    if hasattr(bpy.types.Scene, "mmd_ncc_mode"):
+        del bpy.types.Scene.mmd_ncc_mode
     for cls in reversed(_classes):
         bpy.utils.unregister_class(cls)

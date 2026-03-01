@@ -28,17 +28,18 @@ _SHAPE_MAP = {
 
 def build_physics(
     armature_obj, model, scale: float, mode: str = "none",
-    collision_quality: str = "high",
+    ncc_mode: str = "all", ncc_proximity: float = 1.5,
 ) -> None:
     """Build physics for an MMD model.
 
     Args:
         mode: "none" (metadata only), "rigid_body" (Blender RB), or "cloth" (detect chains).
-        collision_quality: "high" (full NCC empties) or "draft" (no collisions, fast preview).
+        ncc_mode: "draft" (no NCCs), "proximity" (distance-filtered), "all" (every pair).
+        ncc_proximity: Distance factor for proximity filtering (only used when ncc_mode="proximity").
     """
     log.info(
-        "Building physics (mode=%s, quality=%s): %d rigid bodies, %d joints",
-        mode, collision_quality, len(model.rigid_bodies), len(model.joints),
+        "Building physics (mode=%s, ncc=%s, proximity=%.1f): %d rigid bodies, %d joints",
+        mode, ncc_mode, ncc_proximity, len(model.rigid_bodies), len(model.joints),
     )
 
     # Clean up any existing physics first
@@ -47,7 +48,8 @@ def build_physics(
     # Always store metadata — available for all modes
     armature_obj["mmd_physics_data"] = serialize_physics_data(model)
     armature_obj["physics_mode"] = mode
-    armature_obj["collision_quality"] = collision_quality
+    armature_obj["mmd_ncc_mode"] = ncc_mode
+    armature_obj["mmd_ncc_proximity"] = ncc_proximity
 
     if mode == "none":
         log.info("Physics mode 'none': metadata stored, no Blender objects created")
@@ -63,7 +65,7 @@ def build_physics(
         return
 
     if mode == "rigid_body":
-        _build_rigid_body_physics(armature_obj, model, scale, collision_quality)
+        _build_rigid_body_physics(armature_obj, model, scale, ncc_mode, ncc_proximity)
         return
 
     raise ValueError(f"Unknown physics mode: {mode!r}")
@@ -83,7 +85,8 @@ def _chain_to_dict(chain) -> dict:
 
 
 def _build_rigid_body_physics(
-    armature_obj, model, scale: float, collision_quality: str = "high",
+    armature_obj, model, scale: float,
+    ncc_mode: str = "all", ncc_proximity: float = 1.5,
 ) -> None:
     """Create rigid bodies, joints, bone coupling, and configure physics world.
 
@@ -137,32 +140,33 @@ def _build_rigid_body_physics(
         # Build rigid_index → chain_name lookup
         rigid_to_chain = _build_rigid_to_chain_map(chain_dicts)
 
+        is_draft = ncc_mode == "draft"
         rigid_objects = _create_rigid_bodies(
             model, armature_obj, scale, rb_col,
-            collision_quality=collision_quality,
+            draft=is_draft,
             collision_disabled_chains=collision_disabled,
             rigid_to_chain=rigid_to_chain,
         )
         joint_objects = _create_joints(model, armature_obj, rigid_objects, bone_names, scale, joint_col)
 
-        if collision_quality == "high":
-            self_collision_disabled = set(json.loads(
-                armature_obj.get("mmd_chain_self_collision_disabled", "[]")
-            ))
-            _create_non_collision_constraints(
-                model, rigid_objects, joint_objects, joint_col,
-                chain_dicts=chain_dicts,
-                collision_disabled_chains=collision_disabled,
-                rigid_to_chain=rigid_to_chain,
-                self_collision_disabled_chains=self_collision_disabled,
-            )
-        else:
+        if ncc_mode == "draft":
             # Draft: skip NCC empties entirely. Set disable_collisions on joints.
             for j_obj in joint_objects:
                 rbc = j_obj.rigid_body_constraint
                 if rbc:
                     rbc.disable_collisions = True
-            log.info("Draft quality: skipped NCC empties, %d joints set disable_collisions", len(joint_objects))
+            log.info("Draft mode: skipped NCC empties, %d joints set disable_collisions", len(joint_objects))
+        else:
+            # "proximity" or "all" — compute proximity value for _compute_ncc_pairs
+            effective_proximity = ncc_proximity if ncc_mode == "proximity" else 0.0
+            _create_non_collision_constraints(
+                model, rigid_objects, joint_objects, joint_col,
+                chain_dicts=chain_dicts,
+                collision_disabled_chains=collision_disabled,
+                rigid_to_chain=rigid_to_chain,
+                ncc_proximity=effective_proximity,
+                scale=scale,
+            )
 
         # --- Phase 2: POSITION (needs depsgraph for matrix_world) ---
 
@@ -204,8 +208,8 @@ def _build_rigid_body_physics(
     if physics_disabled:
         _apply_chain_physics_disabled(armature_obj, chain_dicts, physics_disabled, model)
 
-    log.info("Physics build complete: %d rigid bodies, %d joints, %d chains (quality=%s)",
-             len(rigid_objects), len(model.joints), len(chains), collision_quality)
+    log.info("Physics build complete: %d rigid bodies, %d joints, %d chains (ncc=%s, proximity=%.1f)",
+             len(rigid_objects), len(model.joints), len(chains), ncc_mode, ncc_proximity)
 
 
 def _build_rigid_to_chain_map(chain_dicts: list[dict]) -> dict[int, str]:
@@ -302,13 +306,17 @@ def clear_physics(armature_obj) -> None:
         if "physics_collection" in armature_obj:
             del armature_obj["physics_collection"]
 
-    # Clean metadata keys (preserve user settings: disabled chains, quality)
+    # Clean metadata keys (preserve user settings: disabled chains, NCC mode/proximity)
     for key in ("mmd_physics_data", "physics_mode", "mmd_physics_chains"):
         if key in armature_obj:
             del armature_obj[key]
     # Note: mmd_chain_collision_disabled, mmd_chain_physics_disabled,
-    # mmd_chain_self_collision_disabled, and collision_quality are
-    # intentionally preserved across clear/rebuild so user settings survive.
+    # mmd_ncc_mode, and mmd_ncc_proximity are intentionally preserved
+    # across clear/rebuild so user settings survive.
+    # Legacy keys cleaned up:
+    for key in ("collision_quality", "mmd_chain_self_collision_disabled", "mmd_ncc_draft"):
+        if key in armature_obj:
+            del armature_obj[key]
 
 
 def _mute_tracking_constraints(armature_obj, mute: bool = True) -> None:
@@ -636,19 +644,28 @@ def rebuild_ncc(armature_obj) -> tuple[int, int]:
 
     # Read settings from armature
     collision_disabled = set(json.loads(armature_obj.get("mmd_chain_collision_disabled", "[]")))
-    self_collision_disabled = set(json.loads(
-        armature_obj.get("mmd_chain_self_collision_disabled", "[]")
-    ))
+    ncc_mode = armature_obj.get("mmd_ncc_mode", "all")
+    ncc_proximity = armature_obj.get("mmd_ncc_proximity", 1.5)
+    scale = armature_obj.get("import_scale", 0.08)
     chains_json = armature_obj.get("mmd_physics_chains")
     chain_dicts = json.loads(chains_json) if chains_json else []
     rigid_to_chain = _build_rigid_to_chain_map(chain_dicts)
+
+    # Determine effective proximity for _compute_ncc_pairs
+    if ncc_mode == "draft":
+        effective_proximity = -1.0  # sentinel: skip all pairs
+    elif ncc_mode == "all":
+        effective_proximity = 0.0  # no filter
+    else:
+        effective_proximity = ncc_proximity  # proximity filter
 
     # Compute NCC pair table from serialized data (pure Python, fast)
     pair_table = _compute_ncc_pairs(
         rb_data_list, joints_data, rigid_objects,
         collision_disabled_chains=collision_disabled,
         rigid_to_chain=rigid_to_chain,
-        self_collision_disabled_chains=self_collision_disabled,
+        ncc_proximity=effective_proximity,
+        scale=scale,
     )
     new_count = len(pair_table)
     print(f"NCC rebuild: {old_count} existing, {new_count} needed")
@@ -704,7 +721,8 @@ def _compute_ncc_pairs(
     rb_data_list: list[dict], joints_data: list[dict], rigid_objects: list,
     collision_disabled_chains: set[str] | None = None,
     rigid_to_chain: dict[int, str] | None = None,
-    self_collision_disabled_chains: set[str] | None = None,
+    ncc_proximity: float = 0.0,
+    scale: float = 1.0,
 ) -> list[tuple]:
     """Compute non-collision pair table from serialized physics data.
 
@@ -712,13 +730,27 @@ def _compute_ncc_pairs(
     Used by both initial build (via _create_non_collision_constraints) and
     rebuild_ncc to avoid re-parsing PMX.
 
+    Args:
+        ncc_proximity: Distance factor for proximity filtering. 0 = all pairs
+            (no filter). > 0 = only pairs within proximity * avg_bounding_size.
+            < 0 = skip all pairs (draft mode sentinel).
+        scale: Import scale factor. Bounding ranges (PMX units) are multiplied
+            by this to match Blender-space positions.
+
     Returns list of (obj_a, obj_b) tuples for NCC empty creation.
     """
+    if ncc_proximity < 0:
+        return []  # Draft mode: no NCCs
+
     collision_disabled_chains = collision_disabled_chains or set()
     rigid_to_chain = rigid_to_chain or {}
-    self_collision_disabled_chains = self_collision_disabled_chains or set()
 
     n_bodies = len(rigid_objects)
+
+    # Precompute bounding ranges for proximity filtering (scaled to Blender units)
+    bounding_ranges: list[float] = []
+    if ncc_proximity > 0:
+        bounding_ranges = [_rigid_bounding_range(rb) * scale for rb in rb_data_list]
 
     # Group rigid body indices by collision_group_number
     group_map: dict[int, list[int]] = {}
@@ -759,16 +791,46 @@ def _compute_ncc_pairs(
                 if chain_b and chain_b in collision_disabled_chains:
                     continue
 
-                # Skip intra-chain pairs when self-collision is disabled
-                if chain_a and chain_a == chain_b and chain_a in self_collision_disabled_chains:
-                    continue
-
                 obj_a = rigid_objects[i]
                 obj_b = rigid_objects[j]
-                if obj_a is not None and obj_b is not None:
-                    pair_table.append((obj_a, obj_b))
+                if obj_a is None or obj_b is None:
+                    continue
+
+                # Proximity filter: skip pairs that are too far apart
+                if ncc_proximity > 0:
+                    pos_a = obj_a.location if hasattr(obj_a, 'location') else None
+                    pos_b = obj_b.location if hasattr(obj_b, 'location') else None
+                    if pos_a is not None and pos_b is not None:
+                        dx = pos_a[0] - pos_b[0]
+                        dy = pos_a[1] - pos_b[1]
+                        dz = pos_a[2] - pos_b[2]
+                        distance = (dx*dx + dy*dy + dz*dz) ** 0.5
+                        threshold = ncc_proximity * (bounding_ranges[i] + bounding_ranges[j]) * 0.5
+                        if distance >= threshold:
+                            continue
+
+                pair_table.append((obj_a, obj_b))
 
     return pair_table
+
+
+def _rigid_bounding_range(rb_data: dict) -> float:
+    """Bounding box diagonal of a rigid body shape.
+
+    Matches mmd_tools' __getRigidRange — returns the diagonal length of the
+    shape's axis-aligned bounding box. Used for proximity-based NCC filtering.
+    """
+    sx, sy, sz = rb_data.get("size", (0.01, 0.01, 0.01))
+    shape = rb_data.get("shape", 0)
+    if shape == 0:  # SPHERE
+        d = sx * 2
+        return (d*d + d*d + d*d) ** 0.5  # sqrt(3) * diameter
+    elif shape == 1:  # BOX
+        return ((sx*2)**2 + (sy*2)**2 + (sz*2)**2) ** 0.5
+    elif shape == 2:  # CAPSULE
+        r, h = sx, sy
+        return ((r*2)**2 + (r*2)**2 + (h + r*2)**2) ** 0.5
+    return 0.01
 
 
 def toggle_chain_collisions(armature_obj, chain_index: int, enable: bool) -> str:
@@ -909,40 +971,6 @@ def toggle_chain_physics(armature_obj, chain_index: int, enable: bool) -> str:
     return chain_name
 
 
-def toggle_chain_self_collision(armature_obj, chain_index: int, enable: bool) -> str:
-    """Toggle self-collision for a physics chain.
-
-    Self-collision ON (default): intra-chain NCC empties exist, bodies avoid
-    each other within the chain.
-    Self-collision OFF: intra-chain NCC empties are skipped, bodies can clip
-    through each other. Safe for linear chains (hair, ties); fan chains
-    (skirt) should keep self-collision on.
-
-    Does NOT auto-rebuild NCCs — caller is responsible for calling rebuild_ncc().
-
-    Returns the chain name.
-    """
-    chains_json = armature_obj.get("mmd_physics_chains")
-    if not chains_json:
-        raise ValueError("No chain data stored on armature")
-    chains = json.loads(chains_json)
-    if chain_index < 0 or chain_index >= len(chains):
-        raise ValueError(f"Chain index {chain_index} out of range")
-
-    chain_name = chains[chain_index]["name"]
-    disabled = set(json.loads(armature_obj.get("mmd_chain_self_collision_disabled", "[]")))
-
-    if enable:
-        disabled.discard(chain_name)
-    else:
-        disabled.add(chain_name)
-
-    armature_obj["mmd_chain_self_collision_disabled"] = json.dumps(sorted(disabled))
-    state = "enabled" if enable else "disabled"
-    log.info("Chain '%s' self-collision %s", chain_name, state)
-    return chain_name
-
-
 def get_ncc_count(armature_obj) -> int:
     """Count non-collision constraint empties in the Joints collection."""
     import bpy
@@ -1047,7 +1075,7 @@ def _build_bone_name_map(armature_obj) -> dict[int, str]:
 
 def _create_rigid_bodies(
     model, armature_obj, scale: float, collection,
-    collision_quality: str = "high",
+    draft: bool = False,
     collision_disabled_chains: set[str] | None = None,
     rigid_to_chain: dict[int, str] | None = None,
 ) -> list:
@@ -1096,10 +1124,10 @@ def _create_rigid_bodies(
         rb.angular_damping = rigid.angular_damping
         rb.kinematic = (rigid.mode == RigidMode.STATIC)
 
-        # Collision collections: draft = no collisions, high = shared layer + own group
+        # Collision collections: draft = no collisions, normal = shared layer + own group
         # Also disable collisions for bodies in collision-disabled chains
         chain_name = rigid_to_chain.get(i)
-        if collision_quality == "draft" or (chain_name and chain_name in collision_disabled_chains):
+        if draft or (chain_name and chain_name in collision_disabled_chains):
             rb.collision_collections = [False] * 20
         else:
             rb.collision_collections = _build_collision_collections(rigid)
@@ -1214,16 +1242,16 @@ def _build_capsule_mesh(bm, radius: float, height: float, segments: int = 8, rin
 
 
 def build_collision_collections(
-    rigid: RigidBody, collision_quality: str = "high",
+    rigid: RigidBody, draft: bool = False,
 ) -> list[bool]:
     """Convert PMX collision group + mask → Blender 20-bool array.
 
     Public wrapper for testing.
 
     Args:
-        collision_quality: "high" (shared layer 0 + own group) or "draft" (all False).
+        draft: If True, returns all False (no collisions).
     """
-    if collision_quality == "draft":
+    if draft:
         return [False] * 20
     return _build_collision_collections(rigid)
 
@@ -1453,13 +1481,14 @@ def _create_non_collision_constraints(
     chain_dicts: list[dict] | None = None,
     collision_disabled_chains: set[str] | None = None,
     rigid_to_chain: dict[int, str] | None = None,
-    self_collision_disabled_chains: set[str] | None = None,
+    ncc_proximity: float = 0.0,
+    scale: float = 0.08,
 ) -> None:
     """Apply non-collision settings based on PMX collision_group_mask.
 
     All joints get disable_collisions=True (adjacent bodies should never
-    collide). Non-joint excluded pairs get NCC empties. Collision-disabled
-    chains and self-collision-disabled chains skip NCC empties.
+    collide). Non-joint excluded pairs get NCC empties, filtered by proximity
+    when ncc_proximity > 0.
 
     Delegates pair computation to _compute_ncc_pairs (shared with rebuild_ncc).
     """
@@ -1478,6 +1507,8 @@ def _create_non_collision_constraints(
         {
             "collision_group_number": rb.collision_group_number,
             "collision_group_mask": rb.collision_group_mask,
+            "size": list(rb.size),
+            "shape": rb.shape.value,
         }
         for rb in model.rigid_bodies
     ]
@@ -1490,10 +1521,11 @@ def _create_non_collision_constraints(
         rb_data_list, joints_data, rigid_objects,
         collision_disabled_chains=collision_disabled_chains,
         rigid_to_chain=rigid_to_chain,
-        self_collision_disabled_chains=self_collision_disabled_chains,
+        ncc_proximity=ncc_proximity,
+        scale=scale,
     )
 
-    # Create NCC empties for all non-joint excluded pairs (no proximity filter)
+    # Create NCC empties for filtered excluded pairs
     if pair_table:
         _create_non_collision_empties(bpy, pair_table, collection)
 

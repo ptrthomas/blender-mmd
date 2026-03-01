@@ -14,9 +14,9 @@ from blender_mmd.physics import (
     deserialize_physics_data,
     is_locked_dof,
     serialize_physics_data,
-    toggle_chain_self_collision,
     _build_rigid_to_chain_map,
     _compute_ncc_pairs,
+    _rigid_bounding_range,
 )
 
 SAMPLES_DIR = Path(__file__).parent / "samples"
@@ -214,36 +214,42 @@ class TestMetadataStorage:
 
 
 # ---------------------------------------------------------------------------
-# Collision quality: draft mode
+# Draft mode
 # ---------------------------------------------------------------------------
 
-class TestCollisionQualityDraft:
+class TestDraftMode:
     def test_draft_all_false(self):
-        """Draft quality: all collision layers should be False."""
+        """Draft mode: all collision layers should be False."""
         rigid = _make_rigid(group=3, mask=0xFFFF)
-        cols = build_collision_collections(rigid, collision_quality="draft")
+        cols = build_collision_collections(rigid, draft=True)
         assert all(v is False for v in cols)
         assert len(cols) == 20
 
     def test_draft_group_0(self):
-        """Draft quality with group 0: still all False."""
+        """Draft mode with group 0: still all False."""
         rigid = _make_rigid(group=0, mask=0xFFFF)
-        cols = build_collision_collections(rigid, collision_quality="draft")
+        cols = build_collision_collections(rigid, draft=True)
         assert sum(cols) == 0
 
-    def test_high_matches_default(self):
-        """High quality matches default behavior (no quality param)."""
+    def test_non_draft_matches_default(self):
+        """Non-draft matches default behavior (no draft param)."""
         rigid = _make_rigid(group=5, mask=0x0000)
         cols_default = build_collision_collections(rigid)
-        cols_high = build_collision_collections(rigid, collision_quality="high")
-        assert cols_default == cols_high
+        cols_non_draft = build_collision_collections(rigid, draft=False)
+        assert cols_default == cols_non_draft
 
 
 # ---------------------------------------------------------------------------
-# Self-collision logic
+# Proximity filter
 # ---------------------------------------------------------------------------
 
-class TestSelfCollision:
+class _FakeObj:
+    """Minimal mock for rigid body objects used in _compute_ncc_pairs."""
+    def __init__(self, x: float = 0, y: float = 0, z: float = 0):
+        self.location = (x, y, z)
+
+
+class TestProximityFilter:
     def test_rigid_to_chain_map(self):
         """_build_rigid_to_chain_map correctly maps rigid indices to chain names."""
         chains = [
@@ -256,89 +262,125 @@ class TestSelfCollision:
         assert mapping[20] == "SkirtF"
         assert 0 not in mapping
 
-    def test_self_collision_disabled_skips_intra_chain(self):
-        """When self-collision is disabled for a chain, intra-chain NCC pairs are skipped."""
-        # Two bodies in same group, same chain — would normally need NCC
+    def test_proximity_zero_includes_all(self):
+        """proximity=0 includes all excluded pairs (no distance filter)."""
         rb_data = [
-            {"collision_group_number": 1, "collision_group_mask": 0xFFFD},  # excludes group 1
-            {"collision_group_number": 1, "collision_group_mask": 0xFFFD},  # excludes group 1
+            {"collision_group_number": 1, "collision_group_mask": 0xFFFD,
+             "size": [1, 1, 1], "shape": 0},
+            {"collision_group_number": 1, "collision_group_mask": 0xFFFD,
+             "size": [1, 1, 1], "shape": 0},
         ]
         joints_data = []
-        obj_a, obj_b = object(), object()
+        obj_a = _FakeObj(0, 0, 0)
+        obj_b = _FakeObj(100, 100, 100)  # very far apart
         rigid_objects = [obj_a, obj_b]
-        rigid_to_chain = {0: "HairA", 1: "HairA"}
-
-        # With self-collision enabled (default): intra-chain pair present
-        pairs_on = _compute_ncc_pairs(
-            rb_data, joints_data, rigid_objects,
-            rigid_to_chain=rigid_to_chain,
-        )
-        assert len(pairs_on) == 1
-
-        # With self-collision disabled: intra-chain pair skipped
-        pairs_off = _compute_ncc_pairs(
-            rb_data, joints_data, rigid_objects,
-            rigid_to_chain=rigid_to_chain,
-            self_collision_disabled_chains={"HairA"},
-        )
-        assert len(pairs_off) == 0
-
-    def test_self_collision_enabled_default(self):
-        """By default (no self_collision_disabled_chains), intra-chain pairs are present."""
-        rb_data = [
-            {"collision_group_number": 2, "collision_group_mask": 0xFFFB},  # excludes group 2
-            {"collision_group_number": 2, "collision_group_mask": 0xFFFB},  # excludes group 2
-        ]
-        joints_data = []
-        obj_a, obj_b = object(), object()
-        rigid_objects = [obj_a, obj_b]
-        rigid_to_chain = {0: "HairB", 1: "HairB"}
 
         pairs = _compute_ncc_pairs(
-            rb_data, joints_data, rigid_objects,
-            rigid_to_chain=rigid_to_chain,
+            rb_data, joints_data, rigid_objects, ncc_proximity=0.0,
         )
         assert len(pairs) == 1
 
-    def test_toggle_updates_property(self):
-        """toggle_chain_self_collision correctly toggles the armature property."""
-
-        class FakeArmature(dict):
-            pass
-
-        arm = FakeArmature()
-        arm["mmd_physics_chains"] = json.dumps([
-            {"name": "HairA", "rigid_indices": [0, 1, 2]},
-            {"name": "HairB", "rigid_indices": [3, 4]},
-        ])
-
-        # Disable self-collision for chain 0
-        name = toggle_chain_self_collision(arm, 0, False)
-        assert name == "HairA"
-        disabled = json.loads(arm["mmd_chain_self_collision_disabled"])
-        assert "HairA" in disabled
-
-        # Re-enable
-        toggle_chain_self_collision(arm, 0, True)
-        disabled = json.loads(arm["mmd_chain_self_collision_disabled"])
-        assert "HairA" not in disabled
-
-    def test_cross_chain_pairs_unaffected(self):
-        """Self-collision toggle only affects intra-chain pairs, not cross-chain."""
+    def test_proximity_filters_distant_pairs(self):
+        """Pairs beyond proximity radius are excluded."""
         rb_data = [
-            {"collision_group_number": 1, "collision_group_mask": 0xFFFD},  # excludes group 1
-            {"collision_group_number": 1, "collision_group_mask": 0xFFFD},  # excludes group 1
+            {"collision_group_number": 1, "collision_group_mask": 0xFFFD,
+             "size": [0.1, 0.1, 0.1], "shape": 0},  # small bodies
+            {"collision_group_number": 1, "collision_group_mask": 0xFFFD,
+             "size": [0.1, 0.1, 0.1], "shape": 0},
         ]
         joints_data = []
-        obj_a, obj_b = object(), object()
+        obj_a = _FakeObj(0, 0, 0)
+        obj_b = _FakeObj(100, 0, 0)  # very far apart
         rigid_objects = [obj_a, obj_b]
-        # Different chains
+
+        pairs = _compute_ncc_pairs(
+            rb_data, joints_data, rigid_objects, ncc_proximity=1.5,
+        )
+        assert len(pairs) == 0
+
+    def test_proximity_keeps_close_pairs(self):
+        """Pairs within proximity radius are kept."""
+        rb_data = [
+            {"collision_group_number": 1, "collision_group_mask": 0xFFFD,
+             "size": [1.0, 1.0, 1.0], "shape": 0},
+            {"collision_group_number": 1, "collision_group_mask": 0xFFFD,
+             "size": [1.0, 1.0, 1.0], "shape": 0},
+        ]
+        joints_data = []
+        obj_a = _FakeObj(0, 0, 0)
+        obj_b = _FakeObj(0.5, 0, 0)  # very close
+        rigid_objects = [obj_a, obj_b]
+
+        pairs = _compute_ncc_pairs(
+            rb_data, joints_data, rigid_objects, ncc_proximity=1.5,
+        )
+        assert len(pairs) == 1
+
+    def test_negative_proximity_returns_empty(self):
+        """Negative proximity (draft sentinel) returns empty list."""
+        rb_data = [
+            {"collision_group_number": 1, "collision_group_mask": 0xFFFD,
+             "size": [1, 1, 1], "shape": 0},
+            {"collision_group_number": 1, "collision_group_mask": 0xFFFD,
+             "size": [1, 1, 1], "shape": 0},
+        ]
+        joints_data = []
+        rigid_objects = [_FakeObj(), _FakeObj()]
+
+        pairs = _compute_ncc_pairs(
+            rb_data, joints_data, rigid_objects, ncc_proximity=-1.0,
+        )
+        assert len(pairs) == 0
+
+    def test_collision_disabled_chains_still_skipped(self):
+        """Bodies in collision-disabled chains are still excluded."""
+        rb_data = [
+            {"collision_group_number": 1, "collision_group_mask": 0xFFFD,
+             "size": [1, 1, 1], "shape": 0},
+            {"collision_group_number": 1, "collision_group_mask": 0xFFFD,
+             "size": [1, 1, 1], "shape": 0},
+        ]
+        joints_data = []
+        rigid_objects = [_FakeObj(), _FakeObj(0.1, 0, 0)]
         rigid_to_chain = {0: "HairA", 1: "HairB"}
 
-        # Self-collision disabled for HairA — cross-chain pair still present
         pairs = _compute_ncc_pairs(
             rb_data, joints_data, rigid_objects,
             rigid_to_chain=rigid_to_chain,
-            self_collision_disabled_chains={"HairA"},
+            collision_disabled_chains={"HairA"},
+            ncc_proximity=0.0,
         )
-        assert len(pairs) == 1
+        assert len(pairs) == 0
+
+
+# ---------------------------------------------------------------------------
+# Bounding range helper
+# ---------------------------------------------------------------------------
+
+class TestRigidBoundingRange:
+    def test_sphere(self):
+        """Sphere bounding range = sqrt(3) * diameter."""
+        rb = {"size": [1.0, 0, 0], "shape": 0}
+        r = _rigid_bounding_range(rb)
+        expected = (4 + 4 + 4) ** 0.5  # sqrt(3) * 2
+        assert abs(r - expected) < 1e-6
+
+    def test_box(self):
+        """Box bounding range = diagonal of (2*sx, 2*sy, 2*sz)."""
+        rb = {"size": [1.0, 2.0, 3.0], "shape": 1}
+        r = _rigid_bounding_range(rb)
+        expected = (4 + 16 + 36) ** 0.5
+        assert abs(r - expected) < 1e-6
+
+    def test_capsule(self):
+        """Capsule bounding range uses radius and height."""
+        rb = {"size": [0.5, 2.0, 0], "shape": 2}
+        r = _rigid_bounding_range(rb)
+        # (r*2)^2 + (r*2)^2 + (h + r*2)^2 = 1 + 1 + (2+1)^2 = 11
+        expected = 11 ** 0.5
+        assert abs(r - expected) < 1e-6
+
+    def test_unknown_shape(self):
+        """Unknown shape returns small default."""
+        rb = {"size": [1, 1, 1], "shape": 99}
+        assert _rigid_bounding_range(rb) == 0.01
