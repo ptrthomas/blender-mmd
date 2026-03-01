@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 import bpy
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 from bpy_extras.io_utils import ImportHelper
 
 from .helpers import find_mmd_armature
@@ -245,6 +245,175 @@ class BLENDER_MMD_OT_clear_physics(bpy.types.Operator):
             return {"CANCELLED"}
 
 
+class BLENDER_MMD_OT_reset_physics(bpy.types.Operator):
+    """Reset rigid bodies to match current bone pose"""
+
+    bl_idname = "blender_mmd.reset_physics"
+    bl_label = "Reset MMD Physics"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        from .physics import reset_physics
+
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        try:
+            count = reset_physics(armature_obj)
+            self.report({"INFO"}, f"Reset {count} rigid bodies to current pose.")
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("Physics reset failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
+class BLENDER_MMD_OT_select_chain(bpy.types.Operator):
+    """Select rigid body objects for a physics chain"""
+
+    bl_idname = "blender_mmd.select_chain"
+    bl_label = "Select Physics Chain"
+    bl_options = {"REGISTER", "UNDO"}
+
+    chain_index: IntProperty(name="Chain Index", default=-1)
+
+    def execute(self, context):
+        import json
+
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        chains_json = armature_obj.get("mmd_physics_chains")
+        if not chains_json:
+            self.report({"ERROR"}, "No chain data.")
+            return {"CANCELLED"}
+
+        chains = json.loads(chains_json)
+        if self.chain_index < 0 or self.chain_index >= len(chains):
+            self.report({"ERROR"}, "Invalid chain index.")
+            return {"CANCELLED"}
+
+        chain = chains[self.chain_index]
+        rigid_indices = set(chain.get("rigid_indices", []))
+
+        col_name = armature_obj.get("physics_collection")
+        if not col_name:
+            return {"CANCELLED"}
+        collection = bpy.data.collections.get(col_name)
+        if not collection:
+            return {"CANCELLED"}
+
+        # Unhide physics collection so selection is visible
+        vl_col = context.view_layer.layer_collection.children.get(col_name)
+        if vl_col and vl_col.hide_viewport:
+            vl_col.hide_viewport = False
+
+        # Deselect all, then select chain rigid bodies
+        bpy.ops.object.select_all(action="DESELECT")
+        rb_col = collection.children.get("Rigid Bodies")
+        count = 0
+        if rb_col:
+            for obj in rb_col.objects:
+                idx = obj.get("mmd_rigid_index")
+                if idx is not None and idx in rigid_indices:
+                    obj.select_set(True)
+                    count += 1
+                    if count == 1:
+                        context.view_layer.objects.active = obj
+
+        self.report({"INFO"}, f"Selected {count} rigid bodies")
+        return {"FINISHED"}
+
+
+class BLENDER_MMD_OT_remove_chain(bpy.types.Operator):
+    """Remove a single physics chain (rigid bodies, joints, tracking)"""
+
+    bl_idname = "blender_mmd.remove_chain"
+    bl_label = "Remove Physics Chain"
+    bl_options = {"REGISTER", "UNDO"}
+
+    chain_index: IntProperty(name="Chain Index", default=-1)
+
+    def execute(self, context):
+        from .physics import remove_chain
+
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        try:
+            name = remove_chain(armature_obj, self.chain_index)
+            self.report({"INFO"}, f"Removed chain: {name}")
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("Chain removal failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
+class BLENDER_MMD_OT_clear_animation(bpy.types.Operator):
+    """Clear all animation from MMD model (bone keyframes, morph keyframes)"""
+
+    bl_idname = "blender_mmd.clear_animation"
+    bl_label = "Clear MMD Animation"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        cleared = []
+
+        # Clear armature action (bone keyframes, IK toggle keyframes)
+        if armature_obj.animation_data and armature_obj.animation_data.action:
+            action = armature_obj.animation_data.action
+            armature_obj.animation_data.action = None
+            if action.users == 0:
+                bpy.data.actions.remove(action)
+            cleared.append("bone keyframes")
+
+        # Reset all pose bones to rest position
+        for pb in armature_obj.pose.bones:
+            pb.location = (0, 0, 0)
+            pb.rotation_quaternion = (1, 0, 0, 0)
+            pb.rotation_euler = (0, 0, 0)
+            pb.scale = (1, 1, 1)
+
+        # Clear shape key animation on child meshes
+        for child in armature_obj.children:
+            if child.type != "MESH":
+                continue
+            sk = child.data.shape_keys
+            if sk is None:
+                continue
+            if sk.animation_data and sk.animation_data.action:
+                action = sk.animation_data.action
+                sk.animation_data.action = None
+                if action.users == 0:
+                    bpy.data.actions.remove(action)
+                cleared.append("morph keyframes")
+            # Reset shape key values to 0
+            for kb in sk.key_blocks:
+                if kb != sk.reference_key:
+                    kb.value = 0.0
+
+        # Go to frame 1 for clean state
+        bpy.context.scene.frame_set(1)
+
+        if cleared:
+            self.report({"INFO"}, f"Cleared: {', '.join(cleared)}")
+        else:
+            self.report({"INFO"}, "No animation to clear.")
+        return {"FINISHED"}
+
+
 def menu_func_import(self, context):
     self.layout.operator(
         BLENDER_MMD_OT_import_pmx.bl_idname,
@@ -261,6 +430,10 @@ _classes = (
     BLENDER_MMD_OT_import_vmd,
     BLENDER_MMD_OT_build_physics,
     BLENDER_MMD_OT_clear_physics,
+    BLENDER_MMD_OT_reset_physics,
+    BLENDER_MMD_OT_select_chain,
+    BLENDER_MMD_OT_remove_chain,
+    BLENDER_MMD_OT_clear_animation,
     BLENDER_MMD_OT_toggle_ik,
     BLENDER_MMD_OT_toggle_all_ik,
 )

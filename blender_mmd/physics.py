@@ -147,10 +147,17 @@ def _build_rigid_body_physics(armature_obj, model, scale: float) -> None:
         # Post-build: unmute tracking constraints now that empties are parented
         _unmute_tracking_constraints(armature_obj)
 
-        # IK stays muted while physics is active — IK solver fights
-        # COPY_TRANSFORMS on chain bones (e.g. hair IK with chain_count=5
-        # overrides physics positions on hair2-hair6). Matches mmd_tools:
-        # IK muted in preBuild, only unmuted in clean().
+        # Unmute IK constraints now that physics setup is complete.
+        # They were muted to prevent IK solver from fighting depsgraph
+        # flushes during body positioning. Physics COPY_TRANSFORMS/
+        # COPY_ROTATION constraints on dynamic bones will override IK
+        # output at evaluation time, so unmuting is safe.
+        _mute_physics_ik_constraints(armature_obj, model, bone_names, mute=False)
+
+        # Flush depsgraph after unmuting IK so the viewport shows correct
+        # IK-solved poses immediately (without this, legs appear straight
+        # until the next manual frame change).
+        bpy.context.scene.frame_set(bpy.context.scene.frame_current)
 
         # Step 6: Physics world settings
         _setup_physics_world(bpy.context.scene, scale)
@@ -165,8 +172,15 @@ def _build_rigid_body_physics(armature_obj, model, scale: float) -> None:
         # so it should be active.
         _set_rigid_body_world_enabled(bpy.context.scene, True)
 
-    log.info("Physics build complete: %d rigid bodies, %d joints",
-             len(rigid_objects), len(model.joints))
+    # Detect and store chains for per-chain UI (removal, etc.)
+    from .chains import detect_chains
+    chains = detect_chains(model)
+    armature_obj["mmd_physics_chains"] = json.dumps(
+        [_chain_to_dict(c) for c in chains]
+    )
+
+    log.info("Physics build complete: %d rigid bodies, %d joints, %d chains",
+             len(rigid_objects), len(model.joints), len(chains))
 
 
 def clear_physics(armature_obj) -> None:
@@ -179,11 +193,14 @@ def clear_physics(armature_obj) -> None:
         if collection:
             # Remove tracking constraints and unmute IK constraints
             if armature_obj.pose:
+                # Only remove physics-specific constraints, NOT import-time
+                # constraints like mmd_at_dummy (additional transform shadow
+                # bones) or mmd_ik_limit_override.
+                _physics_constraint_names = ("mmd_dynamic", "mmd_dynamic_bone")
                 for pb in armature_obj.pose.bones:
                     to_remove = [
                         c for c in pb.constraints
-                        if c.type in ("COPY_TRANSFORMS", "COPY_ROTATION")
-                        and c.name.startswith("mmd_")
+                        if c.name in _physics_constraint_names
                     ]
                     for c in to_remove:
                         pb.constraints.remove(c)
@@ -209,6 +226,232 @@ def clear_physics(armature_obj) -> None:
     for key in ("mmd_physics_data", "physics_mode", "mmd_physics_chains"):
         if key in armature_obj:
             del armature_obj[key]
+
+
+def reset_physics(armature_obj) -> int:
+    """Reset existing rigid bodies to match current bone pose.
+
+    Fast alternative to rebuild — repositions dynamic bodies and tracking
+    empties without recreating any objects. Frees the RBW cache so physics
+    re-simulates from the new positions.
+
+    Returns the number of bodies repositioned.
+    """
+    import bpy
+    import json
+    from mathutils import Euler, Matrix, Vector
+
+    col_name = armature_obj.get("physics_collection")
+    if not col_name:
+        return 0
+
+    collection = bpy.data.collections.get(col_name)
+    if not collection:
+        return 0
+
+    phys_json = armature_obj.get("mmd_physics_data")
+    if not phys_json:
+        return 0
+
+    data = json.loads(phys_json)
+    rigid_bodies = data["rigid_bodies"]
+    scale = armature_obj.get("import_scale", 0.08)
+
+    # Build lookups
+    bone_names = _build_bone_name_map(armature_obj)
+
+    # Index existing rigid body objects by their PMX index
+    rb_col = collection.children.get("Rigid Bodies")
+    if not rb_col:
+        return 0
+
+    rb_objects: dict[int, object] = {}
+    for obj in rb_col.objects:
+        idx = obj.get("mmd_rigid_index")
+        if idx is not None:
+            rb_objects[idx] = obj
+
+    # Reposition dynamic rigid bodies
+    count = 0
+    for i, rb_data in enumerate(rigid_bodies):
+        mode = rb_data["mode"]  # 0=STATIC, 1=DYNAMIC, 2=DYNAMIC_BONE
+        if mode == 0:
+            continue
+        bone_idx = rb_data["bone_index"]
+        if bone_idx < 0:
+            continue
+        bone_name = bone_names.get(bone_idx)
+        if not bone_name or bone_name not in armature_obj.data.bones:
+            continue
+        obj = rb_objects.get(i)
+        if obj is None:
+            continue
+
+        bone = armature_obj.data.bones[bone_name]
+        pb = armature_obj.pose.bones[bone_name]
+
+        # Compute pose-to-rest delta
+        rest_world = armature_obj.matrix_world @ bone.matrix_local
+        pose_world = armature_obj.matrix_world @ pb.matrix
+        delta = pose_world @ rest_world.inverted()
+
+        # Build rest-pose matrix from stored PMX data
+        rx, ry, rz = rb_data["rotation"]
+        loc = Vector(rb_data["position"]) * scale
+        rot = Euler((-rx, -ry, -rz), "YXZ")
+        local_matrix = Matrix.Translation(loc) @ rot.to_matrix().to_4x4()
+
+        new_matrix = delta @ local_matrix
+        t, r, _s = new_matrix.decompose()
+        obj.location = t
+        obj.rotation_euler = r.to_euler(obj.rotation_mode)
+        count += 1
+
+    # Reposition tracking empties to match bone world positions
+    track_col = collection.children.get("Tracking")
+    if track_col:
+        for empty in track_col.objects:
+            # Track_<bone_name>
+            if not empty.name.startswith("Track_"):
+                continue
+            bone_name = empty.name[6:]  # strip "Track_"
+            pb = armature_obj.pose.bones.get(bone_name)
+            if pb is None:
+                continue
+            bone_world = armature_obj.matrix_world @ pb.matrix
+            # Preserve parent relationship — save and restore matrix_world
+            empty.matrix_world = bone_world
+
+    # Reposition joint empties
+    joint_col = collection.children.get("Joints")
+    if joint_col:
+        joints = data.get("joints", [])
+        for obj in joint_col.objects:
+            j_idx = obj.get("mmd_joint_index")
+            if j_idx is None or j_idx >= len(joints):
+                continue
+            joint = joints[j_idx]
+            src_idx = joint["src_rigid"]
+            if src_idx < 0 or src_idx >= len(rigid_bodies):
+                continue
+            src_rb = rigid_bodies[src_idx]
+            bone_idx = src_rb["bone_index"]
+            if bone_idx < 0:
+                continue
+            bone_name = bone_names.get(bone_idx)
+            if not bone_name or bone_name not in armature_obj.data.bones:
+                continue
+
+            bone = armature_obj.data.bones[bone_name]
+            pb = armature_obj.pose.bones[bone_name]
+            rest_world = armature_obj.matrix_world @ bone.matrix_local
+            pose_world = armature_obj.matrix_world @ pb.matrix
+            delta = pose_world @ rest_world.inverted()
+
+            rx, ry, rz = joint["rotation"]
+            loc = Vector(joint["position"]) * scale
+            rot = Euler((-rx, -ry, -rz), "YXZ")
+            local_matrix = Matrix.Translation(loc) @ rot.to_matrix().to_4x4()
+
+            new_matrix = delta @ local_matrix
+            t, r, _s = new_matrix.decompose()
+            obj.location = t
+            obj.rotation_euler = r.to_euler(obj.rotation_mode)
+
+    # Free rigid body world cache so physics re-simulates
+    scene = bpy.context.scene
+    if scene.rigidbody_world and scene.rigidbody_world.point_cache:
+        # Setting frame forces cache invalidation
+        bpy.context.scene.frame_set(bpy.context.scene.frame_current)
+
+    log.info("Reset %d dynamic rigid bodies to current pose", count)
+    return count
+
+
+def remove_chain(armature_obj, chain_index: int) -> str:
+    """Remove a single physics chain by index.
+
+    Deletes the chain's rigid bodies, joints, tracking empties, and
+    bone constraints. Updates stored chain metadata.
+
+    Returns the chain name for reporting.
+    """
+    import bpy
+    import json
+
+    chains_json = armature_obj.get("mmd_physics_chains")
+    if not chains_json:
+        raise ValueError("No chain data stored on armature")
+
+    chains = json.loads(chains_json)
+    if chain_index < 0 or chain_index >= len(chains):
+        raise ValueError(f"Chain index {chain_index} out of range (0-{len(chains)-1})")
+
+    chain = chains[chain_index]
+    chain_name = chain["name"]
+    bone_names = _build_bone_name_map(armature_obj)
+
+    col_name = armature_obj.get("physics_collection")
+    if not col_name:
+        raise ValueError("No physics collection found")
+    collection = bpy.data.collections.get(col_name)
+    if not collection:
+        raise ValueError(f"Collection '{col_name}' not found")
+
+    rigid_indices = set(chain["rigid_indices"])
+    joint_indices = set(chain["joint_indices"])
+    chain_bone_indices = set(chain.get("bone_indices", []))
+
+    removed = 0
+
+    # Remove rigid body objects
+    rb_col = collection.children.get("Rigid Bodies")
+    if rb_col:
+        for obj in list(rb_col.objects):
+            idx = obj.get("mmd_rigid_index")
+            if idx is not None and idx in rigid_indices:
+                bpy.data.objects.remove(obj, do_unlink=True)
+                removed += 1
+
+    # Remove joint objects
+    joint_col = collection.children.get("Joints")
+    if joint_col:
+        for obj in list(joint_col.objects):
+            idx = obj.get("mmd_joint_index")
+            if idx is not None and idx in joint_indices:
+                bpy.data.objects.remove(obj, do_unlink=True)
+
+    # Remove tracking empties and bone constraints for chain bones
+    track_col = collection.children.get("Tracking")
+    for bone_idx in chain_bone_indices:
+        bname = bone_names.get(bone_idx)
+        if not bname:
+            continue
+
+        # Remove tracking empty
+        if track_col:
+            empty_name = f"Track_{bname}"
+            for obj in list(track_col.objects):
+                if obj.name == empty_name:
+                    bpy.data.objects.remove(obj, do_unlink=True)
+                    break
+
+        # Remove physics constraints on the bone
+        pb = armature_obj.pose.bones.get(bname)
+        if pb:
+            for c in list(pb.constraints):
+                if c.name in ("mmd_dynamic", "mmd_dynamic_bone"):
+                    pb.constraints.remove(c)
+
+    # Update stored chain data (remove this chain)
+    chains.pop(chain_index)
+    armature_obj["mmd_physics_chains"] = json.dumps(chains)
+
+    # Flush depsgraph so freed bones snap back to rest/keyframed pose
+    bpy.context.scene.frame_set(bpy.context.scene.frame_current)
+
+    log.info("Removed chain '%s': %d rigid bodies", chain_name, removed)
+    return chain_name
 
 
 def serialize_physics_data(model) -> str:
