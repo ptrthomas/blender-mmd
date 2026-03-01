@@ -666,7 +666,18 @@ Rigid body creation, GENERIC_SPRING joints with spring values, collision layers,
 
 ### Milestone 5: Materials & Textures ✅
 
-Two shader modes: "MMD Shader Basic" (default, Principled BSDF only) and full "MMD Shader" (toon/sphere pipeline, opt-in via import checkbox). Texture loading with dedup, per-face material assignment, UV V-flip, overlapping face detection, global controls via armature drivers.
+Two shader modes controlled by "Toon & Sphere Textures" checkbox on import:
+
+**Basic mode** (default): Bare Principled BSDF named "MMD Shader" — no node group wrapper. Uses native BSDF inputs directly, giving a hybrid toon/3D look: emission provides MMD-style flat illumination while the BSDF responds to scene lighting, reflections, and environment. PMX specular data mapped to native BSDF properties:
+- `specular` color → `Specular Tint` (highlight color)
+- `specular` luminance → `Specular IOR Level` (highlight strength, scaled to 0–0.5 range)
+- `shininess` → `Roughness` via `1.0 / pow(s, 0.37)` (matches mmd_tools)
+
+This means model authors' specular intent is honored through standard Blender nodes — glossy parts get highlights, matte parts stay flat. Users can override any property per-material by removing the driver and editing directly.
+
+**Full mode** (checkbox on): "MMD Shader" node group with toon/sphere texture mixing pipeline. Specular IOR Level set to 0.0 (toon textures provide specular control instead).
+
+Both modes: Texture loading with dedup, per-face material assignment, UV V-flip, overlapping face detection, global controls via armature drivers (`mmd_emission`, `mmd_toon_fac`, `mmd_sphere_fac`).
 
 **Remaining optimizations:** `foreach_set` for UV assignment, degenerate face cleanup.
 
@@ -747,6 +758,8 @@ API changes from earlier Blender versions that affect our code:
 - New `Geometry Attribute Constraint` for bones reading geometry node attributes
 - Shape Keys UI overhauled (multi-selection, drag-and-drop)
 - **Stale `matrix_world`**: Newly created objects have identity `matrix_world` until depsgraph evaluates. Setting `obj.location`/`obj.rotation_euler` does NOT update it immediately. When you need the world matrix of a just-created object, build it manually from known position/rotation data instead of reading `obj.matrix_world`. This caused a subtle bug where all joint empties were placed at the origin.
+- **Material shadow/blend API**: `shadow_method` removed — shadow casting is object-level only (`obj.visible_shadow`). Per-material shadow flags cannot be enforced; stored as custom properties. `blend_method` deprecated — use `surface_render_method` (`DITHERED` replaces `HASHED`/`OPAQUE`/`CLIP`, `BLENDED` replaces `BLEND`). `show_transparent_back` deprecated — use `use_transparency_overlap`.
+- **Backface culling**: `use_backface_culling_shadow` added — should mirror `use_backface_culling` for single-sided materials (reduces Virtual Shadow Map cost).
 
 ---
 

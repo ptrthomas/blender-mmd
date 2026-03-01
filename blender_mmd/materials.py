@@ -1,8 +1,8 @@
 """Materials & textures — create Blender materials from PMX data.
 
-Uses a single Principled BSDF-based "MMD Shader" node group with optional
-toon and sphere texture inputs. Global controls (emission, toon, sphere)
-are driven from armature custom properties.
+Basic mode uses a bare Principled BSDF (no node group). Full mode uses the
+"MMD Shader" node group with toon/sphere texture mixing. Global controls
+(emission, toon, sphere) are driven from armature custom properties.
 
 Uses ShaderNodeMix (Blender 4.0+) instead of deprecated ShaderNodeMixRGB.
 """
@@ -29,6 +29,17 @@ _BUNDLED_TOONS_DIR = os.path.join(os.path.dirname(__file__), "data", "toons")
 def roughness_from_shininess(s: float) -> float:
     """Convert PMX shininess to Blender roughness. Matches mmd_tools."""
     return 1.0 / pow(max(s, 1), 0.37)
+
+
+def specular_ior_from_color(specular: tuple[float, ...]) -> float:
+    """Derive Specular IOR Level from PMX specular color intensity.
+
+    Uses luminance (Rec. 709) of the specular RGB as the IOR level.
+    PMX specular (0,0,0) → 0.0 (matte), bright specular → up to 0.5.
+    Clamped to Blender's default 0.5 max for dielectrics.
+    """
+    luminance = 0.2126 * specular[0] + 0.7152 * specular[1] + 0.0722 * specular[2]
+    return min(luminance, 1.0) * 0.5
 
 
 def mix_diffuse_ambient(
@@ -196,7 +207,8 @@ def _get_or_create_mmd_shader() -> "bpy.types.ShaderNodeTree":
     """Get or create the MMD Shader node group (Principled BSDF-based).
 
     Inputs: Color, Alpha, Emission, Roughness,
-            Toon Tex, Toon Fac, Sphere Tex, Sphere Fac, Sphere Add
+            Toon Tex, Toon Fac, Sphere Tex, Sphere Fac, Sphere Add,
+            Specular IOR Level, Specular Tint
     Output: Shader
 
     Uses ShaderNodeMix (RGBA mode) instead of deprecated ShaderNodeMixRGB.
@@ -233,7 +245,6 @@ def _get_or_create_mmd_shader() -> "bpy.types.ShaderNodeTree":
     # 5. Principled BSDF
     node_bsdf = nodes.new("ShaderNodeBsdfPrincipled")
     node_bsdf.location = (3 * 210, 0)
-    node_bsdf.inputs["Specular IOR Level"].default_value = 0.0
 
     # --- Internal links ---
 
@@ -264,6 +275,8 @@ def _get_or_create_mmd_shader() -> "bpy.types.ShaderNodeTree":
     _ai("Sphere Tex", "NodeSocketColor", (1, 1, 1, 1))  # wired manually below
     _ai("Sphere Fac", "NodeSocketFloat", 0.0, min_val=0, max_val=1)  # wired manually below
     _ai("Sphere Add", "NodeSocketFloat", 0.0, node_sphere_select.inputs[_MIX_FAC], 0, 1)
+    _ai("Specular IOR Level", "NodeSocketFloat", 0.0, node_bsdf.inputs["Specular IOR Level"], 0, 1)
+    _ai("Specular Tint", "NodeSocketColor", (1, 1, 1, 1), node_bsdf.inputs["Specular Tint"])
 
     # Wire Sphere Tex to both multiply and add paths
     links.new(node_input.outputs["Sphere Tex"], node_sph_mul.inputs[_MIX_B])
@@ -275,51 +288,6 @@ def _get_or_create_mmd_shader() -> "bpy.types.ShaderNodeTree":
 
     return shader
 
-
-def _get_or_create_basic_shader() -> "bpy.types.ShaderNodeTree":
-    """Get or create the MMD Shader Basic node group (no toon/sphere).
-
-    Inputs: Color, Alpha, Emission, Roughness
-    Output: Shader
-
-    A lightweight alternative to the full MMD Shader when toon and sphere
-    textures are not needed.
-    """
-    group_name = "MMD Shader Basic"
-    shader = bpy.data.node_groups.get(group_name)
-    if shader is not None and len(shader.nodes):
-        return shader
-    if shader is None:
-        shader = bpy.data.node_groups.new(name=group_name, type="ShaderNodeTree")
-
-    nodes = shader.nodes
-    links = shader.links
-
-    node_input = nodes.new("NodeGroupInput")
-    node_input.location = (-2 * 210, 0)
-    node_output = nodes.new("NodeGroupOutput")
-    node_output.location = (2 * 210, 0)
-
-    # Principled BSDF
-    node_bsdf = nodes.new("ShaderNodeBsdfPrincipled")
-    node_bsdf.location = (0, 0)
-    node_bsdf.inputs["Specular IOR Level"].default_value = 0.0
-
-    # Output
-    shader.interface.new_socket(name="Shader", in_out="OUTPUT", socket_type="NodeSocketShader")
-    links.new(node_bsdf.outputs["BSDF"], node_output.inputs["Shader"])
-
-    # Input sockets
-    _ai = lambda *a, **kw: _add_group_input(shader, links, node_input, *a, **kw)
-    _ai("Color", "NodeSocketColor", (1, 1, 1, 1), node_bsdf.inputs["Base Color"])
-    _ai("Alpha", "NodeSocketFloat", 1.0, node_bsdf.inputs["Alpha"], 0, 1)
-    _ai("Emission", "NodeSocketFloat", 1.0, node_bsdf.inputs["Emission Strength"], 0, 2)
-    _ai("Roughness", "NodeSocketFloat", 0.8, node_bsdf.inputs["Roughness"], 0, 1)
-
-    # Also wire color to emission color for consistency with MMD Shader
-    links.new(node_input.outputs["Color"], node_bsdf.inputs["Emission Color"])
-
-    return shader
 
 
 def _load_image(filepath: str) -> "bpy.types.Image":
@@ -411,14 +379,16 @@ def setup_drivers(armature_obj: "bpy.types.Object") -> None:
         for mat in child.data.materials:
             if not mat or not mat.use_nodes:
                 continue
-            shader = mat.node_tree.nodes.get("Shader")
+            shader = mat.node_tree.nodes.get("MMD Shader")
             if shader is None:
                 continue
             # Skip if already has drivers
             ad = mat.node_tree.animation_data
             if ad and ad.drivers:
                 continue
-            _add_driver(shader, "Emission", armature_obj, "mmd_emission")
+            # Group node has "Emission" input; bare BSDF has "Emission Strength"
+            emission_input = "Emission" if "Emission" in shader.inputs else "Emission Strength"
+            _add_driver(shader, emission_input, armature_obj, "mmd_emission")
             # Check if toon/sphere textures are connected
             has_toon = any(
                 link.to_socket.name == "Toon Tex"
@@ -452,10 +422,11 @@ def update_materials(armature_obj: "bpy.types.Object") -> None:
         for mat in child.data.materials:
             if not mat or not mat.use_nodes:
                 continue
-            shader = mat.node_tree.nodes.get("Shader")
+            shader = mat.node_tree.nodes.get("MMD Shader")
             if shader is None:
                 continue
-            shader.inputs["Emission"].default_value = emission
+            emission_input = "Emission" if "Emission" in shader.inputs else "Emission Strength"
+            shader.inputs[emission_input].default_value = emission
             if "Toon Fac" in shader.inputs:
                 shader.inputs["Toon Fac"].default_value = toon_fac
             if "Sphere Fac" in shader.inputs:
@@ -602,7 +573,7 @@ def create_materials(
         shader_group = _get_or_create_mmd_shader()
     else:
         uv_group = None
-        shader_group = _get_or_create_basic_shader()
+        shader_group = None  # basic mode uses bare Principled BSDF
 
     # Set up armature controls if available
     if armature_obj is not None:
@@ -617,11 +588,6 @@ def create_materials(
         nodes = mat.node_tree.nodes
         links = mat.node_tree.links
 
-        # Remove default Principled BSDF
-        default_bsdf = nodes.get("Principled BSDF")
-        if default_bsdf:
-            nodes.remove(default_bsdf)
-
         # Material output
         node_output = None
         for n in nodes:
@@ -632,6 +598,11 @@ def create_materials(
             node_output = nodes.new("ShaderNodeOutputMaterial")
         node_output.location = (400, 300)
 
+        # Compute derived values
+        mixed_color = mix_diffuse_ambient(mat_data.diffuse[:3], mat_data.ambient)
+        alpha = mat_data.diffuse[3]
+        roughness = roughness_from_shininess(mat_data.shininess)
+
         # UV group node (only needed for toon/sphere)
         node_uv = None
         if uv_group is not None:
@@ -640,38 +611,70 @@ def create_materials(
             node_uv.node_tree = uv_group
             node_uv.location = (-5 * 210, -2.5 * 220)
 
-        # Shader group node
-        node_shader = nodes.new("ShaderNodeGroup")
-        node_shader.name = "Shader"
-        node_shader.location = (0, 300)
-        node_shader.width = 200
-        node_shader.node_tree = shader_group
+        if shader_group is not None:
+            # Full mode: MMD Shader node group with toon/sphere mixing
+            default_bsdf = nodes.get("Principled BSDF")
+            if default_bsdf:
+                nodes.remove(default_bsdf)
 
-        # Link shader → output
-        links.new(node_shader.outputs["Shader"], node_output.inputs["Surface"])
+            node_shader = nodes.new("ShaderNodeGroup")
+            node_shader.name = "MMD Shader"
+            node_shader.location = (0, 300)
+            node_shader.width = 200
+            node_shader.node_tree = shader_group
+            links.new(node_shader.outputs["Shader"], node_output.inputs["Surface"])
 
-        # Compute derived values
-        mixed_color = mix_diffuse_ambient(mat_data.diffuse[:3], mat_data.ambient)
-        alpha = mat_data.diffuse[3]
-        roughness = roughness_from_shininess(mat_data.shininess)
+            # Set group inputs
+            spec_ior = specular_ior_from_color(mat_data.specular)
+            node_shader.inputs["Color"].default_value = (*mixed_color, 1.0)
+            node_shader.inputs["Alpha"].default_value = alpha
+            node_shader.inputs["Roughness"].default_value = roughness
+            node_shader.inputs["Specular IOR Level"].default_value = spec_ior
+            node_shader.inputs["Specular Tint"].default_value = (*mat_data.specular, 1.0)
+            _INPUT_COLOR = "Color"
+            _INPUT_ALPHA = "Alpha"
+        else:
+            # Basic mode: bare Principled BSDF, no node group
+            node_shader = nodes.get("Principled BSDF")
+            if node_shader is None:
+                node_shader = nodes.new("ShaderNodeBsdfPrincipled")
+            node_shader.name = "MMD Shader"
+            node_shader.location = (0, 300)
+            links.new(node_shader.outputs["BSDF"], node_output.inputs["Surface"])
 
-        # Set shader inputs
-        node_shader.inputs["Color"].default_value = (*mixed_color, 1.0)
-        node_shader.inputs["Alpha"].default_value = alpha
-        node_shader.inputs["Roughness"].default_value = roughness
+            # Specular from PMX data
+            spec_ior = specular_ior_from_color(mat_data.specular)
+            node_shader.inputs["Specular IOR Level"].default_value = spec_ior
+            node_shader.inputs["Specular Tint"].default_value = (*mat_data.specular, 1.0)
+
+            # Set BSDF inputs directly
+            node_shader.inputs["Base Color"].default_value = (*mixed_color, 1.0)
+            node_shader.inputs["Emission Color"].default_value = (*mixed_color, 1.0)
+            node_shader.inputs["Alpha"].default_value = alpha
+            node_shader.inputs["Roughness"].default_value = roughness
+            _INPUT_COLOR = "Base Color"
+            _INPUT_ALPHA = "Alpha"
 
         # Material viewport properties
         mat.diffuse_color = (*mixed_color, alpha)
         mat.roughness = roughness
         mat.metallic = 0.0
         mat.use_backface_culling = not mat_data.is_double_sided
-        if hasattr(mat, "blend_method"):
-            mat.blend_method = "HASHED"
-        cast_shadows = alpha > 1e-3
-        if hasattr(mat, "shadow_method"):
-            mat.shadow_method = "HASHED" if cast_shadows else "NONE"
+        if not mat_data.is_double_sided:
+            mat.use_backface_culling_shadow = True
+        mat.surface_render_method = "DITHERED"
+        # Transparent shadow: materials with alpha < 1 should cast
+        # alpha-aware shadows so they don't create solid shadow silhouettes
+        if alpha < 1.0 - 1e-3:
+            mat.use_transparent_shadow = True
 
-        # Store edge data as custom properties for future outline support
+        # Store PMX flags as custom properties for future use.
+        # Blender 5.0 removed per-material shadow_method — shadow casting
+        # is object-level only (visible_shadow). Flags preserved as metadata.
+        mat["mmd_drop_shadow"] = mat_data.enabled_drop_shadow
+        mat["mmd_self_shadow_map"] = mat_data.enabled_self_shadow_map
+        mat["mmd_self_shadow"] = mat_data.enabled_self_shadow
+        mat["mmd_edge_enabled"] = mat_data.enabled_toon_edge
         mat["mmd_edge_color"] = list(mat_data.edge_color)
         mat["mmd_edge_size"] = mat_data.edge_size
 
@@ -690,8 +693,14 @@ def create_materials(
                     )
                 links.new(
                     base_tex_node.outputs["Color"],
-                    node_shader.inputs["Color"],
+                    node_shader.inputs[_INPUT_COLOR],
                 )
+                # Basic mode: also wire texture to Emission Color
+                if shader_group is None:
+                    links.new(
+                        base_tex_node.outputs["Color"],
+                        node_shader.inputs["Emission Color"],
+                    )
                 # Multiply PMX alpha with texture alpha (matching mmd_tools)
                 if base_tex_node.image and base_tex_node.image.depth == 32 and base_tex_node.image.file_format != "BMP":
                     alpha_mul = nodes.new("ShaderNodeMath")
@@ -700,7 +709,7 @@ def create_materials(
                     alpha_mul.location = node_shader.location + Vector((-1 * 210, -2.5 * 220))
                     alpha_mul.inputs[0].default_value = alpha
                     links.new(base_tex_node.outputs["Alpha"], alpha_mul.inputs[1])
-                    links.new(alpha_mul.outputs["Value"], node_shader.inputs["Alpha"])
+                    links.new(alpha_mul.outputs["Value"], node_shader.inputs[_INPUT_ALPHA])
 
         # --- Toon & sphere textures (only when enabled) ---
         if use_toon_sphere and node_uv is not None:
@@ -735,14 +744,14 @@ def create_materials(
 
 
 def _fix_overlapping_face_materials(mesh_data: "bpy.types.Mesh") -> None:
-    """Detect overlapping faces and set overlay materials to BLEND.
+    """Detect overlapping faces and set overlay materials to BLENDED.
 
     When two faces share the same vertex positions but belong to different
     materials, the later material is an overlay (e.g. eye highlights).
-    Setting it to BLEND with show_transparent_back=False prevents z-fighting.
+    Setting it to BLENDED with use_transparency_overlap=False prevents z-fighting.
     Matches mmd_tools __fixOverlappingFaceMaterials.
     """
-    if not hasattr(mesh_data.materials[0], "blend_method") if mesh_data.materials else True:
+    if not mesh_data.materials:
         return
 
     check: dict[tuple, int] = {}
@@ -762,7 +771,7 @@ def _fix_overlapping_face_materials(mesh_data: "bpy.types.Mesh") -> None:
             check[key] = mi
         elif check[key] < mi:
             mat = mesh_data.materials[mi]
-            mat.blend_method = "BLEND"
-            mat.show_transparent_back = False
+            mat.surface_render_method = "BLENDED"
+            mat.use_transparency_overlap = False
             mi_skip = mi
             log.debug("Set BLEND for overlapping material: %s", mat.name)

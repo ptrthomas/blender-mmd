@@ -26,7 +26,7 @@ mmd_tools is a battle-tested addon that has served the MMD-Blender community for
 | Bone names | Japanese by default (optional translation) | English by default (Japanese stored as `mmd_name_j`) |
 | Coordinate conversion | `.xzy` swizzles scattered across importer, bone, physics code | Done once in parser — downstream is pure Blender coords |
 | IK toggle (VMD) | Custom `mmd_ik_toggle` property + update callback | Constraint influence keyframes (more Blender-native) |
-| Materials | Custom ~20-node shader group per material | Single Principled BSDF group (~7 nodes), global driver controls |
+| Materials | Custom ~20-node shader group per material | Bare Principled BSDF (default) — native Blender shader, responds to scene lighting and reflections. Optional toon/sphere mode for full MMD look |
 | Hair/skirt physics | Rigid body only | Rigid body (cloth-on-cage planned) |
 | Physics workflow | Must build from rest pose, complex UI | Build/rebuild/clear anytime, one-click MMD4B panel |
 | Physics springs | Applied via property update callbacks | Applied directly during joint creation |
@@ -37,7 +37,7 @@ Both projects share the same core approach for IK constraints (first link bone p
 ## What's implemented
 
 - **PMX import** — full PMX 2.0/2.1 parser, armature, mesh, vertex weights, normals, UVs
-- **Materials** — Principled BSDF-based "MMD Shader" node group with toon/sphere texture support. ~7 internal nodes (vs ~20 in mmd_tools) while preserving the MMD look. Bundled shared toon files (toon01–10.bmp). Global controls via armature custom properties and drivers
+- **Materials** — Default mode uses a bare Principled BSDF (no node group) with PMX specular/shininess mapped to native properties — models respond to scene lighting, reflections, and environment out of the box, without toon/sphere textures. Optional "Toon & Sphere" mode adds the full MMD look via a ~7-node group (vs ~20 in mmd_tools). Bundled shared toon files (toon01–10.bmp). Global controls via armature drivers, per-material override by removing driver
 - **VMD motion** — bone keyframes, morph keyframes, IK toggle, bezier interpolation
 - **Morphs** — vertex, UV, bone, material, group morphs as Blender shape keys
 - **Rigid body physics** — build/rebuild/clear via MMD4B panel, even after loading animation. Rebuild after VMD import to sync physics to starting pose
@@ -50,7 +50,7 @@ After import, key settings live as custom properties on the armature object. Cha
 
 | Property | Default | Effect |
 |---|---|---|
-| `mmd_emission` | 0.3 | Emission strength across all materials |
+| `mmd_emission` | 1.0 | Emission strength across all materials |
 | `mmd_toon_fac` | 1.0 | Toon texture influence (0 = off, 1 = full) |
 | `mmd_sphere_fac` | 1.0 | Sphere texture influence (0 = off, 1 = full) |
 | `ik_loop_factor` | 1 | Multiplier for IK solver iterations (increase for better foot plant accuracy) |
