@@ -72,6 +72,12 @@ class BLENDER_MMD_OT_import_vmd(bpy.types.Operator, ImportHelper):
     filename_ext = ".vmd"
     filter_glob: StringProperty(default="*.vmd", options={"HIDDEN"})
 
+    create_new_action: BoolProperty(
+        name="Create New Action",
+        description="Create new actions, replacing existing. Uncheck to append to current actions",
+        default=False,
+    )
+
     def execute(self, context):
         from .vmd import parse
         from .vmd.importer import import_vmd
@@ -89,7 +95,7 @@ class BLENDER_MMD_OT_import_vmd(bpy.types.Operator, ImportHelper):
 
         try:
             vmd = parse(self.filepath)
-            import_vmd(vmd, armature_obj, scale)
+            import_vmd(vmd, armature_obj, scale, create_new_action=self.create_new_action)
             self.report(
                 {"INFO"},
                 f"VMD applied to '{armature_obj.name}': "

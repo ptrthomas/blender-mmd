@@ -93,7 +93,8 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
   - **Basic** (default): Bare Principled BSDF named "MMD Shader" — no node group. PMX specular mapped to native BSDF: `specular` luminance → `Specular IOR Level` (0–0.5), `specular` color → `Specular Tint`, `shininess` → `Roughness`. Models respond to scene lighting and reflections out of the box.
   - **Full** (checkbox on): "MMD Shader" node group with toon/sphere inputs via `ShaderNodeMix`. Adds "MMD UV" group for toon/sphere UVs. Bundled toon textures (toon01-10.bmp) with fallback resolution. Specular IOR Level = 0.0 (toon textures provide specular control).
   - Both modes: Global `mmd_emission` driver on armature (`Emission Strength` for basic, `Emission` group input for full). Full mode also drives `mmd_toon_fac`/`mmd_sphere_fac`. Drivers are created after import (deferred `setup_drivers()`). Requires `use_scripts_auto_execute = True`. Alpha = PMX alpha × texture alpha. Edge color/size stored as material custom properties. Node lookup key: `"MMD Shader"` (both modes).
-- **Split by material**: Mesh is split into per-material objects after import (default on). Enables per-object modifiers (cloth, solidify for outlines), light linking, and per-object `visible_shadow` (honors `mmd_drop_shadow`). Custom normals backed up as `mmd_normal` attribute before split, restored after. `mmd_morph_map` moved to armature for VMD import. All objects organized into a collection named after the model. VMD morph action shared across all split meshes (shape key names preserved by `mesh.separate`).
+- **Split by material**: Mesh is split into per-material objects after import (default on). Enables per-object modifiers (cloth, solidify for outlines), light linking, and per-object `visible_shadow` (honors `mmd_drop_shadow`). Custom normals backed up as `mmd_normal` attribute before split, restored after. `mmd_morph_map` moved to armature for VMD import. All objects organized into a collection named after the model. VMD morph action shared across all split meshes via Blender 5.0 slotted actions: `fcurve_ensure_for_datablock` auto-creates a slot on the primary mesh's ShapeKey, secondary meshes share that same slot via `animation_data.action_slot`. Shape key names preserved by `mesh.separate`.
+- **VMD append mode**: `import_vmd()` defaults to `create_new_action=False` — reuses existing bone/morph actions and appends keyframes. Allows layering motions (e.g., body dance + lip sync from separate VMDs). `create_new_action=True` replaces existing actions. Morph-only VMDs (no bone keyframes) skip bone action creation entirely, preserving existing bone animation. File browser exposes "Create New Action" checkbox.
 - **Armature visibility**: STICK display, bones hidden by default. All three bone collections start hidden (`is_visible = False`): "Armature" (standard), "Physics" (dynamic RB bones, orange), "mmd_shadow" (helper bones). Unhide from armature properties when needed.
 - **No export**: One-way import only. No PMX/VMD/PMD export.
 - **Logging**: Use blender-agent's log (`output/agent.log`). Python `logging` to stderr for diagnostics.
@@ -116,6 +117,13 @@ import bl_ext.user_default.blender_mmd.vmd.parser as vmd_parser
 import bl_ext.user_default.blender_mmd.vmd.importer as vmd_importer
 motion = vmd_parser.parse("/path/to/motion.vmd")
 vmd_importer.import_vmd(motion, arm)
+
+# Layer a second VMD (e.g. lip sync) — appends to existing actions by default
+lip = vmd_parser.parse("/path/to/lip.vmd")
+vmd_importer.import_vmd(lip, arm)  # create_new_action=False (default)
+
+# Replace all actions instead of appending
+vmd_importer.import_vmd(motion, arm, create_new_action=True)
 ```
 
 ## Testing

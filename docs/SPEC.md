@@ -219,7 +219,7 @@ After materials are assigned, the single mesh is split into per-material objects
 - Per-object `visible_shadow` (honors PMX `mmd_drop_shadow` flag)
 - Selective outline rendering
 
-Custom split normals are backed up as an `mmd_normal` FLOAT_VECTOR attribute on CORNER domain before splitting (since `mesh.separate()` does not preserve custom normals), then restored on each resulting mesh. The `mmd_morph_map` is moved from the mesh to the armature so VMD import can find it after split. Shape key names are preserved by `mesh.separate()`, so a single VMD morph action can be shared across all split meshes.
+Custom split normals are backed up as an `mmd_normal` FLOAT_VECTOR attribute on CORNER domain before splitting (since `mesh.separate()` does not preserve custom normals), then restored on each resulting mesh. The `mmd_morph_map` is moved from the mesh to the armature so VMD import can find it after split. Shape key names are preserved by `mesh.separate()`, so a single VMD morph action can be shared across all split meshes. Blender 5.0 slotted actions require explicit slot binding: `fcurve_ensure_for_datablock` auto-creates a slot for the primary mesh's ShapeKey datablock, and all secondary meshes share that same slot via `animation_data.action_slot`.
 
 ### Mesh construction
 
@@ -598,19 +598,22 @@ blender_mmd.import_vmd
 
 Parameters:
 - `filepath`: Path to .vmd file
+- `create_new_action`: Create new actions replacing existing (default: off — appends to current actions)
 - Scale auto-detected from armature's `import_scale` custom property
 
 Behavior:
 1. Parse VMD file (bone keyframes, morph keyframes, property/IK toggle keyframes)
 2. Find the target armature (active selection or auto-detect)
 3. Build Japanese→English bone name lookup from `mmd_name_j` custom properties
-4. Apply bone keyframes via per-bone coordinate converter (`_BoneConverter`)
-5. Apply morph keyframes to shape key F-curves via `mmd_morph_map`
+4. If bone keyframes exist: get or create bone action (reuse existing unless `create_new_action`), apply via per-bone coordinate converter (`_BoneConverter`). If no bone keyframes: skip entirely, preserving existing bone animation
+5. If morph keyframes exist: get or create morph action, apply to shape key F-curves via `mmd_morph_map`. Share action + slot across all split meshes via `animation_data.action_slot`
 6. Apply VMD Bézier interpolation handles to F-curves
-7. Apply IK toggle keyframes as constraint influence F-curves (CONSTANT interpolation)
+7. Apply IK toggle keyframes as constraint influence F-curves (CONSTANT interpolation), using whichever bone action is active
 8. Set scene FPS to 30 (MMD standard) and extend frame range to fit animation
 9. Auto-reset physics if rigid bodies exist (repositions dynamic bodies to match animation start pose)
 10. Log summary of matched/unmatched bones and morphs
+
+**Append mode** (default): Multiple VMDs can be layered onto the same armature — e.g., body dance motion first, then lip sync VMD on top. Morph-only VMDs preserve existing bone animation. `create_new_action=True` replaces all actions instead.
 
 **Per-bone VMD conversion**: VMD keyframes are in bone-local space. The `_BoneConverter` class constructs a conversion matrix from `bone.matrix_local` (with Y↔Z row swap + transpose) and converts each keyframe via matrix conjugation: `q_mat @ q_vmd @ q_mat.conjugated()`. This depends on correct bone roll (see above).
 

@@ -32,6 +32,8 @@ mmd_tools is a battle-tested addon that has served the MMD-Blender community for
 | Physics workflow | Must build from rest pose, complex UI | Build/reset/clear anytime, auto-resets after VMD import |
 | Physics debugging | None | Inspect (clipboard report), Select Colliders, Select Contacts |
 | Physics springs | Applied via property update callbacks | Applied directly during joint creation |
+| Split by material | "HIGH RISK & BUGGY" (their words), VMD import doesn't handle split meshes | Fully supported — slotted action shared across all meshes, morph animation works on every piece |
+| VMD layering | Single import only — each VMD replaces previous | Append mode (default) — layer body + lip sync + camera from separate VMDs |
 | UI | Sidebar panels, menus, property groups | Minimal — designed for Claude Code + MMD4B panel |
 
 Both projects share the same core approach for IK constraints (first link bone placement), IK limits (native properties + LIMIT_ROTATION override), and additional transforms (TRANSFORM constraints + shadow bones).
@@ -40,7 +42,7 @@ Both projects share the same core approach for IK constraints (first link bone p
 
 - **PMX import** — full PMX 2.0/2.1 parser, armature, mesh, vertex weights, normals, UVs
 - **Materials** — Default mode uses a bare Principled BSDF (no node group) with PMX specular/shininess mapped to native properties — models respond to scene lighting, reflections, and environment out of the box, without toon/sphere textures. Optional "Toon & Sphere" mode adds the full MMD look via a ~7-node group (vs ~20 in mmd_tools). Bundled shared toon files (toon01–10.bmp). Global controls via armature drivers, per-material override by removing driver
-- **VMD motion** — bone keyframes, morph keyframes, IK toggle, bezier interpolation
+- **VMD motion** — bone keyframes, morph keyframes, IK toggle, bezier interpolation. Append mode layers multiple VMDs (body + lip sync) without replacing existing animation
 - **Morphs** — vertex, UV, bone, material, group morphs as Blender shape keys
 - **Rigid body physics** — correct PMX collision group/mask enforcement via bilateral check (both masks must agree), all joints `disable_collisions=True`, 3-phase build pipeline, auto-reset after VMD import. Debug tools: Inspect (copies full diagnostic to clipboard), Select Colliders (highlights eligible collision partners), Select Contacts (highlights bodies in contact at current frame). MMD4B panel for build/reset/clear with per-chain management
 - **Additional transforms** — grant parent system (D bones, shoulder cancel, arm twist, eye tracking)
@@ -93,6 +95,10 @@ import bl_ext.user_default.blender_mmd.vmd.parser as vmd_parser
 import bl_ext.user_default.blender_mmd.vmd.importer as vmd_importer
 motion = vmd_parser.parse("/path/to/motion.vmd")
 vmd_importer.import_vmd(motion, arm)
+
+# Layer a lip sync VMD on top (appends by default, preserves bone animation)
+lip = vmd_parser.parse("/path/to/lip.vmd")
+vmd_importer.import_vmd(lip, arm)
 ```
 
 Or use the Blender operator: **File > Import > MMD PMX (.pmx)**

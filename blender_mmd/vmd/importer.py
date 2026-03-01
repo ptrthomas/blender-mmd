@@ -27,71 +27,95 @@ def import_vmd(
     vmd: VmdMotion,
     armature_obj: bpy.types.Object,
     scale: float = 0.08,
+    create_new_action: bool = False,
 ) -> None:
     """Apply VMD motion to an armature and its child mesh.
 
     The armature must have been imported with blender_mmd (bones have ``mmd_name_j``
     custom properties).  The child mesh must have an ``mmd_morph_map`` custom
     property (JSON dict mapping Japanese morph names to shape key names).
+
+    Args:
+        create_new_action: If True, always create new actions (replaces existing).
+            If False (default), reuse existing actions and append keyframes.
     """
     # Build Japanese name → Blender bone name lookup
     jp_to_bone = _build_bone_lookup(armature_obj)
 
-    # Group bone keyframes by bone name
-    bone_groups: dict[str, list[BoneKeyframe]] = defaultdict(list)
-    for kf in vmd.bone_keyframes:
-        bone_groups[kf.bone_name].append(kf)
-
-    # Sort each group by frame
-    for group in bone_groups.values():
-        group.sort(key=lambda kf: kf.frame)
-
-    # Create bone action
-    bone_action = bpy.data.actions.new(f"{armature_obj.name}_VMD")
-    if armature_obj.animation_data is None:
-        armature_obj.animation_data_create()
-    armature_obj.animation_data.action = bone_action
-
-    # Set all pose bones to quaternion rotation mode
-    for pb in armature_obj.pose.bones:
-        pb.rotation_mode = "QUATERNION"
-
-    # Apply bone keyframes
+    # --- Bone keyframes ---
     matched_bones = 0
     unmatched_bones: list[str] = []
+    bone_action = None
 
-    for jp_name, keyframes in bone_groups.items():
-        blender_name = jp_to_bone.get(jp_name)
-        if blender_name is None:
-            unmatched_bones.append(jp_name)
-            continue
+    if vmd.bone_keyframes:
+        # Group bone keyframes by bone name
+        bone_groups: dict[str, list[BoneKeyframe]] = defaultdict(list)
+        for kf in vmd.bone_keyframes:
+            bone_groups[kf.bone_name].append(kf)
 
-        pose_bone = armature_obj.pose.bones.get(blender_name)
-        if pose_bone is None:
-            unmatched_bones.append(jp_name)
-            continue
+        # Sort each group by frame
+        for group in bone_groups.values():
+            group.sort(key=lambda kf: kf.frame)
 
-        matched_bones += 1
-        _apply_bone_keyframes(
-            bone_action, armature_obj, pose_bone, keyframes, scale,
-        )
+        # Get or create bone action
+        if armature_obj.animation_data is None:
+            armature_obj.animation_data_create()
 
-    if unmatched_bones:
-        log.warning(
-            "VMD: %d bone names unmatched: %s",
-            len(unmatched_bones),
-            ", ".join(unmatched_bones[:10])
-            + ("..." if len(unmatched_bones) > 10 else ""),
-        )
+        existing_action = armature_obj.animation_data.action
+        if create_new_action or existing_action is None:
+            bone_action = bpy.data.actions.new(f"{armature_obj.name}_VMD")
+            armature_obj.animation_data.action = bone_action
+        else:
+            bone_action = existing_action
+
+        # Set all pose bones to quaternion rotation mode
+        for pb in armature_obj.pose.bones:
+            pb.rotation_mode = "QUATERNION"
+
+        # Apply bone keyframes
+        for jp_name, keyframes in bone_groups.items():
+            blender_name = jp_to_bone.get(jp_name)
+            if blender_name is None:
+                unmatched_bones.append(jp_name)
+                continue
+
+            pose_bone = armature_obj.pose.bones.get(blender_name)
+            if pose_bone is None:
+                unmatched_bones.append(jp_name)
+                continue
+
+            matched_bones += 1
+            _apply_bone_keyframes(
+                bone_action, armature_obj, pose_bone, keyframes, scale,
+            )
+
+        if unmatched_bones:
+            log.warning(
+                "VMD: %d bone names unmatched: %s",
+                len(unmatched_bones),
+                ", ".join(unmatched_bones[:10])
+                + ("..." if len(unmatched_bones) > 10 else ""),
+            )
 
     # Apply morph keyframes to shape keys
     morph_count = 0
     if vmd.morph_keyframes:
-        morph_count = _apply_morph_keyframes(vmd.morph_keyframes, armature_obj)
+        morph_count = _apply_morph_keyframes(
+            vmd.morph_keyframes, armature_obj, create_new_action,
+        )
 
-    # Apply IK toggle keyframes
+    # Apply IK toggle keyframes (use whichever bone action is active)
     ik_toggle_count = 0
     if vmd.property_keyframes:
+        # Ensure we have a bone action for IK toggles
+        if bone_action is None:
+            if armature_obj.animation_data and armature_obj.animation_data.action:
+                bone_action = armature_obj.animation_data.action
+            else:
+                if armature_obj.animation_data is None:
+                    armature_obj.animation_data_create()
+                bone_action = bpy.data.actions.new(f"{armature_obj.name}_VMD")
+                armature_obj.animation_data.action = bone_action
         ik_toggle_count = _apply_ik_toggle_keyframes(
             vmd.property_keyframes, armature_obj, bone_action, jp_to_bone,
         )
@@ -106,11 +130,12 @@ def import_vmd(
         count = reset_physics(armature_obj)
         log.info("Auto-reset %d rigid bodies after VMD import", count)
 
+    bone_group_count = len(bone_groups) if vmd.bone_keyframes else 0
     log.info(
         "VMD applied: %d/%d bones matched, %d morph channels, %d IK toggles, "
         "%d total bone keyframes",
         matched_bones,
-        len(bone_groups),
+        bone_group_count,
         morph_count,
         ik_toggle_count,
         len(vmd.bone_keyframes),
@@ -421,6 +446,7 @@ def _set_bezier_handles(
 def _apply_morph_keyframes(
     morph_keyframes: list[MorphKeyframe],
     armature_obj: bpy.types.Object,
+    create_new_action: bool = False,
 ) -> int:
     """Apply morph keyframes to shape key F-curves on child meshes.
 
@@ -462,11 +488,16 @@ def _apply_morph_keyframes(
     for group in morph_groups.values():
         group.sort(key=lambda kf: kf.frame)
 
-    # Create morph action on the primary mesh's shape key datablock
-    morph_action = bpy.data.actions.new(f"{armature_obj.name}_VMD_Morphs")
+    # Get or create morph action on the primary mesh's shape key datablock
     if shape_keys.animation_data is None:
         shape_keys.animation_data_create()
-    shape_keys.animation_data.action = morph_action
+
+    existing_action = shape_keys.animation_data.action
+    if create_new_action or existing_action is None:
+        morph_action = bpy.data.actions.new(f"{armature_obj.name}_VMD_Morphs")
+        shape_keys.animation_data.action = morph_action
+    else:
+        morph_action = existing_action
 
     applied = 0
     unmatched: list[str] = []
@@ -509,12 +540,18 @@ def _apply_morph_keyframes(
         fc.update()
         applied += 1
 
-    # Share the same action across all other meshes with shape keys
+    # Share the same action + slot across all other meshes with shape keys.
+    # Blender 5.0 slotted actions: assigning the action auto-creates a slot for
+    # the primary mesh via fcurve_ensure_for_datablock. Secondary meshes share
+    # that same slot — identical data paths mean the F-curves animate all meshes.
+    primary_slot = morph_action.slots[0] if morph_action.slots else None
     for obj in mesh_objs[1:]:
         sk = obj.data.shape_keys
         if sk.animation_data is None:
             sk.animation_data_create()
         sk.animation_data.action = morph_action
+        if primary_slot is not None:
+            sk.animation_data.action_slot = primary_slot
 
     if unmatched:
         log.warning(
