@@ -613,7 +613,7 @@ def _shape_radius(rb_data: dict, scale: float) -> float:
 
 
 class BLENDER_MMD_OT_rebuild_ncc(bpy.types.Operator):
-    """Rebuild non-collision constraint empties (respects chain exclusions)"""
+    """Rebuild non-collision constraint empties (respects self-collision settings)"""
 
     bl_idname = "blender_mmd.rebuild_ncc"
     bl_label = "Rebuild NCCs"
@@ -714,19 +714,18 @@ class BLENDER_MMD_OT_toggle_chain_physics(bpy.types.Operator):
             return {"CANCELLED"}
 
 
-class BLENDER_MMD_OT_exclude_chain_collision(bpy.types.Operator):
-    """Toggle collision exclusion between two chains"""
+class BLENDER_MMD_OT_toggle_chain_self_collision(bpy.types.Operator):
+    """Toggle self-collision for a physics chain (intra-chain NCC empties)"""
 
-    bl_idname = "blender_mmd.exclude_chain_collision"
-    bl_label = "Exclude Chain Collision"
+    bl_idname = "blender_mmd.toggle_chain_self_collision"
+    bl_label = "Toggle Chain Self-Collision"
     bl_options = {"REGISTER", "UNDO"}
 
     chain_index: IntProperty(name="Chain Index", default=-1)
-    exclude_chain_name: StringProperty(name="Exclude Chain Name")
 
     def execute(self, context):
         import json
-        from .physics import toggle_chain_exclusion
+        from .physics import toggle_chain_self_collision, rebuild_ncc
 
         armature_obj = find_mmd_armature(context)
         if armature_obj is None:
@@ -739,18 +738,22 @@ class BLENDER_MMD_OT_exclude_chain_collision(bpy.types.Operator):
             return {"CANCELLED"}
 
         chain_name = chains[self.chain_index]["name"]
+        disabled = set(json.loads(
+            armature_obj.get("mmd_chain_self_collision_disabled", "[]")
+        ))
+        enable = chain_name in disabled  # if currently disabled, enable
 
         try:
-            now_excluded = toggle_chain_exclusion(
-                armature_obj, chain_name, self.exclude_chain_name,
+            toggle_chain_self_collision(armature_obj, self.chain_index, enable)
+            old_count, new_count = rebuild_ncc(armature_obj)
+            state = "ON" if enable else "OFF"
+            self.report(
+                {"INFO"},
+                f"Chain '{chain_name}' self-collision {state} (NCCs: {old_count} → {new_count})",
             )
-            if now_excluded:
-                self.report({"INFO"}, f"Excluded: {chain_name} ↔ {self.exclude_chain_name}")
-            else:
-                self.report({"INFO"}, f"Un-excluded: {chain_name} ↔ {self.exclude_chain_name}")
             return {"FINISHED"}
         except Exception as e:
-            log.exception("Exclude chain collision failed")
+            log.exception("Toggle chain self-collision failed")
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
 
@@ -777,7 +780,7 @@ _classes = (
     BLENDER_MMD_OT_remove_chain,
     BLENDER_MMD_OT_toggle_chain_collisions,
     BLENDER_MMD_OT_toggle_chain_physics,
-    BLENDER_MMD_OT_exclude_chain_collision,
+    BLENDER_MMD_OT_toggle_chain_self_collision,
     BLENDER_MMD_OT_clear_animation,
     BLENDER_MMD_OT_toggle_ik,
     BLENDER_MMD_OT_toggle_all_ik,

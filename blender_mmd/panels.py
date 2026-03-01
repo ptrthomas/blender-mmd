@@ -33,62 +33,6 @@ def _get_physics_chains(armature_obj) -> list[dict]:
     return json.loads(chains_json)
 
 
-class BLENDER_MMD_OT_exclude_chain_menu(bpy.types.Operator):
-    """Open menu to toggle collision exclusions with other chains"""
-
-    bl_idname = "blender_mmd.exclude_chain_menu"
-    bl_label = "Chain Exclusions"
-    bl_options = {"REGISTER", "INTERNAL"}
-
-    chain_index: bpy.props.IntProperty(name="Chain Index", default=-1)
-
-    def execute(self, context):
-        return {"FINISHED"}
-
-    def invoke(self, context, event):
-        return context.window_manager.invoke_popup(self, width=200)
-
-    def draw(self, context):
-        layout = self.layout
-        armature_obj = find_mmd_armature(context)
-        if not armature_obj:
-            return
-
-        chains = _get_physics_chains(armature_obj)
-        if self.chain_index < 0 or self.chain_index >= len(chains):
-            return
-
-        chain = chains[self.chain_index]
-        chain_name = chain.get("name", "")
-        exclusions = json.loads(armature_obj.get("mmd_chain_exclusions", "{}"))
-
-        # Build set of chains excluded from this one (bidirectional)
-        excluded_set: set[str] = set()
-        for a, b_list in exclusions.items():
-            if a == chain_name:
-                excluded_set.update(b_list)
-            elif chain_name in b_list:
-                excluded_set.add(a)
-
-        layout.label(text=f"Exclude from: {chain_name}")
-        layout.separator()
-
-        for i, other_chain in enumerate(chains):
-            other_name = other_chain.get("name", "")
-            if other_name == chain_name:
-                continue
-            is_excluded = other_name in excluded_set
-            icon = "CHECKBOX_HLT" if is_excluded else "CHECKBOX_DEHLT"
-            op = layout.operator(
-                "blender_mmd.exclude_chain_collision",
-                text=other_name,
-                icon=icon,
-                depress=is_excluded,
-            )
-            op.chain_index = self.chain_index
-            op.exclude_chain_name = other_name
-
-
 class BLENDER_MMD_PT_physics(bpy.types.Panel):
     """MMD4B — rigid body physics controls."""
 
@@ -181,7 +125,7 @@ class BLENDER_MMD_PT_physics(bpy.types.Panel):
                         row.operator("blender_mmd.select_colliders", text="Colliders", icon="SHADING_BBOX")
                         row.operator("blender_mmd.select_contacts", text="Contacts", icon="MOD_PHYSICS")
 
-            # Per-chain list with toggles, select, exclude, and remove
+            # Per-chain list with toggles, select, self-collision, and remove
             chains = _get_physics_chains(armature_obj)
             if chains:
                 collision_disabled = set(json.loads(
@@ -190,7 +134,9 @@ class BLENDER_MMD_PT_physics(bpy.types.Panel):
                 physics_disabled = set(json.loads(
                     armature_obj.get("mmd_chain_physics_disabled", "[]")
                 ))
-                exclusions = json.loads(armature_obj.get("mmd_chain_exclusions", "{}"))
+                self_collision_disabled = set(json.loads(
+                    armature_obj.get("mmd_chain_self_collision_disabled", "[]")
+                ))
 
                 box = layout.box()
                 for i, chain in enumerate(chains):
@@ -228,11 +174,13 @@ class BLENDER_MMD_PT_physics(bpy.types.Panel):
                     )
                     op.chain_index = i
 
-                    # Exclude dropdown
+                    # Self-collision toggle
+                    self_col_enabled = chain_name not in self_collision_disabled
                     op = row.operator(
-                        "blender_mmd.exclude_chain_menu",
+                        "blender_mmd.toggle_chain_self_collision",
                         text="",
-                        icon="FILTER",
+                        icon="LINKED" if self_col_enabled else "UNLINKED",
+                        depress=self_col_enabled,
                     )
                     op.chain_index = i
 
@@ -354,7 +302,6 @@ class BLENDER_MMD_PT_main(bpy.types.Panel):
 
 
 _classes = (
-    BLENDER_MMD_OT_exclude_chain_menu,
     BLENDER_MMD_PT_main,
     BLENDER_MMD_PT_animation,
     BLENDER_MMD_PT_physics,

@@ -14,8 +14,9 @@ from blender_mmd.physics import (
     deserialize_physics_data,
     is_locked_dof,
     serialize_physics_data,
-    toggle_chain_exclusion,
+    toggle_chain_self_collision,
     _build_rigid_to_chain_map,
+    _compute_ncc_pairs,
 )
 
 SAMPLES_DIR = Path(__file__).parent / "samples"
@@ -239,10 +240,10 @@ class TestCollisionQualityDraft:
 
 
 # ---------------------------------------------------------------------------
-# Chain exclusion logic
+# Self-collision logic
 # ---------------------------------------------------------------------------
 
-class TestChainExclusion:
+class TestSelfCollision:
     def test_rigid_to_chain_map(self):
         """_build_rigid_to_chain_map correctly maps rigid indices to chain names."""
         chains = [
@@ -255,38 +256,89 @@ class TestChainExclusion:
         assert mapping[20] == "SkirtF"
         assert 0 not in mapping
 
-    def test_toggle_exclusion_add(self):
-        """toggle_chain_exclusion adds bidirectional exclusion."""
+    def test_self_collision_disabled_skips_intra_chain(self):
+        """When self-collision is disabled for a chain, intra-chain NCC pairs are skipped."""
+        # Two bodies in same group, same chain — would normally need NCC
+        rb_data = [
+            {"collision_group_number": 1, "collision_group_mask": 0xFFFD},  # excludes group 1
+            {"collision_group_number": 1, "collision_group_mask": 0xFFFD},  # excludes group 1
+        ]
+        joints_data = []
+        obj_a, obj_b = object(), object()
+        rigid_objects = [obj_a, obj_b]
+        rigid_to_chain = {0: "HairA", 1: "HairA"}
+
+        # With self-collision enabled (default): intra-chain pair present
+        pairs_on = _compute_ncc_pairs(
+            rb_data, joints_data, rigid_objects,
+            rigid_to_chain=rigid_to_chain,
+        )
+        assert len(pairs_on) == 1
+
+        # With self-collision disabled: intra-chain pair skipped
+        pairs_off = _compute_ncc_pairs(
+            rb_data, joints_data, rigid_objects,
+            rigid_to_chain=rigid_to_chain,
+            self_collision_disabled_chains={"HairA"},
+        )
+        assert len(pairs_off) == 0
+
+    def test_self_collision_enabled_default(self):
+        """By default (no self_collision_disabled_chains), intra-chain pairs are present."""
+        rb_data = [
+            {"collision_group_number": 2, "collision_group_mask": 0xFFFB},  # excludes group 2
+            {"collision_group_number": 2, "collision_group_mask": 0xFFFB},  # excludes group 2
+        ]
+        joints_data = []
+        obj_a, obj_b = object(), object()
+        rigid_objects = [obj_a, obj_b]
+        rigid_to_chain = {0: "HairB", 1: "HairB"}
+
+        pairs = _compute_ncc_pairs(
+            rb_data, joints_data, rigid_objects,
+            rigid_to_chain=rigid_to_chain,
+        )
+        assert len(pairs) == 1
+
+    def test_toggle_updates_property(self):
+        """toggle_chain_self_collision correctly toggles the armature property."""
 
         class FakeArmature(dict):
             pass
 
         arm = FakeArmature()
-        result = toggle_chain_exclusion(arm, "HairA", "SkirtF")
-        assert result is True  # now excluded
-        exclusions = json.loads(arm["mmd_chain_exclusions"])
-        assert "SkirtF" in exclusions.get("HairA", [])
+        arm["mmd_physics_chains"] = json.dumps([
+            {"name": "HairA", "rigid_indices": [0, 1, 2]},
+            {"name": "HairB", "rigid_indices": [3, 4]},
+        ])
 
-    def test_toggle_exclusion_remove(self):
-        """toggle_chain_exclusion removes existing exclusion."""
+        # Disable self-collision for chain 0
+        name = toggle_chain_self_collision(arm, 0, False)
+        assert name == "HairA"
+        disabled = json.loads(arm["mmd_chain_self_collision_disabled"])
+        assert "HairA" in disabled
 
-        class FakeArmature(dict):
-            pass
+        # Re-enable
+        toggle_chain_self_collision(arm, 0, True)
+        disabled = json.loads(arm["mmd_chain_self_collision_disabled"])
+        assert "HairA" not in disabled
 
-        arm = FakeArmature()
-        arm["mmd_chain_exclusions"] = json.dumps({"HairA": ["SkirtF"]})
-        result = toggle_chain_exclusion(arm, "HairA", "SkirtF")
-        assert result is False  # no longer excluded
-        exclusions = json.loads(arm["mmd_chain_exclusions"])
-        assert "SkirtF" not in exclusions.get("HairA", [])
+    def test_cross_chain_pairs_unaffected(self):
+        """Self-collision toggle only affects intra-chain pairs, not cross-chain."""
+        rb_data = [
+            {"collision_group_number": 1, "collision_group_mask": 0xFFFD},  # excludes group 1
+            {"collision_group_number": 1, "collision_group_mask": 0xFFFD},  # excludes group 1
+        ]
+        joints_data = []
+        obj_a, obj_b = object(), object()
+        rigid_objects = [obj_a, obj_b]
+        # Different chains
+        rigid_to_chain = {0: "HairA", 1: "HairB"}
 
-    def test_toggle_exclusion_reverse_direction(self):
-        """toggle_chain_exclusion detects exclusion stored in reverse direction."""
-
-        class FakeArmature(dict):
-            pass
-
-        arm = FakeArmature()
-        arm["mmd_chain_exclusions"] = json.dumps({"SkirtF": ["HairA"]})
-        result = toggle_chain_exclusion(arm, "HairA", "SkirtF")
-        assert result is False  # was excluded in reverse, now removed
+        # Self-collision disabled for HairA — cross-chain pair still present
+        pairs = _compute_ncc_pairs(
+            rb_data, joints_data, rigid_objects,
+            rigid_to_chain=rigid_to_chain,
+            self_collision_disabled_chains={"HairA"},
+        )
+        assert len(pairs) == 1

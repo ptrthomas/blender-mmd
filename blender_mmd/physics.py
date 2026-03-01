@@ -146,13 +146,15 @@ def _build_rigid_body_physics(
         joint_objects = _create_joints(model, armature_obj, rigid_objects, bone_names, scale, joint_col)
 
         if collision_quality == "high":
-            chain_exclusions = json.loads(armature_obj.get("mmd_chain_exclusions", "{}"))
+            self_collision_disabled = set(json.loads(
+                armature_obj.get("mmd_chain_self_collision_disabled", "[]")
+            ))
             _create_non_collision_constraints(
                 model, rigid_objects, joint_objects, joint_col,
-                chain_exclusions=chain_exclusions,
                 chain_dicts=chain_dicts,
                 collision_disabled_chains=collision_disabled,
                 rigid_to_chain=rigid_to_chain,
+                self_collision_disabled_chains=self_collision_disabled,
             )
         else:
             # Draft: skip NCC empties entirely. Set disable_collisions on joints.
@@ -278,8 +280,8 @@ def clear_physics(armature_obj) -> None:
             if rbw:
                 rbw.enabled = False
 
-            # Bulk-delete all objects via bpy.ops.object.delete() (much faster
-            # than individual bpy.data.objects.remove for thousands of objects)
+            # Batch-remove all physics objects in one call to avoid
+            # per-object depsgraph/physics updates that hang on 25K+ objects
             all_objs = []
             def _collect_objects(col):
                 for child in list(col.children):
@@ -288,11 +290,7 @@ def clear_physics(armature_obj) -> None:
             _collect_objects(collection)
 
             if all_objs:
-                for obj in bpy.context.selected_objects:
-                    obj.select_set(False)
-                for obj in all_objs:
-                    obj.select_set(True)
-                bpy.ops.object.delete()
+                bpy.data.batch_remove(all_objs)
 
             # Remove empty collections
             def _remove_collections(col):
@@ -304,13 +302,13 @@ def clear_physics(armature_obj) -> None:
         if "physics_collection" in armature_obj:
             del armature_obj["physics_collection"]
 
-    # Clean metadata keys (preserve user settings: exclusions, disabled chains, quality)
+    # Clean metadata keys (preserve user settings: disabled chains, quality)
     for key in ("mmd_physics_data", "physics_mode", "mmd_physics_chains"):
         if key in armature_obj:
             del armature_obj[key]
-    # Note: mmd_chain_exclusions, mmd_chain_collision_disabled,
-    # mmd_chain_physics_disabled, and collision_quality are intentionally
-    # preserved across clear/rebuild so user settings survive.
+    # Note: mmd_chain_collision_disabled, mmd_chain_physics_disabled,
+    # mmd_chain_self_collision_disabled, and collision_quality are
+    # intentionally preserved across clear/rebuild so user settings survive.
 
 
 def _mute_tracking_constraints(armature_obj, mute: bool = True) -> None:
@@ -588,7 +586,7 @@ def remove_chain(armature_obj, chain_index: int) -> str:
 
 
 def rebuild_ncc(armature_obj) -> tuple[int, int]:
-    """Rebuild non-collision constraint empties respecting current exclusion settings.
+    """Rebuild non-collision constraint empties respecting current settings.
 
     Reuses existing NCC empties by reassigning their object1/object2 pairs.
     Only creates or removes the difference. Uses serialized physics data on the
@@ -637,8 +635,10 @@ def rebuild_ncc(armature_obj) -> tuple[int, int]:
             rigid_objects[idx] = obj
 
     # Read settings from armature
-    chain_exclusions = json.loads(armature_obj.get("mmd_chain_exclusions", "{}"))
     collision_disabled = set(json.loads(armature_obj.get("mmd_chain_collision_disabled", "[]")))
+    self_collision_disabled = set(json.loads(
+        armature_obj.get("mmd_chain_self_collision_disabled", "[]")
+    ))
     chains_json = armature_obj.get("mmd_physics_chains")
     chain_dicts = json.loads(chains_json) if chains_json else []
     rigid_to_chain = _build_rigid_to_chain_map(chain_dicts)
@@ -646,9 +646,9 @@ def rebuild_ncc(armature_obj) -> tuple[int, int]:
     # Compute NCC pair table from serialized data (pure Python, fast)
     pair_table = _compute_ncc_pairs(
         rb_data_list, joints_data, rigid_objects,
-        chain_exclusions=chain_exclusions,
         collision_disabled_chains=collision_disabled,
         rigid_to_chain=rigid_to_chain,
+        self_collision_disabled_chains=self_collision_disabled,
     )
     new_count = len(pair_table)
     print(f"NCC rebuild: {old_count} existing, {new_count} needed")
@@ -670,21 +670,23 @@ def rebuild_ncc(armature_obj) -> tuple[int, int]:
             rbc.object2 = pair_table[i][1]
 
         if new_count < old_count:
-            # Remove excess NCC empties via single operator call (much faster
-            # than individual bpy.data.objects.remove for thousands of objects)
+            # Batch-remove excess NCC empties (single depsgraph update)
             excess_objs = ncc_objs[new_count:]
             print(f"Removing {len(excess_objs)} excess NCC empties...")
-            for obj in bpy.context.selected_objects:
-                obj.select_set(False)
-            for obj in excess_objs:
-                obj.select_set(True)
-            bpy.ops.object.delete()
+            bpy.data.batch_remove(excess_objs)
             print(f"Removed {len(excess_objs)} NCC empties")
         elif new_count > old_count:
-            # Create additional NCC empties for the remaining pairs
+            # Create additional NCC empties — needs visible collection for
+            # bpy.ops.rigidbody.constraint_add / bpy.ops.object.duplicate
+            vl_col = bpy.context.view_layer.layer_collection.children.get(col_name)
+            was_hidden = vl_col and vl_col.hide_viewport
+            if was_hidden:
+                vl_col.hide_viewport = False
             extra_pairs = pair_table[old_count:]
             print(f"Creating {len(extra_pairs)} additional NCC empties...")
             _create_non_collision_empties(bpy, extra_pairs, joint_col)
+            if was_hidden:
+                vl_col.hide_viewport = True
 
         print(f"NCC rebuild done: {old_count} → {new_count}")
     finally:
@@ -700,9 +702,9 @@ def rebuild_ncc(armature_obj) -> tuple[int, int]:
 
 def _compute_ncc_pairs(
     rb_data_list: list[dict], joints_data: list[dict], rigid_objects: list,
-    chain_exclusions: dict[str, list[str]] | None = None,
     collision_disabled_chains: set[str] | None = None,
     rigid_to_chain: dict[int, str] | None = None,
+    self_collision_disabled_chains: set[str] | None = None,
 ) -> list[tuple]:
     """Compute non-collision pair table from serialized physics data.
 
@@ -712,15 +714,9 @@ def _compute_ncc_pairs(
 
     Returns list of (obj_a, obj_b) tuples for NCC empty creation.
     """
-    chain_exclusions = chain_exclusions or {}
     collision_disabled_chains = collision_disabled_chains or set()
     rigid_to_chain = rigid_to_chain or {}
-
-    # Build bidirectional exclusion set
-    excluded_chain_pairs: set[frozenset] = set()
-    for chain_a, excluded_list in chain_exclusions.items():
-        for chain_b in excluded_list:
-            excluded_chain_pairs.add(frozenset((chain_a, chain_b)))
+    self_collision_disabled_chains = self_collision_disabled_chains or set()
 
     n_bodies = len(rigid_objects)
 
@@ -763,7 +759,8 @@ def _compute_ncc_pairs(
                 if chain_b and chain_b in collision_disabled_chains:
                     continue
 
-                if chain_a and chain_b and frozenset((chain_a, chain_b)) in excluded_chain_pairs:
+                # Skip intra-chain pairs when self-collision is disabled
+                if chain_a and chain_a == chain_b and chain_a in self_collision_disabled_chains:
                     continue
 
                 obj_a = rigid_objects[i]
@@ -912,40 +909,38 @@ def toggle_chain_physics(armature_obj, chain_index: int, enable: bool) -> str:
     return chain_name
 
 
-def toggle_chain_exclusion(armature_obj, chain_name: str, exclude_chain_name: str) -> bool:
-    """Toggle collision exclusion between two chains.
+def toggle_chain_self_collision(armature_obj, chain_index: int, enable: bool) -> str:
+    """Toggle self-collision for a physics chain.
 
-    Exclusion is bidirectional: excluding A from B also excludes B from A.
-    Takes effect on next NCC rebuild.
+    Self-collision ON (default): intra-chain NCC empties exist, bodies avoid
+    each other within the chain.
+    Self-collision OFF: intra-chain NCC empties are skipped, bodies can clip
+    through each other. Safe for linear chains (hair, ties); fan chains
+    (skirt) should keep self-collision on.
 
-    Returns True if now excluded, False if no longer excluded.
+    Does NOT auto-rebuild NCCs — caller is responsible for calling rebuild_ncc().
+
+    Returns the chain name.
     """
-    exclusions = json.loads(armature_obj.get("mmd_chain_exclusions", "{}"))
+    chains_json = armature_obj.get("mmd_physics_chains")
+    if not chains_json:
+        raise ValueError("No chain data stored on armature")
+    chains = json.loads(chains_json)
+    if chain_index < 0 or chain_index >= len(chains):
+        raise ValueError(f"Chain index {chain_index} out of range")
 
-    # Check if already excluded (in either direction)
-    is_excluded = (
-        exclude_chain_name in exclusions.get(chain_name, [])
-        or chain_name in exclusions.get(exclude_chain_name, [])
-    )
+    chain_name = chains[chain_index]["name"]
+    disabled = set(json.loads(armature_obj.get("mmd_chain_self_collision_disabled", "[]")))
 
-    if is_excluded:
-        # Remove exclusion from both directions
-        if chain_name in exclusions and exclude_chain_name in exclusions[chain_name]:
-            exclusions[chain_name].remove(exclude_chain_name)
-            if not exclusions[chain_name]:
-                del exclusions[chain_name]
-        if exclude_chain_name in exclusions and chain_name in exclusions[exclude_chain_name]:
-            exclusions[exclude_chain_name].remove(chain_name)
-            if not exclusions[exclude_chain_name]:
-                del exclusions[exclude_chain_name]
-        log.info("Removed exclusion: '%s' ↔ '%s'", chain_name, exclude_chain_name)
+    if enable:
+        disabled.discard(chain_name)
     else:
-        # Add exclusion (store in canonical direction: chain_name → exclude_chain_name)
-        exclusions.setdefault(chain_name, []).append(exclude_chain_name)
-        log.info("Added exclusion: '%s' ↔ '%s'", chain_name, exclude_chain_name)
+        disabled.add(chain_name)
 
-    armature_obj["mmd_chain_exclusions"] = json.dumps(exclusions)
-    return not is_excluded
+    armature_obj["mmd_chain_self_collision_disabled"] = json.dumps(sorted(disabled))
+    state = "enabled" if enable else "disabled"
+    log.info("Chain '%s' self-collision %s", chain_name, state)
+    return chain_name
 
 
 def get_ncc_count(armature_obj) -> int:
@@ -1455,16 +1450,16 @@ def _apply_soft_constraints(rbc) -> None:
 
 def _create_non_collision_constraints(
     model, rigid_objects, joint_objects, collection,
-    chain_exclusions: dict[str, list[str]] | None = None,
     chain_dicts: list[dict] | None = None,
     collision_disabled_chains: set[str] | None = None,
     rigid_to_chain: dict[int, str] | None = None,
+    self_collision_disabled_chains: set[str] | None = None,
 ) -> None:
     """Apply non-collision settings based on PMX collision_group_mask.
 
     All joints get disable_collisions=True (adjacent bodies should never
-    collide). Non-joint excluded pairs get NCC empties. Chain exclusions
-    and collision-disabled chains skip NCC empties.
+    collide). Non-joint excluded pairs get NCC empties. Collision-disabled
+    chains and self-collision-disabled chains skip NCC empties.
 
     Delegates pair computation to _compute_ncc_pairs (shared with rebuild_ncc).
     """
@@ -1493,9 +1488,9 @@ def _create_non_collision_constraints(
 
     pair_table = _compute_ncc_pairs(
         rb_data_list, joints_data, rigid_objects,
-        chain_exclusions=chain_exclusions,
         collision_disabled_chains=collision_disabled_chains,
         rigid_to_chain=rigid_to_chain,
+        self_collision_disabled_chains=self_collision_disabled_chains,
     )
 
     # Create NCC empties for all non-joint excluded pairs (no proximity filter)

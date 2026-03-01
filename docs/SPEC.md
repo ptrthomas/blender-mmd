@@ -509,18 +509,18 @@ def build_physics(armature_obj, model, scale: float, mode: str = "none",
 
 | Quality | NCC empties | Collision layers | Use case |
 |---------|-------------|-----------------|----------|
-| `high` (default) | All excluded pairs (respecting chain exclusions) | shared layer 0 + own group | Final baking |
+| `high` (default) | All excluded pairs (respecting self-collision settings) | shared layer 0 + own group | Final baking |
 | `draft` | None | `[False]*20` (no collisions) | Fast preview — springs/joints work but bodies pass through each other |
 
 Additional physics operations (no re-parse of PMX needed):
 
 - `reset_physics(armature_obj)` — Reposition existing dynamic rigid bodies, tracking empties, and joints to match current bone pose. Fast alternative to full rebuild.
 - `remove_chain(armature_obj, chain_index)` — Remove a single physics chain (rigid bodies, joints, tracking empties, bone constraints, and NCC empties referencing chain's bodies). Chain data stored as `mmd_physics_chains` JSON on armature during build.
-- `rebuild_ncc(armature_obj)` — Recompute NCC pair table from serialized data, reuse existing empties by reassigning pairs, create/delete only the difference. Respects chain exclusions and disabled chains. Returns (old_count, new_count).
+- `rebuild_ncc(armature_obj)` — Recompute NCC pair table from serialized data, reuse existing empties by reassigning pairs, create/delete only the difference. Respects self-collision settings and disabled chains. Returns (old_count, new_count).
 - `toggle_chain_collisions(armature_obj, chain_index, enable)` — Set chain's bodies to `collision_collections = [False]*20` (disable) or restore from PMX data (enable). Instant, no rebuild needed.
 - `toggle_chain_physics(armature_obj, chain_index, enable)` — Set chain's bodies to `kinematic=True` (disable/freeze) or restore from PMX mode (enable). Instant, no rebuild.
-- `toggle_chain_exclusion(armature_obj, chain_name, exclude_chain_name)` — Toggle bidirectional collision exclusion between two chains. Takes effect on next NCC rebuild.
-- `clear_physics(armature_obj)` — Remove all physics objects and metadata. Preserves user settings (exclusions, disabled chains, quality). Only removes `mmd_dynamic`/`mmd_dynamic_bone` constraints (not import-time constraints like `mmd_at_dummy`).
+- `toggle_chain_self_collision(armature_obj, chain_index, enable)` — Toggle self-collision for a chain. OFF = skip intra-chain NCC empties (bodies can clip through each other within the chain). Does NOT auto-rebuild; caller handles rebuild_ncc().
+- `clear_physics(armature_obj)` — Remove all physics objects and metadata. Preserves user settings (disabled chains, self-collision, quality). Only removes `mmd_dynamic`/`mmd_dynamic_bone` constraints (not import-time constraints like `mmd_at_dummy`).
 
 ---
 
@@ -562,12 +562,12 @@ Behavior:
 blender_mmd.build_physics              # Build physics (mode, collision_quality)
 blender_mmd.reset_physics              # Reposition rigid bodies to current bone pose
 blender_mmd.clear_physics              # Remove all physics objects and metadata
-blender_mmd.rebuild_ncc                # Rebuild NCC empties (respects exclusions)
+blender_mmd.rebuild_ncc                # Rebuild NCC empties (respects self-collision settings)
 blender_mmd.select_chain               # Select rigid bodies for a chain (chain_index)
 blender_mmd.remove_chain               # Remove a single physics chain (chain_index)
 blender_mmd.toggle_chain_collisions    # Toggle collision layers for a chain (chain_index)
 blender_mmd.toggle_chain_physics       # Toggle kinematic mode for a chain (chain_index)
-blender_mmd.exclude_chain_collision    # Toggle exclusion between chains (chain_index, exclude_chain_name)
+blender_mmd.toggle_chain_self_collision # Toggle self-collision for a chain (chain_index)
 blender_mmd.inspect_physics            # Copy full RB diagnostic report to clipboard
 blender_mmd.select_colliders           # Select all collision-eligible RBs for active RB
 blender_mmd.select_contacts            # Select RBs in contact with active RB at current frame
@@ -701,7 +701,7 @@ Rigid body creation, GENERIC_SPRING joints with spring values, collision layers 
 
 **Physics sub-panel:**
 - **No physics state:** Quality dropdown (High/Draft) + "Build Rigid Bodies" button (calls `build_physics` with `mode=rigid_body`)
-- **Physics active:** Shows rigid body count, quality, and NCC count (e.g. "Active: 265 bodies (High, 12966 NCCs)"). "Reset" button (repositions existing rigid bodies), "Rebuild NCCs" button (re-creates NCC empties respecting exclusion settings), "Remove" button (deletes all physics objects)
+- **Physics active:** Shows rigid body count, quality, and NCC count (e.g. "Active: 265 bodies (High, 12966 NCCs)"). "Reset" button (repositions existing rigid bodies), "Rebuild NCCs" button (re-creates NCC empties respecting self-collision settings), "Remove" button (deletes all physics objects)
 - **Selected RB info:** When a rigid body is selected (has `mmd_rigid_index`), shows a box with name, mode/mass/group, chain membership, and three debug buttons:
   - **Inspect**: Copies full diagnostic report to clipboard (PMX data, joints, collision mask, position, warnings)
   - **Colliders**: Selects all RBs that share at least one collision-eligible group (bidirectional PMX mask check)
@@ -710,9 +710,9 @@ Rigid body creation, GENERIC_SPRING joints with spring values, collision layers 
   - **Eye icon** (collision toggle): depressed = collisions active. Toggle off sets `collision_collections = [False]*20` (instant, no rebuild). Toggle on restores from PMX data.
   - **Physics icon** (physics toggle): depressed = physics active. Toggle off sets `kinematic=True` (bodies freeze). Toggle on restores from PMX mode.
   - **Chain name** (select): shows name, group, body count. Clicking selects chain's rigid bodies.
-  - **Filter icon** (exclude dropdown): opens popup to toggle collision exclusions with other chains. Excluded chains skip NCC empties between them on next rebuild.
+  - **Link icon** (self-collision toggle): depressed (LINKED) = self-collision ON (intra-chain NCC empties exist, bodies avoid each other). Toggle off (UNLINKED) = skip intra-chain NCCs (bodies can clip through each other). Safe for linear chains (hair, ties); fan chains (skirt) should keep on. Triggers NCC rebuild.
   - **X button** (remove): removes chain (rigid bodies, joints, tracking empties, NCC empties, bone constraints).
-- Per-chain settings stored on armature: `mmd_chain_collision_disabled` (JSON list), `mmd_chain_physics_disabled` (JSON list), `mmd_chain_exclusions` (JSON dict). Preserved across clear/rebuild. Full rebuild brings back all deleted chains, respecting these settings.
+- Per-chain settings stored on armature: `mmd_chain_collision_disabled` (JSON list), `mmd_chain_physics_disabled` (JSON list), `mmd_chain_self_collision_disabled` (JSON list). Preserved across clear/rebuild. Full rebuild brings back all deleted chains, respecting these settings.
 - Chain data detected via `chains.py` during physics build and stored as `mmd_physics_chains` JSON on the armature
 
 **IK Toggle sub-panel** (collapsed by default):
