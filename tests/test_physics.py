@@ -14,6 +14,8 @@ from blender_mmd.physics import (
     deserialize_physics_data,
     is_locked_dof,
     serialize_physics_data,
+    toggle_chain_exclusion,
+    _build_rigid_to_chain_map,
 )
 
 SAMPLES_DIR = Path(__file__).parent / "samples"
@@ -208,3 +210,83 @@ class TestMetadataStorage:
         assert isinstance(rb["position"], list)
         assert len(rb["size"]) == 3
         assert len(rb["position"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# Collision quality: draft mode
+# ---------------------------------------------------------------------------
+
+class TestCollisionQualityDraft:
+    def test_draft_all_false(self):
+        """Draft quality: all collision layers should be False."""
+        rigid = _make_rigid(group=3, mask=0xFFFF)
+        cols = build_collision_collections(rigid, collision_quality="draft")
+        assert all(v is False for v in cols)
+        assert len(cols) == 20
+
+    def test_draft_group_0(self):
+        """Draft quality with group 0: still all False."""
+        rigid = _make_rigid(group=0, mask=0xFFFF)
+        cols = build_collision_collections(rigid, collision_quality="draft")
+        assert sum(cols) == 0
+
+    def test_high_matches_default(self):
+        """High quality matches default behavior (no quality param)."""
+        rigid = _make_rigid(group=5, mask=0x0000)
+        cols_default = build_collision_collections(rigid)
+        cols_high = build_collision_collections(rigid, collision_quality="high")
+        assert cols_default == cols_high
+
+
+# ---------------------------------------------------------------------------
+# Chain exclusion logic
+# ---------------------------------------------------------------------------
+
+class TestChainExclusion:
+    def test_rigid_to_chain_map(self):
+        """_build_rigid_to_chain_map correctly maps rigid indices to chain names."""
+        chains = [
+            {"name": "HairA", "rigid_indices": [10, 11, 12]},
+            {"name": "SkirtF", "rigid_indices": [20, 21]},
+        ]
+        mapping = _build_rigid_to_chain_map(chains)
+        assert mapping[10] == "HairA"
+        assert mapping[12] == "HairA"
+        assert mapping[20] == "SkirtF"
+        assert 0 not in mapping
+
+    def test_toggle_exclusion_add(self):
+        """toggle_chain_exclusion adds bidirectional exclusion."""
+
+        class FakeArmature(dict):
+            pass
+
+        arm = FakeArmature()
+        result = toggle_chain_exclusion(arm, "HairA", "SkirtF")
+        assert result is True  # now excluded
+        exclusions = json.loads(arm["mmd_chain_exclusions"])
+        assert "SkirtF" in exclusions.get("HairA", [])
+
+    def test_toggle_exclusion_remove(self):
+        """toggle_chain_exclusion removes existing exclusion."""
+
+        class FakeArmature(dict):
+            pass
+
+        arm = FakeArmature()
+        arm["mmd_chain_exclusions"] = json.dumps({"HairA": ["SkirtF"]})
+        result = toggle_chain_exclusion(arm, "HairA", "SkirtF")
+        assert result is False  # no longer excluded
+        exclusions = json.loads(arm["mmd_chain_exclusions"])
+        assert "SkirtF" not in exclusions.get("HairA", [])
+
+    def test_toggle_exclusion_reverse_direction(self):
+        """toggle_chain_exclusion detects exclusion stored in reverse direction."""
+
+        class FakeArmature(dict):
+            pass
+
+        arm = FakeArmature()
+        arm["mmd_chain_exclusions"] = json.dumps({"SkirtF": ["HairA"]})
+        result = toggle_chain_exclusion(arm, "HairA", "SkirtF")
+        assert result is False  # was excluded in reverse, now removed

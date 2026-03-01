@@ -26,15 +26,19 @@ _SHAPE_MAP = {
 }
 
 
-def build_physics(armature_obj, model, scale: float, mode: str = "none") -> None:
+def build_physics(
+    armature_obj, model, scale: float, mode: str = "none",
+    collision_quality: str = "high",
+) -> None:
     """Build physics for an MMD model.
 
     Args:
         mode: "none" (metadata only), "rigid_body" (Blender RB), or "cloth" (detect chains).
+        collision_quality: "high" (full NCC empties) or "draft" (no collisions, fast preview).
     """
     log.info(
-        "Building physics (mode=%s): %d rigid bodies, %d joints",
-        mode, len(model.rigid_bodies), len(model.joints),
+        "Building physics (mode=%s, quality=%s): %d rigid bodies, %d joints",
+        mode, collision_quality, len(model.rigid_bodies), len(model.joints),
     )
 
     # Clean up any existing physics first
@@ -43,6 +47,7 @@ def build_physics(armature_obj, model, scale: float, mode: str = "none") -> None
     # Always store metadata — available for all modes
     armature_obj["mmd_physics_data"] = serialize_physics_data(model)
     armature_obj["physics_mode"] = mode
+    armature_obj["collision_quality"] = collision_quality
 
     if mode == "none":
         log.info("Physics mode 'none': metadata stored, no Blender objects created")
@@ -58,7 +63,7 @@ def build_physics(armature_obj, model, scale: float, mode: str = "none") -> None
         return
 
     if mode == "rigid_body":
-        _build_rigid_body_physics(armature_obj, model, scale)
+        _build_rigid_body_physics(armature_obj, model, scale, collision_quality)
         return
 
     raise ValueError(f"Unknown physics mode: {mode!r}")
@@ -77,7 +82,9 @@ def _chain_to_dict(chain) -> dict:
     }
 
 
-def _build_rigid_body_physics(armature_obj, model, scale: float) -> None:
+def _build_rigid_body_physics(
+    armature_obj, model, scale: float, collision_quality: str = "high",
+) -> None:
     """Create rigid bodies, joints, bone coupling, and configure physics world.
 
     Three-phase build:
@@ -95,7 +102,16 @@ def _build_rigid_body_physics(armature_obj, model, scale: float) -> None:
     try:
         # --- Phase 1: CREATE (no depsgraph needed) ---
 
+        # Remove stale collections from previous builds (objects removed but
+        # collections left behind → bpy.data.collections.new gives ".001" suffix).
+        # Must remove children first (Rigid Bodies, Joints, Tracking) or they
+        # become orphans that cause ".001" on the next build.
         col_name = f"{armature_obj.name}_Physics"
+        for stale in [c for c in bpy.data.collections if c.name.startswith(col_name)]:
+            for child in list(stale.children):
+                bpy.data.collections.remove(child)
+            bpy.data.collections.remove(stale)
+
         collection = bpy.data.collections.new(col_name)
         bpy.context.scene.collection.children.link(collection)
         armature_obj["physics_collection"] = col_name
@@ -109,9 +125,42 @@ def _build_rigid_body_physics(armature_obj, model, scale: float) -> None:
 
         bone_names = _build_bone_name_map(armature_obj)
 
-        rigid_objects = _create_rigid_bodies(model, armature_obj, scale, rb_col)
+        # Read per-chain disable states for collision layer assignment
+        collision_disabled = set(json.loads(armature_obj.get("mmd_chain_collision_disabled", "[]")))
+        physics_disabled = set(json.loads(armature_obj.get("mmd_chain_physics_disabled", "[]")))
+
+        # Detect chains early so we can use them for collision layer decisions
+        from .chains import detect_chains
+        chains = detect_chains(model)
+        chain_dicts = [_chain_to_dict(c) for c in chains]
+
+        # Build rigid_index → chain_name lookup
+        rigid_to_chain = _build_rigid_to_chain_map(chain_dicts)
+
+        rigid_objects = _create_rigid_bodies(
+            model, armature_obj, scale, rb_col,
+            collision_quality=collision_quality,
+            collision_disabled_chains=collision_disabled,
+            rigid_to_chain=rigid_to_chain,
+        )
         joint_objects = _create_joints(model, armature_obj, rigid_objects, bone_names, scale, joint_col)
-        _create_non_collision_constraints(model, rigid_objects, joint_objects, joint_col)
+
+        if collision_quality == "high":
+            chain_exclusions = json.loads(armature_obj.get("mmd_chain_exclusions", "{}"))
+            _create_non_collision_constraints(
+                model, rigid_objects, joint_objects, joint_col,
+                chain_exclusions=chain_exclusions,
+                chain_dicts=chain_dicts,
+                collision_disabled_chains=collision_disabled,
+                rigid_to_chain=rigid_to_chain,
+            )
+        else:
+            # Draft: skip NCC empties entirely. Set disable_collisions on joints.
+            for j_obj in joint_objects:
+                rbc = j_obj.rigid_body_constraint
+                if rbc:
+                    rbc.disable_collisions = True
+            log.info("Draft quality: skipped NCC empties, %d joints set disable_collisions", len(joint_objects))
 
         # --- Phase 2: POSITION (needs depsgraph for matrix_world) ---
 
@@ -146,15 +195,56 @@ def _build_rigid_body_physics(armature_obj, model, scale: float) -> None:
     finally:
         _set_rigid_body_world_enabled(bpy.context.scene, True)
 
-    # Detect and store chains for per-chain UI
-    from .chains import detect_chains
-    chains = detect_chains(model)
-    armature_obj["mmd_physics_chains"] = json.dumps(
-        [_chain_to_dict(c) for c in chains]
-    )
+    # Store chains (already detected above)
+    armature_obj["mmd_physics_chains"] = json.dumps(chain_dicts)
 
-    log.info("Physics build complete: %d rigid bodies, %d joints, %d chains",
-             len(rigid_objects), len(model.joints), len(chains))
+    # Apply per-chain physics disabled (kinematic) state
+    if physics_disabled:
+        _apply_chain_physics_disabled(armature_obj, chain_dicts, physics_disabled, model)
+
+    log.info("Physics build complete: %d rigid bodies, %d joints, %d chains (quality=%s)",
+             len(rigid_objects), len(model.joints), len(chains), collision_quality)
+
+
+def _build_rigid_to_chain_map(chain_dicts: list[dict]) -> dict[int, str]:
+    """Map rigid body index → chain name from chain dicts."""
+    result: dict[int, str] = {}
+    for chain in chain_dicts:
+        name = chain["name"]
+        for ri in chain.get("rigid_indices", []):
+            result[ri] = name
+    return result
+
+
+def _apply_chain_physics_disabled(
+    armature_obj, chain_dicts: list[dict], disabled_chains: set[str], model,
+) -> None:
+    """Set kinematic=True for bodies in physics-disabled chains after build."""
+    import bpy
+
+    col_name = armature_obj.get("physics_collection")
+    if not col_name:
+        return
+    col = bpy.data.collections.get(col_name)
+    if not col:
+        return
+    rb_col = col.children.get("Rigid Bodies")
+    if not rb_col:
+        return
+
+    rb_by_index: dict[int, object] = {}
+    for obj in rb_col.objects:
+        idx = obj.get("mmd_rigid_index")
+        if idx is not None:
+            rb_by_index[idx] = obj
+
+    for chain in chain_dicts:
+        if chain["name"] not in disabled_chains:
+            continue
+        for ri in chain.get("rigid_indices", []):
+            obj = rb_by_index.get(ri)
+            if obj and obj.rigid_body:
+                obj.rigid_body.kinematic = True
 
 
 def clear_physics(armature_obj) -> None:
@@ -183,23 +273,44 @@ def clear_physics(armature_obj) -> None:
                         if c.type == "IK" and c.mute:
                             c.mute = False
 
-            # Delete all objects in collection and subcollections
-            def _remove_collection_recursive(col):
-                for child in list(col.children):
-                    _remove_collection_recursive(child)
-                for obj in list(col.objects):
-                    bpy.data.objects.remove(obj, do_unlink=True)
-                bpy.data.collections.remove(col)
+            # Disable RBW before mass deletion
+            rbw = bpy.context.scene.rigidbody_world
+            if rbw:
+                rbw.enabled = False
 
-            _remove_collection_recursive(collection)
+            # Bulk-delete all objects via bpy.ops.object.delete() (much faster
+            # than individual bpy.data.objects.remove for thousands of objects)
+            all_objs = []
+            def _collect_objects(col):
+                for child in list(col.children):
+                    _collect_objects(child)
+                all_objs.extend(list(col.objects))
+            _collect_objects(collection)
+
+            if all_objs:
+                for obj in bpy.context.selected_objects:
+                    obj.select_set(False)
+                for obj in all_objs:
+                    obj.select_set(True)
+                bpy.ops.object.delete()
+
+            # Remove empty collections
+            def _remove_collections(col):
+                for child in list(col.children):
+                    _remove_collections(child)
+                bpy.data.collections.remove(col)
+            _remove_collections(collection)
 
         if "physics_collection" in armature_obj:
             del armature_obj["physics_collection"]
 
-    # Clean metadata keys
+    # Clean metadata keys (preserve user settings: exclusions, disabled chains, quality)
     for key in ("mmd_physics_data", "physics_mode", "mmd_physics_chains"):
         if key in armature_obj:
             del armature_obj[key]
+    # Note: mmd_chain_exclusions, mmd_chain_collision_disabled,
+    # mmd_chain_physics_disabled, and collision_quality are intentionally
+    # preserved across clear/rebuild so user settings survive.
 
 
 def _mute_tracking_constraints(armature_obj, mute: bool = True) -> None:
@@ -426,13 +537,22 @@ def remove_chain(armature_obj, chain_index: int) -> str:
                 bpy.data.objects.remove(obj, do_unlink=True)
                 removed += 1
 
-    # Remove joint objects
+    # Remove joint objects and NCC empties referencing chain's rigid bodies
     joint_col = collection.children.get("Joints")
     if joint_col:
         for obj in list(joint_col.objects):
             idx = obj.get("mmd_joint_index")
             if idx is not None and idx in joint_indices:
                 bpy.data.objects.remove(obj, do_unlink=True)
+                continue
+            # Check NCC empties (no mmd_joint_index, have rigid_body_constraint)
+            if idx is None and obj.rigid_body_constraint:
+                rbc = obj.rigid_body_constraint
+                obj1_idx = rbc.object1.get("mmd_rigid_index") if rbc.object1 else None
+                obj2_idx = rbc.object2.get("mmd_rigid_index") if rbc.object2 else None
+                if (obj1_idx is not None and obj1_idx in rigid_indices) or \
+                   (obj2_idx is not None and obj2_idx in rigid_indices):
+                    bpy.data.objects.remove(obj, do_unlink=True)
 
     # Remove tracking empties and bone constraints for chain bones
     track_col = collection.children.get("Tracking")
@@ -465,6 +585,409 @@ def remove_chain(armature_obj, chain_index: int) -> str:
 
     log.info("Removed chain '%s': %d rigid bodies", chain_name, removed)
     return chain_name
+
+
+def rebuild_ncc(armature_obj) -> tuple[int, int]:
+    """Rebuild non-collision constraint empties respecting current exclusion settings.
+
+    Reuses existing NCC empties by reassigning their object1/object2 pairs.
+    Only creates or removes the difference. Uses serialized physics data on the
+    armature (no PMX re-parse needed).
+
+    Returns (old_count, new_count) of NCC empties.
+    """
+    import bpy
+
+    phys_json = armature_obj.get("mmd_physics_data")
+    if not phys_json:
+        raise ValueError("No physics data on armature")
+
+    col_name = armature_obj.get("physics_collection")
+    if not col_name:
+        raise ValueError("No physics collection found")
+    collection = bpy.data.collections.get(col_name)
+    if not collection:
+        raise ValueError(f"Collection '{col_name}' not found")
+
+    joint_col = collection.children.get("Joints")
+    if not joint_col:
+        raise ValueError("No Joints collection found")
+
+    rb_col = collection.children.get("Rigid Bodies")
+    if not rb_col:
+        raise ValueError("No Rigid Bodies collection found")
+
+    # Collect existing NCC empties (have rigid_body_constraint but no mmd_joint_index)
+    ncc_objs = [
+        obj for obj in joint_col.objects
+        if obj.get("mmd_joint_index") is None and obj.rigid_body_constraint
+    ]
+    old_count = len(ncc_objs)
+
+    # Use serialized data from armature (no PMX re-parse)
+    phys_data = json.loads(phys_json)
+    rb_data_list = phys_data["rigid_bodies"]
+    joints_data = phys_data["joints"]
+
+    # Build rigid body object lookup
+    rigid_objects = [None] * len(rb_data_list)
+    for obj in rb_col.objects:
+        idx = obj.get("mmd_rigid_index")
+        if idx is not None and 0 <= idx < len(rigid_objects):
+            rigid_objects[idx] = obj
+
+    # Read settings from armature
+    chain_exclusions = json.loads(armature_obj.get("mmd_chain_exclusions", "{}"))
+    collision_disabled = set(json.loads(armature_obj.get("mmd_chain_collision_disabled", "[]")))
+    chains_json = armature_obj.get("mmd_physics_chains")
+    chain_dicts = json.loads(chains_json) if chains_json else []
+    rigid_to_chain = _build_rigid_to_chain_map(chain_dicts)
+
+    # Compute NCC pair table from serialized data (pure Python, fast)
+    pair_table = _compute_ncc_pairs(
+        rb_data_list, joints_data, rigid_objects,
+        chain_exclusions=chain_exclusions,
+        collision_disabled_chains=collision_disabled,
+        rigid_to_chain=rigid_to_chain,
+    )
+    new_count = len(pair_table)
+    print(f"NCC rebuild: {old_count} existing, {new_count} needed")
+
+    # Disable RBW during modifications
+    scene = bpy.context.scene
+    rbw = scene.rigidbody_world
+    rbw_was_enabled = False
+    if rbw:
+        rbw_was_enabled = rbw.enabled
+        rbw.enabled = False
+
+    try:
+        # Reassign existing NCC empties to new pairs (no create/delete needed)
+        reuse_count = min(old_count, new_count)
+        for i in range(reuse_count):
+            rbc = ncc_objs[i].rigid_body_constraint
+            rbc.object1 = pair_table[i][0]
+            rbc.object2 = pair_table[i][1]
+
+        if new_count < old_count:
+            # Remove excess NCC empties via single operator call (much faster
+            # than individual bpy.data.objects.remove for thousands of objects)
+            excess_objs = ncc_objs[new_count:]
+            print(f"Removing {len(excess_objs)} excess NCC empties...")
+            for obj in bpy.context.selected_objects:
+                obj.select_set(False)
+            for obj in excess_objs:
+                obj.select_set(True)
+            bpy.ops.object.delete()
+            print(f"Removed {len(excess_objs)} NCC empties")
+        elif new_count > old_count:
+            # Create additional NCC empties for the remaining pairs
+            extra_pairs = pair_table[old_count:]
+            print(f"Creating {len(extra_pairs)} additional NCC empties...")
+            _create_non_collision_empties(bpy, extra_pairs, joint_col)
+
+        print(f"NCC rebuild done: {old_count} → {new_count}")
+    finally:
+        if rbw and rbw_was_enabled:
+            rbw.enabled = True
+
+    # Clear physics cache
+    scene.frame_set(scene.frame_current)
+
+    log.info("Rebuilt NCCs: %d → %d", old_count, new_count)
+    return old_count, new_count
+
+
+def _compute_ncc_pairs(
+    rb_data_list: list[dict], joints_data: list[dict], rigid_objects: list,
+    chain_exclusions: dict[str, list[str]] | None = None,
+    collision_disabled_chains: set[str] | None = None,
+    rigid_to_chain: dict[int, str] | None = None,
+) -> list[tuple]:
+    """Compute non-collision pair table from serialized physics data.
+
+    Pure Python except for rigid_objects references in the output tuples.
+    Used by both initial build (via _create_non_collision_constraints) and
+    rebuild_ncc to avoid re-parsing PMX.
+
+    Returns list of (obj_a, obj_b) tuples for NCC empty creation.
+    """
+    chain_exclusions = chain_exclusions or {}
+    collision_disabled_chains = collision_disabled_chains or set()
+    rigid_to_chain = rigid_to_chain or {}
+
+    # Build bidirectional exclusion set
+    excluded_chain_pairs: set[frozenset] = set()
+    for chain_a, excluded_list in chain_exclusions.items():
+        for chain_b in excluded_list:
+            excluded_chain_pairs.add(frozenset((chain_a, chain_b)))
+
+    n_bodies = len(rigid_objects)
+
+    # Group rigid body indices by collision_group_number
+    group_map: dict[int, list[int]] = {}
+    for i, rb in enumerate(rb_data_list):
+        group_map.setdefault(rb["collision_group_number"], []).append(i)
+
+    # Map joint pairs (already have disable_collisions on joint objects)
+    joint_pair_set: set[frozenset] = set()
+    for joint in joints_data:
+        src, dst = joint["src_rigid"], joint["dest_rigid"]
+        if 0 <= src < n_bodies and 0 <= dst < n_bodies:
+            joint_pair_set.add(frozenset((src, dst)))
+
+    # Find non-colliding pairs
+    non_collision_pairs: set[frozenset] = set()
+    pair_table: list[tuple] = []
+
+    for i, rb_a in enumerate(rb_data_list):
+        chain_a = rigid_to_chain.get(i)
+        mask_a = rb_a["collision_group_mask"]
+        for grp in range(16):
+            if mask_a & (1 << grp):
+                continue
+            for j in group_map.get(grp, []):
+                if i == j:
+                    continue
+                pair = frozenset((i, j))
+                if pair in non_collision_pairs:
+                    continue
+                non_collision_pairs.add(pair)
+
+                if pair in joint_pair_set:
+                    continue
+
+                chain_b = rigid_to_chain.get(j)
+                if chain_a and chain_a in collision_disabled_chains:
+                    continue
+                if chain_b and chain_b in collision_disabled_chains:
+                    continue
+
+                if chain_a and chain_b and frozenset((chain_a, chain_b)) in excluded_chain_pairs:
+                    continue
+
+                obj_a = rigid_objects[i]
+                obj_b = rigid_objects[j]
+                if obj_a is not None and obj_b is not None:
+                    pair_table.append((obj_a, obj_b))
+
+    return pair_table
+
+
+def toggle_chain_collisions(armature_obj, chain_index: int, enable: bool) -> str:
+    """Toggle collision layers for a physics chain's rigid bodies.
+
+    Disable: collision_collections = [False]*20 (bodies pass through everything).
+    Enable: restore shared layer 0 + own group from PMX data.
+
+    Returns the chain name.
+    """
+    import bpy
+
+    chains_json = armature_obj.get("mmd_physics_chains")
+    if not chains_json:
+        raise ValueError("No chain data stored on armature")
+    chains = json.loads(chains_json)
+    if chain_index < 0 or chain_index >= len(chains):
+        raise ValueError(f"Chain index {chain_index} out of range")
+
+    chain = chains[chain_index]
+    chain_name = chain["name"]
+    rigid_indices = set(chain["rigid_indices"])
+
+    # Get PMX data for restoring collision layers
+    phys_json = armature_obj.get("mmd_physics_data")
+    if not phys_json:
+        raise ValueError("No physics data on armature")
+    phys_data = json.loads(phys_json)
+    rigid_bodies_data = phys_data["rigid_bodies"]
+
+    col_name = armature_obj.get("physics_collection")
+    if not col_name:
+        raise ValueError("No physics collection found")
+    col = bpy.data.collections.get(col_name)
+    if not col:
+        raise ValueError(f"Collection '{col_name}' not found")
+
+    rb_col = col.children.get("Rigid Bodies")
+    if not rb_col:
+        return chain_name
+
+    for obj in rb_col.objects:
+        idx = obj.get("mmd_rigid_index")
+        if idx is None or idx not in rigid_indices:
+            continue
+        rb = obj.rigid_body
+        if not rb:
+            continue
+        if enable:
+            # Restore from PMX data
+            rb_data = rigid_bodies_data[idx]
+            rigid = _rb_data_to_rigid(rb_data)
+            rb.collision_collections = _build_collision_collections(rigid)
+        else:
+            rb.collision_collections = [False] * 20
+
+    # Update disabled chains list
+    disabled = set(json.loads(armature_obj.get("mmd_chain_collision_disabled", "[]")))
+    if enable:
+        disabled.discard(chain_name)
+    else:
+        disabled.add(chain_name)
+    armature_obj["mmd_chain_collision_disabled"] = json.dumps(sorted(disabled))
+
+    # Clear physics cache
+    bpy.context.scene.frame_set(bpy.context.scene.frame_current)
+
+    state = "enabled" if enable else "disabled"
+    log.info("Chain '%s' collisions %s", chain_name, state)
+    return chain_name
+
+
+def toggle_chain_physics(armature_obj, chain_index: int, enable: bool) -> str:
+    """Toggle physics (kinematic) for a physics chain's rigid bodies.
+
+    Disable: kinematic=True (bodies freeze, follow bone positions).
+    Enable: restore kinematic from PMX mode (STATIC=True, DYNAMIC/DYNAMIC_BONE=False).
+
+    Returns the chain name.
+    """
+    import bpy
+
+    chains_json = armature_obj.get("mmd_physics_chains")
+    if not chains_json:
+        raise ValueError("No chain data stored on armature")
+    chains = json.loads(chains_json)
+    if chain_index < 0 or chain_index >= len(chains):
+        raise ValueError(f"Chain index {chain_index} out of range")
+
+    chain = chains[chain_index]
+    chain_name = chain["name"]
+    rigid_indices = set(chain["rigid_indices"])
+
+    # Get PMX data for restoring kinematic state
+    phys_json = armature_obj.get("mmd_physics_data")
+    if not phys_json:
+        raise ValueError("No physics data on armature")
+    phys_data = json.loads(phys_json)
+    rigid_bodies_data = phys_data["rigid_bodies"]
+
+    col_name = armature_obj.get("physics_collection")
+    if not col_name:
+        raise ValueError("No physics collection found")
+    col = bpy.data.collections.get(col_name)
+    if not col:
+        raise ValueError(f"Collection '{col_name}' not found")
+
+    rb_col = col.children.get("Rigid Bodies")
+    if not rb_col:
+        return chain_name
+
+    for obj in rb_col.objects:
+        idx = obj.get("mmd_rigid_index")
+        if idx is None or idx not in rigid_indices:
+            continue
+        rb = obj.rigid_body
+        if not rb:
+            continue
+        if enable:
+            # Restore from PMX mode: STATIC(0)=True, DYNAMIC(1)/DYNAMIC_BONE(2)=False
+            rb.kinematic = (rigid_bodies_data[idx]["mode"] == 0)
+        else:
+            rb.kinematic = True
+
+    # Update disabled chains list
+    disabled = set(json.loads(armature_obj.get("mmd_chain_physics_disabled", "[]")))
+    if enable:
+        disabled.discard(chain_name)
+    else:
+        disabled.add(chain_name)
+    armature_obj["mmd_chain_physics_disabled"] = json.dumps(sorted(disabled))
+
+    # Clear physics cache
+    bpy.context.scene.frame_set(bpy.context.scene.frame_current)
+
+    state = "enabled" if enable else "disabled"
+    log.info("Chain '%s' physics %s", chain_name, state)
+    return chain_name
+
+
+def toggle_chain_exclusion(armature_obj, chain_name: str, exclude_chain_name: str) -> bool:
+    """Toggle collision exclusion between two chains.
+
+    Exclusion is bidirectional: excluding A from B also excludes B from A.
+    Takes effect on next NCC rebuild.
+
+    Returns True if now excluded, False if no longer excluded.
+    """
+    exclusions = json.loads(armature_obj.get("mmd_chain_exclusions", "{}"))
+
+    # Check if already excluded (in either direction)
+    is_excluded = (
+        exclude_chain_name in exclusions.get(chain_name, [])
+        or chain_name in exclusions.get(exclude_chain_name, [])
+    )
+
+    if is_excluded:
+        # Remove exclusion from both directions
+        if chain_name in exclusions and exclude_chain_name in exclusions[chain_name]:
+            exclusions[chain_name].remove(exclude_chain_name)
+            if not exclusions[chain_name]:
+                del exclusions[chain_name]
+        if exclude_chain_name in exclusions and chain_name in exclusions[exclude_chain_name]:
+            exclusions[exclude_chain_name].remove(chain_name)
+            if not exclusions[exclude_chain_name]:
+                del exclusions[exclude_chain_name]
+        log.info("Removed exclusion: '%s' ↔ '%s'", chain_name, exclude_chain_name)
+    else:
+        # Add exclusion (store in canonical direction: chain_name → exclude_chain_name)
+        exclusions.setdefault(chain_name, []).append(exclude_chain_name)
+        log.info("Added exclusion: '%s' ↔ '%s'", chain_name, exclude_chain_name)
+
+    armature_obj["mmd_chain_exclusions"] = json.dumps(exclusions)
+    return not is_excluded
+
+
+def get_ncc_count(armature_obj) -> int:
+    """Count non-collision constraint empties in the Joints collection."""
+    import bpy
+
+    col_name = armature_obj.get("physics_collection")
+    if not col_name:
+        return 0
+    col = bpy.data.collections.get(col_name)
+    if not col:
+        return 0
+    joint_col = col.children.get("Joints")
+    if not joint_col:
+        return 0
+
+    count = 0
+    for obj in joint_col.objects:
+        if obj.get("mmd_joint_index") is None and obj.rigid_body_constraint:
+            count += 1
+    return count
+
+
+def _rb_data_to_rigid(rb_data: dict) -> RigidBody:
+    """Create a minimal RigidBody from serialized data for collision layer computation."""
+    return RigidBody(
+        name=rb_data["name"],
+        name_e=rb_data.get("name_e", ""),
+        bone_index=rb_data["bone_index"],
+        collision_group_number=rb_data["collision_group_number"],
+        collision_group_mask=rb_data["collision_group_mask"],
+        shape=RigidShape(rb_data["shape"]),
+        size=tuple(rb_data["size"]),
+        position=tuple(rb_data["position"]),
+        rotation=tuple(rb_data["rotation"]),
+        mass=rb_data["mass"],
+        linear_damping=rb_data["linear_damping"],
+        angular_damping=rb_data["angular_damping"],
+        bounce=rb_data["bounce"],
+        friction=rb_data["friction"],
+        mode=RigidMode(rb_data["mode"]),
+    )
 
 
 def serialize_physics_data(model) -> str:
@@ -527,11 +1050,18 @@ def _build_bone_name_map(armature_obj) -> dict[int, str]:
     return result
 
 
-def _create_rigid_bodies(model, armature_obj, scale: float, collection) -> list:
+def _create_rigid_bodies(
+    model, armature_obj, scale: float, collection,
+    collision_quality: str = "high",
+    collision_disabled_chains: set[str] | None = None,
+    rigid_to_chain: dict[int, str] | None = None,
+) -> list:
     """Create rigid body objects with collision_collections and collision margin."""
     import bpy
     from mathutils import Euler, Vector
 
+    collision_disabled_chains = collision_disabled_chains or set()
+    rigid_to_chain = rigid_to_chain or {}
     rigid_objects = []
 
     for i, rigid in enumerate(model.rigid_bodies):
@@ -571,8 +1101,13 @@ def _create_rigid_bodies(model, armature_obj, scale: float, collection) -> list:
         rb.angular_damping = rigid.angular_damping
         rb.kinematic = (rigid.mode == RigidMode.STATIC)
 
-        # Collision collections (shared layer 0 + own group)
-        rb.collision_collections = _build_collision_collections(rigid)
+        # Collision collections: draft = no collisions, high = shared layer + own group
+        # Also disable collisions for bodies in collision-disabled chains
+        chain_name = rigid_to_chain.get(i)
+        if collision_quality == "draft" or (chain_name and chain_name in collision_disabled_chains):
+            rb.collision_collections = [False] * 20
+        else:
+            rb.collision_collections = _build_collision_collections(rigid)
 
         # Collision margin: at 0.08 scale, Blender's default 0.04 is huge.
         # mmd_tools uses 1e-6 to prevent capsules pushing each other apart.
@@ -683,11 +1218,18 @@ def _build_capsule_mesh(bm, radius: float, height: float, segments: int = 8, rin
         faces.new([verts[last], verts[base + j2], verts[base + j]])
 
 
-def build_collision_collections(rigid: RigidBody) -> list[bool]:
+def build_collision_collections(
+    rigid: RigidBody, collision_quality: str = "high",
+) -> list[bool]:
     """Convert PMX collision group + mask → Blender 20-bool array.
 
     Public wrapper for testing.
+
+    Args:
+        collision_quality: "high" (shared layer 0 + own group) or "draft" (all False).
     """
+    if collision_quality == "draft":
+        return [False] * 20
     return _build_collision_collections(rigid)
 
 
@@ -911,67 +1453,54 @@ def _apply_soft_constraints(rbc) -> None:
             setattr(rbc, f"limit_ang_{axis}_upper", 0.0)
 
 
-def _create_non_collision_constraints(model, rigid_objects, joint_objects, collection) -> None:
+def _create_non_collision_constraints(
+    model, rigid_objects, joint_objects, collection,
+    chain_exclusions: dict[str, list[str]] | None = None,
+    chain_dicts: list[dict] | None = None,
+    collision_disabled_chains: set[str] | None = None,
+    rigid_to_chain: dict[int, str] | None = None,
+) -> None:
     """Apply non-collision settings based on PMX collision_group_mask.
 
-    Blender's collision_collections uses the SAME bitmask for Bullet's group
-    AND mask, making it symmetric. PMX requires asymmetric checking (both
-    masks must agree). We solve this with shared layer 0 + GENERIC constraint
-    empties that suppress specific pairs.
-
     All joints get disable_collisions=True (adjacent bodies should never
-    collide — the joint constraint manages their relationship). Non-joint
-    excluded pairs get NCC empties via template-and-duplicate (O(log N) ops).
+    collide). Non-joint excluded pairs get NCC empties. Chain exclusions
+    and collision-disabled chains skip NCC empties.
+
+    Delegates pair computation to _compute_ncc_pairs (shared with rebuild_ncc).
     """
     import bpy
 
-    n_bodies = len(rigid_objects)
-
     # Pass 1: Set disable_collisions=True on ALL joints.
-    # Adjacent bodies connected by joints should never collide — letting them
-    # collide causes instability since they overlap at the joint pivot point.
     for j_obj in joint_objects:
         rbc = j_obj.rigid_body_constraint
         if rbc:
             rbc.disable_collisions = True
     log.info("Set disable_collisions on all %d joints", len(joint_objects))
 
-    # Pass 2: Build NCC empties for non-joint non-colliding pairs.
-    # Group rigid body indices by collision_group_number
-    group_map: dict[int, list[int]] = {}
-    for i, rigid in enumerate(model.rigid_bodies):
-        group_map.setdefault(rigid.collision_group_number, []).append(i)
+    # Pass 2: Build NCC pair table from model data.
+    # Convert model objects to serialized-data format for _compute_ncc_pairs.
+    rb_data_list = [
+        {
+            "collision_group_number": rb.collision_group_number,
+            "collision_group_mask": rb.collision_group_mask,
+        }
+        for rb in model.rigid_bodies
+    ]
+    joints_data = [
+        {"src_rigid": j.src_rigid, "dest_rigid": j.dest_rigid}
+        for j in model.joints
+    ]
 
-    # Map joint pairs → joint objects (already handled above)
-    joint_pair_set: set[frozenset] = set()
-    for j_idx, joint in enumerate(model.joints):
-        src, dst = joint.src_rigid, joint.dest_rigid
-        if 0 <= src < n_bodies and 0 <= dst < n_bodies:
-            joint_pair_set.add(frozenset((src, dst)))
-
-    # Find non-colliding pairs that need NCC empties
-    non_collision_pairs: set[frozenset] = set()
-    non_collision_table: list[tuple] = []
-
-    for i, rigid_a in enumerate(model.rigid_bodies):
-        for grp in range(16):
-            if rigid_a.collision_group_mask & (1 << grp):
-                continue  # bit set = collides with this group, skip
-            # Body A excludes group `grp` — check all bodies in that group
-            for j in group_map.get(grp, []):
-                if i == j:
-                    continue
-                pair = frozenset((i, j))
-                if pair in non_collision_pairs:
-                    continue
-                non_collision_pairs.add(pair)
-
-                if pair not in joint_pair_set:
-                    non_collision_table.append((rigid_objects[i], rigid_objects[j]))
+    pair_table = _compute_ncc_pairs(
+        rb_data_list, joints_data, rigid_objects,
+        chain_exclusions=chain_exclusions,
+        collision_disabled_chains=collision_disabled_chains,
+        rigid_to_chain=rigid_to_chain,
+    )
 
     # Create NCC empties for all non-joint excluded pairs (no proximity filter)
-    if non_collision_table:
-        _create_non_collision_empties(bpy, non_collision_table, collection)
+    if pair_table:
+        _create_non_collision_empties(bpy, pair_table, collection)
 
 
 def _create_non_collision_empties(bpy, pair_table: list[tuple], collection) -> None:

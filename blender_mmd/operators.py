@@ -120,6 +120,15 @@ class BLENDER_MMD_OT_build_physics(bpy.types.Operator):
         default="none",
     )
 
+    collision_quality: EnumProperty(
+        name="Collision Quality",
+        items=[
+            ("high", "High", "Full collision detection with NCC empties. Best for final baking"),
+            ("draft", "Draft", "No collisions. Springs/joints work but bodies pass through each other"),
+        ],
+        default="high",
+    )
+
     def execute(self, context):
         from .physics import build_physics
         from .pmx import parse
@@ -138,10 +147,14 @@ class BLENDER_MMD_OT_build_physics(bpy.types.Operator):
 
         try:
             model = parse(filepath)
-            build_physics(armature_obj, model, scale, mode=self.mode)
+            build_physics(
+                armature_obj, model, scale,
+                mode=self.mode,
+                collision_quality=self.collision_quality,
+            )
             self.report(
                 {"INFO"},
-                f"Physics built (mode={self.mode}): "
+                f"Physics built (mode={self.mode}, quality={self.collision_quality}): "
                 f"{len(model.rigid_bodies)} rigid bodies, "
                 f"{len(model.joints)} joints",
             )
@@ -599,6 +612,149 @@ def _shape_radius(rb_data: dict, scale: float) -> float:
     return 0.01
 
 
+class BLENDER_MMD_OT_rebuild_ncc(bpy.types.Operator):
+    """Rebuild non-collision constraint empties (respects chain exclusions)"""
+
+    bl_idname = "blender_mmd.rebuild_ncc"
+    bl_label = "Rebuild NCCs"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        from .physics import rebuild_ncc
+
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        try:
+            old_count, new_count = rebuild_ncc(armature_obj)
+            self.report({"INFO"}, f"NCCs rebuilt: {old_count} → {new_count}")
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("NCC rebuild failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
+class BLENDER_MMD_OT_toggle_chain_collisions(bpy.types.Operator):
+    """Toggle collision detection for a physics chain"""
+
+    bl_idname = "blender_mmd.toggle_chain_collisions"
+    bl_label = "Toggle Chain Collisions"
+    bl_options = {"REGISTER", "UNDO"}
+
+    chain_index: IntProperty(name="Chain Index", default=-1)
+
+    def execute(self, context):
+        import json
+        from .physics import toggle_chain_collisions
+
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        # Determine current state to toggle
+        chains = json.loads(armature_obj.get("mmd_physics_chains", "[]"))
+        if self.chain_index < 0 or self.chain_index >= len(chains):
+            self.report({"ERROR"}, "Invalid chain index.")
+            return {"CANCELLED"}
+
+        chain_name = chains[self.chain_index]["name"]
+        disabled = set(json.loads(armature_obj.get("mmd_chain_collision_disabled", "[]")))
+        enable = chain_name in disabled  # if currently disabled, enable
+
+        try:
+            toggle_chain_collisions(armature_obj, self.chain_index, enable)
+            state = "enabled" if enable else "disabled"
+            self.report({"INFO"}, f"Chain '{chain_name}' collisions {state}")
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("Toggle chain collisions failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
+class BLENDER_MMD_OT_toggle_chain_physics(bpy.types.Operator):
+    """Toggle physics simulation for a physics chain (kinematic mode)"""
+
+    bl_idname = "blender_mmd.toggle_chain_physics"
+    bl_label = "Toggle Chain Physics"
+    bl_options = {"REGISTER", "UNDO"}
+
+    chain_index: IntProperty(name="Chain Index", default=-1)
+
+    def execute(self, context):
+        import json
+        from .physics import toggle_chain_physics
+
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        chains = json.loads(armature_obj.get("mmd_physics_chains", "[]"))
+        if self.chain_index < 0 or self.chain_index >= len(chains):
+            self.report({"ERROR"}, "Invalid chain index.")
+            return {"CANCELLED"}
+
+        chain_name = chains[self.chain_index]["name"]
+        disabled = set(json.loads(armature_obj.get("mmd_chain_physics_disabled", "[]")))
+        enable = chain_name in disabled  # if currently disabled, enable
+
+        try:
+            toggle_chain_physics(armature_obj, self.chain_index, enable)
+            state = "enabled" if enable else "disabled"
+            self.report({"INFO"}, f"Chain '{chain_name}' physics {state}")
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("Toggle chain physics failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
+class BLENDER_MMD_OT_exclude_chain_collision(bpy.types.Operator):
+    """Toggle collision exclusion between two chains"""
+
+    bl_idname = "blender_mmd.exclude_chain_collision"
+    bl_label = "Exclude Chain Collision"
+    bl_options = {"REGISTER", "UNDO"}
+
+    chain_index: IntProperty(name="Chain Index", default=-1)
+    exclude_chain_name: StringProperty(name="Exclude Chain Name")
+
+    def execute(self, context):
+        import json
+        from .physics import toggle_chain_exclusion
+
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        chains = json.loads(armature_obj.get("mmd_physics_chains", "[]"))
+        if self.chain_index < 0 or self.chain_index >= len(chains):
+            self.report({"ERROR"}, "Invalid chain index.")
+            return {"CANCELLED"}
+
+        chain_name = chains[self.chain_index]["name"]
+
+        try:
+            now_excluded = toggle_chain_exclusion(
+                armature_obj, chain_name, self.exclude_chain_name,
+            )
+            if now_excluded:
+                self.report({"INFO"}, f"Excluded: {chain_name} ↔ {self.exclude_chain_name}")
+            else:
+                self.report({"INFO"}, f"Un-excluded: {chain_name} ↔ {self.exclude_chain_name}")
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("Exclude chain collision failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
 def menu_func_import(self, context):
     self.layout.operator(
         BLENDER_MMD_OT_import_pmx.bl_idname,
@@ -616,8 +772,12 @@ _classes = (
     BLENDER_MMD_OT_build_physics,
     BLENDER_MMD_OT_clear_physics,
     BLENDER_MMD_OT_reset_physics,
+    BLENDER_MMD_OT_rebuild_ncc,
     BLENDER_MMD_OT_select_chain,
     BLENDER_MMD_OT_remove_chain,
+    BLENDER_MMD_OT_toggle_chain_collisions,
+    BLENDER_MMD_OT_toggle_chain_physics,
+    BLENDER_MMD_OT_exclude_chain_collision,
     BLENDER_MMD_OT_clear_animation,
     BLENDER_MMD_OT_toggle_ik,
     BLENDER_MMD_OT_toggle_all_ik,
