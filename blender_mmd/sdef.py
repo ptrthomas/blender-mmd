@@ -122,10 +122,12 @@ def _precompute_sdef_data(
             vg = vertex_groups[g.group]
             if vg.name.startswith("mmd_"):
                 continue
-            weights.append((vg.name, g.weight))
+            weights.append((vg.name, g.weight, g.group))
 
-        # Sort by weight descending, take top 2
-        weights.sort(key=lambda x: x[1], reverse=True)
+        # Sort by vertex group index ascending (matches mmd_tools).
+        # PMX R0 corresponds to bone1, R1 to bone2 — preserving
+        # PMX bone order ensures R0/R1 map to the correct bones.
+        weights.sort(key=lambda x: x[2])
         if len(weights) < 2:
             continue
 
@@ -218,7 +220,10 @@ def compute_sdef_frame(
         else:
             # Deformation matrix: pose_space @ bind_space_inverse
             mat = pose_bone.matrix @ pose_bone.bone.matrix_local.inverted()
-            quat = mat.to_quaternion()
+            # Use to_euler("YXZ") then to_quaternion() — matches mmd_tools.
+            # Direct to_quaternion() gives slightly different results for
+            # some rotation combinations.
+            quat = mat.to_euler("YXZ").to_quaternion()
         bone_cache[bone_name] = (mat, quat)
         return mat, quat
 
