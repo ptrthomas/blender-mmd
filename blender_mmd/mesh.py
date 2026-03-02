@@ -87,6 +87,51 @@ def create_mesh(
                         [vi], weight, "REPLACE"
                     )
 
+    # --- SDEF attributes ---
+    # Store SDEF C/R0/R1 parameters as per-vertex float3 mesh attributes
+    # and create a vertex group for visualization/masking.
+    sdef_verts: list[tuple[int, BoneWeightSDEF]] = [
+        (vi, pmx_v.weight)
+        for vi, pmx_v in enumerate(pmx_verts)
+        if isinstance(pmx_v.weight, BoneWeightSDEF)
+    ]
+    if sdef_verts:
+        n_verts = len(pmx_verts)
+        # Create float3 attributes (domain=POINT)
+        # Must create all first, then look up by name — creating new
+        # attributes invalidates previously returned RNA references.
+        mesh_data.attributes.new("mmd_sdef_c", "FLOAT_VECTOR", "POINT")
+        mesh_data.attributes.new("mmd_sdef_r0", "FLOAT_VECTOR", "POINT")
+        mesh_data.attributes.new("mmd_sdef_r1", "FLOAT_VECTOR", "POINT")
+
+        # Build flat arrays (all zeros initially, SDEF verts get their values)
+        import numpy as np
+        c_data = np.zeros(n_verts * 3, dtype=np.float32)
+        r0_data = np.zeros(n_verts * 3, dtype=np.float32)
+        r1_data = np.zeros(n_verts * 3, dtype=np.float32)
+
+        for vi, w in sdef_verts:
+            base = vi * 3
+            c_data[base:base + 3] = w.c
+            r0_data[base:base + 3] = w.r0
+            r1_data[base:base + 3] = w.r1
+
+        # Look up by name after all attributes exist
+        mesh_data.attributes["mmd_sdef_c"].data.foreach_set("vector", c_data)
+        mesh_data.attributes["mmd_sdef_r0"].data.foreach_set("vector", r0_data)
+        mesh_data.attributes["mmd_sdef_r1"].data.foreach_set("vector", r1_data)
+
+        # Create mmd_sdef vertex group (weight 1.0 for all SDEF verts)
+        vg_sdef = mesh_obj.vertex_groups.new(name="mmd_sdef")
+        vg_sdef.add([vi for vi, _ in sdef_verts], 1.0, "REPLACE")
+        vg_sdef.lock_weight = True
+
+        # Store flag and count on armature
+        armature_obj["mmd_has_sdef"] = True
+        armature_obj["mmd_sdef_count"] = len(sdef_verts)
+
+        log.info("Stored SDEF data: %d vertices", len(sdef_verts))
+
     # --- Per-vertex edge scale ---
     # Stored as a locked vertex group for Solidify modifier per-vertex thickness
     vg_edge = mesh_obj.vertex_groups.new(name="mmd_edge_scale")

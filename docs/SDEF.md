@@ -19,12 +19,16 @@ SDEF fixes this by storing three extra parameters per vertex — **C** (center),
 - PMD parser converts edge flag and assigns SDEF where applicable
 - Coordinate conversion (Y↔Z swap) applied to C/R0/R1 in parser
 - Mesh import assigns BDEF2-equivalent weights for SDEF vertices (correct bone assignment, but no spherical correction)
+- **(Session 1)** SDEF C/R0/R1 stored as `mmd_sdef_c`/`mmd_sdef_r0`/`mmd_sdef_r1` POINT-domain float3 mesh attributes in `mesh.py`. `mmd_sdef` vertex group (locked). `mmd_has_sdef` + `mmd_sdef_count` on armature. Survives `mesh.separate()`.
+- **(Session 1)** SDEF computation module `sdef.py`: `_precompute_sdef_data()`, `compute_sdef_frame()`, `write_mdd()`/`read_mdd()`
+- **(Session 1)** 17 unit tests in `tests/test_sdef.py` (preprocessing, identity, rotation, MDD round-trip)
+- **(Session 1)** Verified on YYB Miku: 6,032 SDEF vertices across 8 split meshes
 
 ### Not yet done
-- SDEF C/R0/R1 parameters not stored in Blender (discarded after weight assignment)
-- No spherical deformation computation
-- No visualization of which vertices use SDEF
-- No baking pipeline
+- No baking pipeline (bake_sdef / clear_sdef_bake / toggle)
+- No SDEF operators or UI panel
+- No visualization operator (select SDEF vertices)
+- No visual verification of SDEF vs LBS quality
 
 ---
 
@@ -345,43 +349,57 @@ Example: for `miku_scene.blend` with armature "YYB Miku" and mesh "Body01":
 
 ## Session plan
 
-### Session 1: Foundation (store + compute + unit tests)
+### Session 1: Foundation (store + compute + unit tests) — DONE
 
-- [ ] Step 1: Store SDEF attributes during mesh import (`mesh.py`)
-  - float3 attributes: `mmd_sdef_c`, `mmd_sdef_r0`, `mmd_sdef_r1`
-  - Vertex group: `mmd_sdef` (weight 1.0 for SDEF verts)
-  - `mmd_has_sdef` flag on armature
-- [ ] Step 2: SDEF computation module (`sdef.py`)
-  - `_precompute_sdef_data()` — rest-pose constants
-  - `compute_sdef_frame()` — single-frame deformation
-  - `write_mdd()` — MDD file writer (big-endian)
-- [ ] Step 3: Unit tests (no Blender)
-  - Preprocessing math verification
-  - MDD write/read round-trip
-  - SDEF at identity = no change
-  - SDEF with known rotation = expected result
-- [ ] Step 4: Integration test via blender-agent
-  - Import test model, verify SDEF attributes exist
-  - Verify `mmd_sdef` vertex group count matches expected (6,032)
-- [ ] Commit
+- [x] Step 1: Store SDEF attributes during mesh import (`mesh.py`)
+  - float3 attributes: `mmd_sdef_c`, `mmd_sdef_r0`, `mmd_sdef_r1` (POINT domain)
+  - Vertex group: `mmd_sdef` (locked, weight 1.0 for SDEF verts)
+  - `mmd_has_sdef` + `mmd_sdef_count` on armature
+  - **Gotcha**: must create all attributes first, then look up by name — `attributes.new()` invalidates previously returned RNA references
+- [x] Step 2: SDEF computation module (`sdef.py`)
+  - `_precompute_sdef_data()` — reads SDEF attrs + rest-pose positions, computes `pos_c`/`cr0`/`cr1` grouped by bone pair
+  - `compute_sdef_frame()` — NLERP quaternion blending, replaces LBS positions for SDEF verts
+  - `write_mdd()` / `read_mdd()` — big-endian MDD writer and reader
+- [x] Step 3: Unit tests (`tests/test_sdef.py`, 17 tests)
+  - Preprocessing math (equal, full, asymmetric weights)
+  - Identity deformation (origin + offset center)
+  - Rotation (90° single bone, blended ±30°, volume preservation vs LBS)
+  - MDD round-trip (single/multi frame, large vertex count, file size, endianness)
+- [x] Step 4: Integration test via blender-agent
+  - YYB Miku: 6,032 SDEF vertices stored correctly across 8 split meshes
+  - Attributes survive `mesh.separate()`, non-zero C/R0/R1 confirmed
+- [ ] Commit (pending — commit with Session 2 work)
 
 ### Session 2: Bake pipeline + UI + visual verification
 
 - [ ] Step 5: Bake/clear functions in `sdef.py`
   - `bake_sdef()` — full frame-range bake to MDD + apply Mesh Cache + mute Armature
   - `clear_sdef_bake()` — remove Mesh Cache + unmute Armature + delete MDD
+  - `toggle_sdef(armature_obj)` — swap modifier visibility on SDEF meshes:
+    - SDEF on: Mesh Cache `show_viewport=True`, Armature `show_viewport=False`
+    - SDEF off: Mesh Cache `show_viewport=False`, Armature `show_viewport=True`
+    - Only affects meshes that have a Mesh Cache modifier (i.e. were baked)
+    - Instant — no recomputation, just flips modifier visibility
+    - Store current state on armature as `mmd_sdef_enabled` (bool)
 - [ ] Step 6: SDEF visualization operator (`operators.py`)
   - `BLENDER_MMD_OT_select_sdef_vertices` — enter edit mode, select SDEF verts
-- [ ] Step 7: Bake/clear operators (`operators.py`)
+- [ ] Step 7: Bake/clear/toggle operators (`operators.py`)
   - `BLENDER_MMD_OT_bake_sdef` — check .blend saved, call `bake_sdef()`
   - `BLENDER_MMD_OT_clear_sdef_bake` — call `clear_sdef_bake()`
+  - `BLENDER_MMD_OT_toggle_sdef` — call `toggle_sdef()`, label shows "Disable SDEF" / "Enable SDEF" based on current state
 - [ ] Step 8: SDEF panel (`panels.py`)
-  - `BLENDER_MMD_PT_sdef` sub-panel with bake/clear/select UI
+  - `BLENDER_MMD_PT_sdef` sub-panel with:
+    - Bake / Rebake / Clear buttons
+    - Toggle SDEF on/off button (only visible when baked) — instant A/B comparison on any frame
+    - Select SDEF Vertices button
+    - Status label: vertex count, bake frame range, enabled/disabled state
 - [ ] Step 9: Visual verification
-  - Import YYB Miku + VMD animation
-  - Screenshot without SDEF (LBS only)
-  - Bake SDEF, screenshot same frame
-  - Compare arm twist area
+  - Import YYB Miku + VMD with arm movement (e.g. waving/dancing)
+  - Go to a frame with forearm twist or elbow bend
+  - Bake SDEF
+  - Use toggle button to flip between SDEF and LBS on the same frame
+  - **Best test areas**: forearm twist (most dramatic), elbow bend, knee bend
+  - **Quick manual test**: unhide Armature bones, select forearm bone, rotate ~90° in pose mode — the "candy wrapper" pinch at the wrist is what SDEF fixes
 - [ ] Step 10: Update CLAUDE.md, SPEC.md, commit
 
 ---
