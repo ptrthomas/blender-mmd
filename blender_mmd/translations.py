@@ -48,6 +48,10 @@ BONE_NAMES: dict[str, str] = {
     "左人指１": "IndexFinger1.L",
     "左人指２": "IndexFinger2.L",
     "左人指３": "IndexFinger3.L",
+    # PMD-era abbreviated form (人差指 → 人指)
+    "左人差指１": "IndexFinger1.L",
+    "左人差指２": "IndexFinger2.L",
+    "左人差指３": "IndexFinger3.L",
     "左中指１": "MiddleFinger1.L",
     "左中指２": "MiddleFinger2.L",
     "左中指３": "MiddleFinger3.L",
@@ -73,6 +77,10 @@ BONE_NAMES: dict[str, str] = {
     "右人指１": "IndexFinger1.R",
     "右人指２": "IndexFinger2.R",
     "右人指３": "IndexFinger3.R",
+    # PMD-era abbreviated form
+    "右人差指１": "IndexFinger1.R",
+    "右人差指２": "IndexFinger2.R",
+    "右人差指３": "IndexFinger3.R",
     "右中指１": "MiddleFinger1.R",
     "右中指２": "MiddleFinger2.R",
     "右中指３": "MiddleFinger3.R",
@@ -151,11 +159,17 @@ BONE_NAMES: dict[str, str] = {
     "右r": "HairR.R",
     "右r先": "HairRTip.R",
 
-    # Skirt
+    # Skirt (fullwidth katakana — PMX style)
     "左スカート前": "SkirtFront.L",
     "右スカート前": "SkirtFront.R",
     "左スカート後": "SkirtBack.L",
     "右スカート後": "SkirtBack.R",
+
+    # Skirt (halfwidth katakana — PMD style, e.g. Lat式ミク)
+    "左ｽｶｰﾄ前": "SkirtFront.L",
+    "右ｽｶｰﾄ前": "SkirtFront.R",
+    "左ｽｶｰﾄ後": "SkirtBack.L",
+    "右ｽｶｰﾄ後": "SkirtBack.R",
 
     # Glasses / accessories
     "眼鏡": "Glasses",
@@ -196,6 +210,8 @@ BONE_NAMES: dict[str, str] = {
     "右親指２先": "Thumb2Tip.R",
     "左人指３先": "IndexFinger3Tip.L",
     "右人指３先": "IndexFinger3Tip.R",
+    "左人差指３先": "IndexFinger3Tip.L",
+    "右人差指３先": "IndexFinger3Tip.R",
     "左中指３先": "MiddleFinger3Tip.L",
     "右中指３先": "MiddleFinger3Tip.R",
     "左薬指３先": "RingFinger3Tip.L",

@@ -837,7 +837,7 @@ def toggle_chain_collisions(armature_obj, chain_index: int, enable: bool) -> str
     """Toggle collision layers for a physics chain's rigid bodies.
 
     Disable: collision_collections = [False]*20 (bodies pass through everything).
-    Enable: restore shared layer 0 + own group from PMX data.
+    Enable: restore shared layer 0 from PMX data.
 
     Returns the chain name.
     """
@@ -1124,7 +1124,7 @@ def _create_rigid_bodies(
         rb.angular_damping = rigid.angular_damping
         rb.kinematic = (rigid.mode == RigidMode.STATIC)
 
-        # Collision collections: draft = no collisions, normal = shared layer + own group
+        # Collision collections: draft = no collisions, normal = shared layer 0 only
         # Also disable collisions for bodies in collision-disabled chains
         chain_name = rigid_to_chain.get(i)
         if draft or (chain_name and chain_name in collision_disabled_chains):
@@ -1259,10 +1259,14 @@ def build_collision_collections(
 def _build_collision_collections(rigid: RigidBody) -> list[bool]:
     """Convert PMX collision group → Blender 20-bool array.
 
-    All bodies go on layer 0 (shared) so everything potentially collides.
-    Each body also gets its own group layer. Non-collision pairs are then
-    suppressed via GENERIC constraints with disable_collisions=True
-    (see _create_non_collision_constraints).
+    All bodies go on shared layer 0 only, so everything potentially collides.
+    Non-collision pairs are suppressed via GENERIC constraints with
+    disable_collisions=True (see _create_non_collision_constraints).
+
+    Previously bodies were also placed on their own group layer, but this
+    caused same-group bodies (e.g. all hair bodies in group 3) to collide
+    with each other via that shared group layer — incorrect behavior since
+    MMD's non-collision masks typically exclude same-group pairs.
 
     Blender's collision_collections uses the SAME bitmask for both Bullet's
     collisionFilterGroup and collisionFilterMask, making it symmetric —
@@ -1272,7 +1276,6 @@ def _build_collision_collections(rigid: RigidBody) -> list[bool]:
     """
     cols = [False] * 20
     cols[0] = True  # shared layer — all bodies can potentially collide
-    cols[rigid.collision_group_number] = True
     return cols
 
 

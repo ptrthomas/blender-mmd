@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import unicodedata
 from collections import defaultdict
 
 import bpy
@@ -175,12 +176,54 @@ def _build_bone_lookup(armature_obj: bpy.types.Object) -> dict[str, str]:
     """Build a mapping from Japanese bone name → Blender bone name.
 
     Reads ``mmd_name_j`` custom property from each bone in the armature.
+    Also builds fallback lookups for cross-era VMD compatibility:
+    - NFKC normalization: catches half-width↔full-width katakana
+      (e.g. ``ｽｶｰﾄ`` → ``スカート``)
+    - Alias table: known semantic differences between PMD/PMX eras
+      (e.g. ``人指`` ↔ ``人差指``)
     """
     jp_to_bone: dict[str, str] = {}
+    # NFKC-normalized name → Blender name (fallback)
+    nfkc_to_bone: dict[str, str] = {}
+
     for bone in armature_obj.data.bones:
         jp_name = bone.get("mmd_name_j")
         if jp_name:
             jp_to_bone[jp_name] = bone.name
+            nfkc = unicodedata.normalize("NFKC", jp_name)
+            if nfkc != jp_name:
+                nfkc_to_bone[nfkc] = bone.name
+            # Also register the NFKC form so lookups from either direction work
+            nfkc_to_bone.setdefault(nfkc, bone.name)
+
+    # Register aliases for known PMD↔PMX naming differences
+    _ALIASES: list[tuple[str, str]] = [
+        ("人指", "人差指"),      # index finger abbreviation
+        ("上半身2", "上半身２"),  # arabic vs fullwidth numeral
+    ]
+
+    for a, b in _ALIASES:
+        for side in ("左", "右"):
+            for suffix in ("１", "２", "３", "1", "2", "3", ""):
+                key_a = side + a + suffix
+                key_b = side + b + suffix
+                if key_a in jp_to_bone and key_b not in jp_to_bone:
+                    jp_to_bone[key_b] = jp_to_bone[key_a]
+                elif key_b in jp_to_bone and key_a not in jp_to_bone:
+                    jp_to_bone[key_a] = jp_to_bone[key_b]
+        # Non-sided variants
+        for suffix in ("", "1", "2", "3", "１", "２", "３"):
+            key_a = a + suffix
+            key_b = b + suffix
+            if key_a in jp_to_bone and key_b not in jp_to_bone:
+                jp_to_bone[key_b] = jp_to_bone[key_a]
+            elif key_b in jp_to_bone and key_a not in jp_to_bone:
+                jp_to_bone[key_a] = jp_to_bone[key_b]
+
+    # Merge NFKC fallbacks (don't override exact matches)
+    for nfkc_name, bl_name in nfkc_to_bone.items():
+        jp_to_bone.setdefault(nfkc_name, bl_name)
+
     return jp_to_bone
 
 

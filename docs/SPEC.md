@@ -12,7 +12,6 @@ A ground-up rewrite of [blender_mmd_tools](../../../blender_mmd_tools) targeting
 ## Non-goals
 
 - PMX/PMD/VMD export (one-way import only, no round-trip)
-- PMD format support (PMX only)
 - Traditional Blender UI panels or sidebar (except MMD4B physics panel)
 - Backwards compatibility with mmd_tools object hierarchy or metadata
 - Material library system
@@ -49,7 +48,10 @@ blender-mmd/
 │   ├── pmx/                  # PMX parser and data model
 │   │   ├── __init__.py
 │   │   ├── parser.py         # Binary PMX reader (clean rewrite)
-│   │   └── types.py          # Dataclasses for PMX structures
+│   │   └── types.py          # Dataclasses for PMX/PMD structures
+│   ├── pmd/                  # PMD parser (outputs same types as PMX)
+│   │   ├── __init__.py
+│   │   └── parser.py         # Binary PMD reader → pmx.types.Model
 │   ├── vmd/                  # VMD parser and importer
 │   │   ├── __init__.py
 │   │   ├── parser.py         # Binary VMD reader
@@ -110,7 +112,7 @@ schema_version = "1.0.0"
 id = "blender_mmd"
 version = "0.1.0"
 name = "Blender MMD"
-tagline = "Import MMD (PMX) models into Blender"
+tagline = "Import MMD (PMX/PMD) models into Blender"
 maintainer = "blender-mmd contributors"
 type = "add-on"
 blender_version_min = "5.0.0"
@@ -129,7 +131,8 @@ license = ["SPDX:GPL-3.0-or-later"]
 - Python 3.11+ type hints throughout
 - Output as dataclasses (defined in `types.py`)
 - Full PMX 2.0/2.1 spec support
-- No PMD support, no `compat/` version checks, no Blender imports in the parser itself
+- PMD support via separate parser that outputs the same types
+- No `compat/` version checks, no Blender imports in the parser itself
 
 ### Correctness testing
 
@@ -183,6 +186,36 @@ Parse the **entire PMX file** into Python dataclasses on every import. The full 
 ### Data structures
 
 Dataclasses for: `Header`, `Vertex`, `BoneWeight` (BDEF1/2/4, SDEF), `Material`, `Bone`, `Morph`, `DisplayFrame`, `RigidBody`, `Joint`, `Texture`. All coordinate values are in Blender space after parsing.
+
+---
+
+## PMD Parser
+
+### Approach
+
+The PMD parser (`pmd/parser.py`) reads PMD 1.0 binary files and outputs the **same `pmx.types.Model`** dataclasses as the PMX parser. This means the entire downstream pipeline (armature, mesh, materials, physics, VMD) works unchanged.
+
+### Key conversions from PMD → PMX types
+
+- **Vertices**: Weight byte (0-100) → float (0.0-1.0). BDEF1 if both bones equal, BDEF2 otherwise. Edge flag inverted (PMD 0=on → edge_scale=1.0).
+- **Bones**: 10 PMD type codes (0-9) → PMX flag bits. IK data merged from separate IK section into bone fields. `control_weight * 4` factor. Knee bones get automatic -180°→-0.5° X-axis limits.
+- **Morphs**: Base morph (type 0) provides vertex index map. All other morphs remapped to absolute vertex indices.
+- **Rigid bodies**: Position is offset from parent bone in PMD → converted to absolute by adding bone position.
+- **Materials**: Texture path split on `*` (diffuse*sphere). Sphere mode from extension (.spa=add, .sph=multiply). Toon uses shared index (0-9).
+- **Strings**: All CP932 encoded, fixed-size (20-256 bytes), null-terminated.
+- **English extension**: Optional section providing English names for bones/morphs.
+
+### Format auto-detection
+
+`importer.import_pmx()` auto-detects format by file extension (`.pmd` → PMD parser, `.pmx` → PMX parser). The import operator accepts both `*.pmx` and `*.pmd` files.
+
+### VMD bone name auto-mapping
+
+VMD bone lookup includes fallback matching for cross-era compatibility:
+
+1. **Exact match** on `mmd_name_j` custom property (existing behavior)
+2. **NFKC normalization**: `unicodedata.normalize("NFKC", name)` — catches half-width↔full-width katakana (e.g., `ｽｶｰﾄ` → `スカート`)
+3. **Alias table**: Known semantic differences between PMD/PMX eras (e.g., `人指` ↔ `人差指` for index finger)
 
 ---
 
@@ -395,13 +428,14 @@ Use Blender's `collision_collections` property (20-element boolean array on `Rig
 
 MMD uses 16 collision groups with a bilateral "non-collision mask" (bit set = don't collide). Blender uses "collision collections" where objects sharing ANY layer collide (symmetric). This asymmetry means PMX's bilateral mask system cannot be directly mapped — adding mask-based layers causes false cross-group collisions.
 
-**Current approach: shared layer + own group + non-collision constraints.** Each body is placed on shared layer 0 (so everything potentially collides) plus its own collision group layer.
+**Current approach: shared layer 0 + non-collision constraints.** Each body is placed on shared layer 0 only, so everything potentially collides. Collision exclusion is handled entirely by NCC constraint empties.
 
 ```python
 blender_collections = [False] * 20
 blender_collections[0] = True  # shared layer — all bodies can potentially collide
-blender_collections[pmx_rigid.collision_group_number] = True  # own group
 ```
+
+Previously bodies were also placed on their own group layer (`blender_collections[group_number] = True`), but this caused same-group bodies (e.g. all hair bodies in group 3) to collide with each other via the shared group layer — incorrect behavior since MMD's non-collision masks typically exclude same-group pairs. Removing the own group layer matches mmd_tools' approach.
 
 Non-colliding pairs are suppressed via `GENERIC` constraints with `disable_collisions=True` (same pattern as mmd_tools). **All joints** get `disable_collisions=True` — connected bodies should never collide (the joint manages their relationship). For non-joint excluded pairs, NCC empties are created using a template-and-duplicate O(log N) doubling strategy.
 
@@ -419,7 +453,7 @@ For each PMX rigid body:
 2. Add Blender rigid body (`bpy.ops.rigidbody.object_add`)
 3. Set collision shape (SPHERE, BOX, CAPSULE)
 4. Set physics properties (mass, friction, bounce, linear/angular damping)
-5. Set `collision_collections` (own group only — see collision groups section)
+5. Set `collision_collections` (shared layer 0 only — see collision groups section)
 6. Set kinematic flag based on mode (STATIC = kinematic)
 7. **Negate rotation**: Parser does Y↔Z swap `(x,z,y)` but physics rotation also needs negation `(-x,-y,-z)` for correct handedness. This matches mmd_tools' `.xzy * -1` pattern.
 
@@ -545,7 +579,7 @@ blender_mmd.import_pmx
 ```
 
 Parameters:
-- `filepath`: Path to .pmx file
+- `filepath`: Path to .pmx or .pmd file (auto-detected by extension)
 - `scale`: Import scale factor (default: 0.08)
 - `use_toon_sphere`: Include toon and sphere texture nodes in materials (default: off)
 - `split_by_material`: Split mesh into per-material objects (default: on)
@@ -689,6 +723,7 @@ Rigid body creation, GENERIC_SPRING joints with spring values, collision layers 
 
 **Test data (`tests/samples/`):**
 - `初音ミク.pmx` — simple Miku model (122 bones, 45 rigid bodies, 27 joints)
+- `lat.pmd` — Lat式ミク PMD model (134 bones, rigid bodies, joints)
 - `galaxias.vmd` — Galaxias dance motion
 - `baseline_mmd_tools.json` — mmd_tools bone transforms at key frames (pose + IK only, `ik_loop_factor=5`)
 - `miku_galaxias.blend` — mmd_tools reference (**pose + IK only, no physics baked**)

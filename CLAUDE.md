@@ -4,7 +4,7 @@ Read `docs/SPEC.md` first. It is the single source of truth for architecture, de
 
 ## Quick orientation
 
-- **This project**: PMX/VMD importer addon for Blender 5.0+, driven by Claude Code
+- **This project**: PMX/PMD/VMD importer addon for Blender 5.0+, driven by Claude Code
 - **Milestone 1** (done): PMX parser + armature + mesh import
 - **Milestone 2** (done): Morphs / shape keys
 - **Milestone 3** (done): VMD motion import (bone keyframes, morph keyframes, bone roll)
@@ -12,7 +12,7 @@ Read `docs/SPEC.md` first. It is the single source of truth for architecture, de
 - **Milestone 4** (done): Rigid body physics — functional but limited by Blender's RB solver
 - **Milestone 4b** (done): Physics cleanup — two modes (none, rigid_body), MMD4B panel with Build/Rebuild/Clear. NCC proximity slider + draft checkbox, per-chain collision/physics toggles, NCC rebuild. Cloth/soft body deferred to future phase.
 - **Milestone 5** (done): Materials & textures — Principled BSDF-based "MMD Shader" node group, bundled toon textures with fallback, global controls via armature drivers (emission/toon/sphere), per-face assignment, UV V-flip, overlapping face fix.
-- **Milestone 6** (in progress): Animation polish — additional transforms done (grant parent, shadow bones). Remaining: VMD camera, CCD IK
+- **Milestone 6** (in progress): Animation polish — additional transforms done (grant parent, shadow bones). PMD format support + VMD bone name auto-mapping done. Remaining: VMD camera, CCD IK
 - **Milestone 7** (planned): Creative tools — edge/outline rendering, material morphs
 
 ## Reference repos (siblings in ../  )
@@ -82,7 +82,7 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
 - **Scene settings**: VMD import sets FPS to 30 (MMD standard) and extends frame range to fit animation.
 - **Physics**: Two modes:
   - `none` (default): metadata only, no physics objects. Clean import.
-  - `rigid_body`: RBW disabled during build, collision layers (shared layer 0 + own group), non-collision constraint (NCC) empties for excluded pairs with proximity-based filtering, all joints `disable_collisions=True`, margin 1e-6, dynamic body repositioning, depsgraph flushes. Build restructured into 3 phases (CREATE → POSITION → COUPLE & ACTIVATE). Blender's `collision_collections` is symmetric (shared layer = collide) while PMX masks are asymmetric (bilateral check: `A.group & B.mask && B.group & A.mask`), so NCC empties are required for correct exclusion.
+  - `rigid_body`: RBW disabled during build, collision layers (shared layer 0 only), non-collision constraint (NCC) empties for excluded pairs with proximity-based filtering, all joints `disable_collisions=True`, margin 1e-6, dynamic body repositioning, depsgraph flushes. Build restructured into 3 phases (CREATE → POSITION → COUPLE & ACTIVATE). Blender's `collision_collections` is symmetric (shared layer = collide) while PMX masks are asymmetric (bilateral check: `A.group & B.mask && B.group & A.mask`), so NCC empties are required for correct exclusion. Own group layer was removed — it caused same-group bodies (e.g. hair chain) to collide with each other incorrectly.
   - **NCC mode** (stored on armature as `mmd_ncc_mode`): 3-way enum — `draft` (no NCCs, fast preview), `proximity` (distance-filtered, default), `all` (every excluded pair). Proximity uses `mmd_ncc_proximity` (FloatProperty 0.1–5.0, default 1.5) matching mmd_tools' `non_collision_distance_scale`. Higher = wider radius = more NCCs.
   - **Per-chain controls**: Each chain has independent collision toggle (eye icon — sets `collision_collections=[False]*20`) and physics toggle (physics icon — sets `kinematic=True`). Both are instant (no rebuild). Settings stored as `mmd_chain_collision_disabled`, `mmd_chain_physics_disabled` JSON on armature — preserved across clear/rebuild.
   - **NCC rebuild**: `rebuild_ncc()` reuses existing NCC empties by reassigning pairs, only creating/deleting the difference. Respects proximity setting and disabled chains. ~0.1s for 13K empties.
@@ -96,15 +96,17 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
 - **Split by material**: Mesh is split into per-material objects after import (default on). Enables per-object modifiers (cloth, solidify for outlines), light linking, and per-object `visible_shadow` (honors `mmd_drop_shadow`). Custom normals backed up as `mmd_normal` attribute before split, restored after. `mmd_morph_map` moved to armature for VMD import. All objects organized into a collection named after the model. VMD morph action shared across all split meshes via Blender 5.0 slotted actions: `fcurve_ensure_for_datablock` auto-creates a slot on the primary mesh's ShapeKey, secondary meshes share that same slot via `animation_data.action_slot`. Shape key names preserved by `mesh.separate`.
 - **VMD append mode**: `import_vmd()` defaults to `create_new_action=False` — reuses existing bone/morph actions and appends keyframes. Allows layering motions (e.g., body dance + lip sync from separate VMDs). `create_new_action=True` replaces existing actions. Morph-only VMDs (no bone keyframes) skip bone action creation entirely, preserving existing bone animation. File browser exposes "Create New Action" checkbox.
 - **Armature visibility**: STICK display, bones hidden by default. All three bone collections start hidden (`is_visible = False`): "Armature" (standard), "Physics" (dynamic RB bones, orange), "mmd_shadow" (helper bones). Unhide from armature properties when needed.
+- **PMD support**: PMD parser (`pmd/parser.py`) outputs the same `pmx.types.Model` dataclasses — entire downstream pipeline unchanged. Auto-detected by `.pmd` extension in `import_pmx()`. PMD bone types (0-9) mapped to PMX flags. Morph base→absolute index remapping. Rigid body bone-relative→absolute position conversion. English extension parsed for bone/morph names.
+- **VMD bone name auto-mapping**: `_build_bone_lookup()` in `vmd/importer.py` includes NFKC normalization (half-width↔full-width katakana) and alias table (PMD/PMX era naming differences like `人指`↔`人差指`) for cross-era VMD compatibility.
 - **No export**: One-way import only. No PMX/VMD/PMD export.
 - **Logging**: Use blender-agent's log (`output/agent.log`). Python `logging` to stderr for diagnostics.
 
 ## API usage (inside Blender via blender-agent)
 
 ```python
-# PMX import (basic shader, no toon/sphere, split by material)
+# PMX/PMD import (basic shader, no toon/sphere, split by material)
 import bl_ext.user_default.blender_mmd.importer as importer
-arm = importer.import_pmx("/path/to/model.pmx")
+arm = importer.import_pmx("/path/to/model.pmx")  # or .pmd — auto-detected
 
 # PMX import with toon & sphere textures
 arm = importer.import_pmx("/path/to/model.pmx", use_toon_sphere=True)

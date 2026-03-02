@@ -14,14 +14,14 @@ log = logging.getLogger("blender_mmd")
 
 
 class BLENDER_MMD_OT_import_pmx(bpy.types.Operator, ImportHelper):
-    """Import a PMX model file"""
+    """Import an MMD model file (PMX/PMD)"""
 
     bl_idname = "blender_mmd.import_pmx"
-    bl_label = "Import PMX"
+    bl_label = "Import MMD Model"
     bl_options = {"REGISTER", "UNDO"}
 
     filename_ext = ".pmx"
-    filter_glob: StringProperty(default="*.pmx", options={"HIDDEN"})
+    filter_glob: StringProperty(default="*.pmx;*.pmd", options={"HIDDEN"})
 
     scale: FloatProperty(
         name="Scale",
@@ -147,8 +147,9 @@ class BLENDER_MMD_OT_build_physics(bpy.types.Operator):
     )
 
     def execute(self, context):
+        from pathlib import Path
+
         from .physics import build_physics
-        from .pmx import parse
 
         armature_obj = find_mmd_armature(context)
         if armature_obj is None:
@@ -163,6 +164,11 @@ class BLENDER_MMD_OT_build_physics(bpy.types.Operator):
         scale = armature_obj.get("import_scale", 0.08)
 
         try:
+            ext = Path(filepath).suffix.lower()
+            if ext == ".pmd":
+                from .pmd import parse
+            else:
+                from .pmx import parse
             model = parse(filepath)
             build_physics(
                 armature_obj, model, scale,
@@ -736,7 +742,7 @@ class BLENDER_MMD_OT_toggle_chain_physics(bpy.types.Operator):
 def menu_func_import(self, context):
     self.layout.operator(
         BLENDER_MMD_OT_import_pmx.bl_idname,
-        text="MMD model (.pmx)",
+        text="MMD model (.pmx/.pmd)",
     )
     self.layout.operator(
         BLENDER_MMD_OT_import_vmd.bl_idname,

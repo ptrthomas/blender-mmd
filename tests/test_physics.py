@@ -48,12 +48,18 @@ def _make_rigid(group: int = 0, mask: int = 0xFFFF) -> RigidBody:
 
 
 class TestCollisionCollections:
-    def test_own_group_always_set(self):
-        """Rigid body's own collision group should always be True."""
+    def test_shared_layer_only(self):
+        """All bodies use shared layer 0 only — no own group layer.
+
+        Own group layer was removed because it caused same-group bodies
+        (e.g. all hair bodies in group 3) to collide with each other.
+        Non-collision is handled by GENERIC constraint empties instead.
+        """
         for group in range(16):
             rigid = _make_rigid(group=group, mask=0xFFFF)
             cols = build_collision_collections(rigid)
-            assert cols[group] is True
+            assert cols[0] is True
+            assert sum(cols) == 1  # only shared layer 0
 
     def test_shared_layer_always_set(self):
         """Layer 0 (shared) is always set so all bodies can potentially collide.
@@ -65,28 +71,18 @@ class TestCollisionCollections:
         rigid = _make_rigid(group=3, mask=0x0000)
         cols = build_collision_collections(rigid)
         assert cols[0] is True
-        assert cols[3] is True
-        assert sum(cols) == 2  # shared layer + own group
-
-    def test_group_0_layers_overlap(self):
-        """Group 0 body: shared layer and own group are the same layer."""
-        rigid = _make_rigid(group=0, mask=0xFFFF)
-        cols = build_collision_collections(rigid)
-        assert cols[0] is True
-        assert sum(cols) == 1  # layer 0 is both shared and own group
+        assert sum(cols) == 1  # shared layer only
 
     def test_result_length_20(self):
         """Blender needs exactly 20 bools for collision_collections."""
         cols = build_collision_collections(_make_rigid())
         assert len(cols) == 20
 
-    def test_group_15(self):
-        """Edge case: highest PMX group (15)."""
-        rigid = _make_rigid(group=15, mask=0x7FFF)
-        cols = build_collision_collections(rigid)
-        assert cols[0] is True   # shared layer
-        assert cols[15] is True  # own group
-        assert sum(cols) == 2
+    def test_group_number_ignored(self):
+        """Group number is not used for collision layers — only for NCC logic."""
+        rigid_3 = _make_rigid(group=3, mask=0x7FFF)
+        rigid_15 = _make_rigid(group=15, mask=0x7FFF)
+        assert build_collision_collections(rigid_3) == build_collision_collections(rigid_15)
 
 
 # ---------------------------------------------------------------------------

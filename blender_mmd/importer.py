@@ -10,7 +10,6 @@ import numpy as np
 
 import bpy
 
-from .pmx import parse
 from .pmx.types import Model, RigidMode
 from .armature import create_armature
 from .mesh import create_mesh
@@ -200,10 +199,16 @@ def import_pmx(
     Returns the armature object.
     """
     filepath = str(Path(filepath).resolve())
-    log.info("Importing PMX: %s (scale=%.4f)", filepath, scale)
+    log.info("Importing: %s (scale=%.4f)", filepath, scale)
 
-    # Parse
-    model = parse(filepath)
+    # Parse — auto-detect format by extension
+    ext = Path(filepath).suffix.lower()
+    if ext == ".pmd":
+        from .pmd import parse as pmd_parse
+        model = pmd_parse(filepath)
+    else:
+        from .pmx import parse as pmx_parse
+        model = pmx_parse(filepath)
 
     # Deselect everything
     bpy.ops.object.select_all(action="DESELECT")
