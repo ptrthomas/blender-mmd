@@ -756,8 +756,9 @@ Rigid body creation, GENERIC_SPRING joints with spring values, collision layers 
 **IK Toggle sub-panel** (collapsed by default):
 - **All On / All Off** buttons at top (eye icons)
 - Per-chain toggle buttons showing current state (eye icon, `depress` for visual feedback)
-- Toggles IK constraint `influence` between 0.0 and 1.0
-- Also toggles `mmd_ik_limit_override` LIMIT_ROTATION constraints in the chain
+- Toggles IK constraint `mute` (not `influence`) so user overrides persist during animation playback. VMD F-curves drive `influence` but `mute` takes precedence — a muted constraint is completely skipped regardless of F-curve values.
+- Also mutes `mmd_ik_limit_override` LIMIT_ROTATION constraints in the chain
+- Physics build/clear preserves user mute state (saved/restored around internal IK muting)
 - Chains discovered by scanning pose bones for IK constraints
 
 **Workflow:** Import PMX → click "Build Rigid Bodies" in MMD4B panel → optionally import VMD (physics auto-resets) → play animation. Use "Reset" after changing pose to reposition rigid bodies without full rebuild. Use "Clear Animation" to strip all keyframes and reload a different VMD. Use per-chain X buttons to remove physics from specific parts (e.g. remove skirt physics to replace with cloth sim). Use IK Toggle to disable IK chains for non-standard poses. Select a rigid body and use Inspect/Colliders/Contacts for debugging collision issues.

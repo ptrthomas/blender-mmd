@@ -170,7 +170,7 @@ def _build_rigid_body_physics(
 
         # --- Phase 2: POSITION (needs depsgraph for matrix_world) ---
 
-        _mute_physics_ik_constraints(armature_obj, model, bone_names, mute=True)
+        ik_saved_state = _mute_physics_ik_constraints(armature_obj, model, bone_names, mute=True)
         _reposition_dynamic_bodies(model, armature_obj, rigid_objects, bone_names, scale)
 
         # Flush so matrix_world is current for tracking empty creation
@@ -191,7 +191,7 @@ def _build_rigid_body_physics(
         # --- Phase 3: COUPLE & ACTIVATE ---
 
         _unmute_tracking_constraints(armature_obj)
-        _mute_physics_ik_constraints(armature_obj, model, bone_names, mute=False)
+        _restore_ik_mute_state(armature_obj, ik_saved_state)
         _setup_physics_world(bpy.context.scene, scale)
 
         vl_col = bpy.context.view_layer.layer_collection.children.get(col_name)
@@ -261,7 +261,7 @@ def clear_physics(armature_obj) -> None:
     if col_name:
         collection = bpy.data.collections.get(col_name)
         if collection:
-            # Remove tracking constraints and unmute IK constraints
+            # Remove tracking constraints (preserve user IK mute state)
             if armature_obj.pose:
                 # Only remove physics-specific constraints, NOT import-time
                 # constraints like mmd_at_dummy (additional transform shadow
@@ -274,10 +274,6 @@ def clear_physics(armature_obj) -> None:
                     ]
                     for c in to_remove:
                         pb.constraints.remove(c)
-                    # Unmute any IK constraints that were muted during build
-                    for c in pb.constraints:
-                        if c.type == "IK" and c.mute:
-                            c.mute = False
 
             # Disable RBW before mass deletion
             rbw = bpy.context.scene.rigidbody_world
@@ -1699,16 +1695,22 @@ def _create_tracking_empty(armature_obj, bone_name: str, collection):
     return empty
 
 
-def _mute_physics_ik_constraints(armature_obj, model, bone_names: dict, mute: bool = True) -> None:
+def _mute_physics_ik_constraints(armature_obj, model, bone_names: dict, mute: bool = True) -> dict:
     """Mute or unmute IK constraints on bones linked to DYNAMIC/DYNAMIC_BONE rigid bodies.
 
     During physics build, IK constraints fight the depsgraph flushes (frame_set)
     by moving bones while we're trying to position rigid bodies at bone locations.
     mmd_tools mutes IK in __preBuild and unmutes after build is complete.
+
+    When muting, returns a dict of {(bone_name, constraint_name): was_muted} so the
+    caller can restore user-set mute state after the build.
+    When unmuting with saved_state, only unmutes constraints that were not already
+    muted by the user before the build.
     """
     if not armature_obj.pose:
-        return
+        return {}
 
+    saved_state = {}
     for rigid in model.rigid_bodies:
         if rigid.mode not in (RigidMode.DYNAMIC, RigidMode.DYNAMIC_BONE):
             continue
@@ -1721,10 +1723,26 @@ def _mute_physics_ik_constraints(armature_obj, model, bone_names: dict, mute: bo
         pb = armature_obj.pose.bones[bone_name]
         for c in pb.constraints:
             if c.type == "IK":
-                c.mute = mute
+                if mute:
+                    saved_state[(pb.name, c.name)] = c.mute
+                    c.mute = True
                 c.influence = c.influence  # trigger Blender update
 
     log.debug("IK constraints %s for physics bones", "muted" if mute else "unmuted")
+    return saved_state
+
+
+def _restore_ik_mute_state(armature_obj, saved_state: dict) -> None:
+    """Restore IK constraint mute state saved before physics build."""
+    if not armature_obj.pose or not saved_state:
+        return
+    for pb in armature_obj.pose.bones:
+        for c in pb.constraints:
+            if c.type == "IK":
+                key = (pb.name, c.name)
+                if key in saved_state:
+                    c.mute = saved_state[key]
+                    c.influence = c.influence  # trigger Blender update
 
 
 def _reparent_tracking_empties(empty_parent_map: dict) -> None:

@@ -76,7 +76,7 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
 - **Bone names**: English in Blender, Japanese stored as `mmd_name_j` custom property (for VMD matching)
 - **Coordinate conversion**: Done in parser. Downstream code uses Blender coords only.
 - **IK constraints**: Placed on first link bone (e.g. knee), NOT the end effector (ankle). Uses Blender-native `ik_min_x/max_x` properties instead of `LIMIT_ROTATION` constraints. `ik_loop_factor` param (default 5) multiplies PMX iteration count for good foot placement.
-- **IK toggle**: VMD property section parsed and applied as IK constraint `influence` keyframes (0.0/1.0 with CONSTANT interpolation). MMD4B panel provides per-chain toggle buttons and All On/Off.
+- **IK toggle**: VMD property section parsed and applied as IK constraint `influence` keyframes (0.0/1.0 with CONSTANT interpolation). MMD4B panel toggle uses `constraint.mute` (not influence) so user overrides persist during animation playback — `mute` is immune to F-curve evaluation. Physics build/clear preserves user mute state.
 - **VMD quality**: Quaternion sign compatibility prevents NLERP long-path artifacts. Interpolation axis remapping via `_InterpolationHelper` (matches mmd_tools). F-curve first/last handle fixing.
 - **Mesh smoothing**: All faces smooth-shaded, sharp edges marked at 179° before custom normals (required for `normals_split_custom_set` to work correctly).
 - **Scene settings**: VMD import sets FPS to 30 (MMD standard) and extends frame range to fit animation.

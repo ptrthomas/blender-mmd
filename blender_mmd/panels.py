@@ -19,7 +19,7 @@ def _get_ik_chains(armature_obj) -> list[tuple[str, str, bool]]:
                 target_bone = armature_obj.data.bones.get(c.subtarget)
                 if target_bone:
                     display = target_bone.name
-                    enabled = c.influence > 0.5
+                    enabled = not c.mute
                     chains.append((c.subtarget, display, enabled))
     chains.sort(key=lambda x: x[1])
     return chains

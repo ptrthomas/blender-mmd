@@ -230,13 +230,13 @@ class BLENDER_MMD_OT_toggle_all_ik(bpy.types.Operator):
             self.report({"ERROR"}, "No MMD armature found.")
             return {"CANCELLED"}
 
-        influence = 1.0 if self.enable else 0.0
+        mute = not self.enable
         count = 0
         for pb in armature_obj.pose.bones:
             for c in pb.constraints:
                 if c.type == "IK" and c.subtarget:
-                    c.influence = influence
-                    _set_ik_limit_influence(armature_obj, pb, c, influence)
+                    c.mute = mute
+                    _set_ik_chain_mute(armature_obj, pb, c, mute)
                     count += 1
 
         state = "enabled" if self.enable else "disabled"
@@ -245,27 +245,25 @@ class BLENDER_MMD_OT_toggle_all_ik(bpy.types.Operator):
 
 
 def _toggle_ik_for_target(armature_obj, target_bone_name: str) -> bool:
-    """Toggle IK constraint influence for a given target bone. Returns True if found."""
+    """Toggle IK constraint mute for a given target bone. Returns True if found."""
     for pb in armature_obj.pose.bones:
         for c in pb.constraints:
             if c.type == "IK" and c.subtarget == target_bone_name:
-                new_influence = 0.0 if c.influence > 0.5 else 1.0
-                c.influence = new_influence
-                _set_ik_limit_influence(armature_obj, pb, c, new_influence)
+                c.mute = not c.mute
+                _set_ik_chain_mute(armature_obj, pb, c, c.mute)
                 return True
     return False
 
 
-def _set_ik_limit_influence(armature_obj, ik_bone, ik_constraint, influence: float):
-    """Set influence on LIMIT_ROTATION override constraints in the IK chain."""
-    # Walk the IK chain and toggle mmd_ik_limit_override constraints
+def _set_ik_chain_mute(armature_obj, ik_bone, ik_constraint, mute: bool):
+    """Set mute on LIMIT_ROTATION override constraints in the IK chain."""
     bone = ik_bone
     for _ in range(ik_constraint.chain_count):
         if bone is None:
             break
         for c in bone.constraints:
             if c.type == "LIMIT_ROTATION" and c.name == "mmd_ik_limit_override":
-                c.influence = influence
+                c.mute = mute
         bone = bone.parent
 
 
