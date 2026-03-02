@@ -817,6 +817,87 @@ PMX supports SDEF bone weighting as an alternative to standard linear blend skin
 
 **Impact:** High for character animation quality. Noticeable on elbows, knees, shoulders. Most visible in close-up renders and extreme poses.
 
+#### English Names Everywhere + Lookup Consolidation
+
+**Goal:** All user-visible names in Blender should be English. Original Japanese names stored as custom properties for VMD matching and debugging. Centralized reverse-lookup maps on the armature eliminate redundant O(n) scans.
+
+**Current state** (YYB Miku as example):
+
+| Object type | Japanese | English | Issue |
+|---|---|---|---|
+| Bones | 276/563 (49%) | 287/563 | Translation table gaps — hair, accessories, helper bones |
+| Vertex groups | 210/463 | 253/463 | Mirror bones (VGs must match bone names) |
+| Shape keys | 67/73 (92%) | 6/73 | `MORPH_NAMES` table exists but not used during import |
+| Rigid bodies | Most | Few | PMX `name_e` often empty, no translation table yet |
+| Joints | Most | Few | Same as rigid bodies |
+| Materials | 0 | All | Already handled |
+
+##### Part 1: Expand translation tables
+
+Grow `BONE_NAMES` and `MORPH_NAMES` in `translations.py` by mining all PMX/PMD/VMD files in the user's collection. Extend `scripts/scan_translations.py` to also extract:
+- Morph `(name_j, name_e)` pairs from PMX models
+- VMD bone names (no English pair, but useful to identify untranslated names that need manual entries)
+- VMD morph names (same)
+- Rigid body and joint `(name_j, name_e)` pairs
+
+Add new tables: `RIGID_BODY_NAMES`, `JOINT_NAMES` (or a single `PHYSICS_NAMES` table if there's enough overlap). For names without English pairs in any model, add manual translations following MMD naming conventions.
+
+The translation table is the foundation — once it covers enough names, every downstream system benefits automatically.
+
+##### Part 2: Apply translations during import
+
+Currently only bones go through the translation table. Extend to all named objects:
+
+- **Shape keys** (`mesh.py`): Use `resolve_morph_name(name_j, name_e)` — the function exists in `translations.py` but shape keys are currently created with Japanese names. Store `mmd_name_j` as a custom property on each shape key for VMD morph matching.
+- **Rigid bodies** (`physics.py`): Translate names during RB creation using new `RIGID_BODY_NAMES` table + PMX `name_e` fallback. Store `mmd_name_j` on RB objects.
+- **Joints** (`physics.py`): Same pattern as rigid bodies.
+- **Morph map** (`mesh.py`/`importer.py`): `mmd_morph_map` keys should use Japanese names (for VMD matching) but values should point to English shape key names.
+
+##### Part 3: Per-object custom properties
+
+Every translated object stores its original Japanese name for reverse lookup:
+
+| Object | Custom property | Already done? |
+|---|---|---|
+| Bone | `mmd_name_j`, `bone_id` | Yes |
+| Shape key | `mmd_name_j` | No — needs adding |
+| Rigid body | `mmd_name_j`, `mmd_rigid_index` | Partial (`mmd_rigid_index` exists) |
+| Joint | `mmd_name_j` | No |
+| Material | `mmd_name_j` | No (materials are already English) |
+
+##### Part 4: Centralized reverse-lookup maps on armature
+
+Six subsystems currently rebuild their own lookup maps by scanning all bones:
+
+| Subsystem | Current approach | Called when |
+|---|---|---|
+| VMD import (`_build_bone_lookup`) | Scan all bones for `mmd_name_j` → build `jp_name → blender_name` dict. NFKC normalize + alias table. | Every VMD import |
+| Physics (`_build_bone_name_map`) | Scan all bones for `bone_id` → build `pmx_index → blender_name` dict | 4+ times per physics build/reset/remove/diagnose |
+| Importer (`_setup_bone_collections`) | Same scan for `bone_id → name` | Once per import |
+| SDEF (`_precompute_sdef_data`) | Iterate vertex groups by name, filter `mmd_*` prefixes, use name as bone key | Per SDEF bake |
+| SDEF (`compute_sdef_frame`) | `pose.bones.get(bone_name)` string lookup per bone pair per frame | Every SDEF frame |
+| IK toggle (VMD) | Scan all pose bones + constraints → find `mmd_name_j` on subtarget bones | Every VMD import |
+
+**Solution:** Build canonical lookup tables once at import time, store on armature as JSON custom properties:
+
+1. **`mmd_bone_index_map`** — `dict[int, str]`: PMX bone index → Blender bone name. Built during `create_armature()`. Eliminates `_build_bone_name_map()` in physics, importer, SDEF.
+
+2. **`mmd_bone_jp_map`** — `dict[str, str]`: Japanese name → Blender bone name. Built during `create_armature()`. Includes NFKC-normalized forms and aliases pre-computed. Eliminates `_build_bone_lookup()` in VMD import and IK toggle scanning.
+
+3. **`mmd_morph_jp_map`** — `dict[str, str]`: Japanese morph name → English shape key name. Built during mesh import. Eliminates `mmd_morph_map` reverse lookups.
+
+Vertex groups are unchanged — they must match bone names for armature deformation (Blender requirement).
+
+**Changes per subsystem:**
+- `armature.py`: Serialize `mmd_bone_index_map` and `mmd_bone_jp_map` as JSON on armature after bone creation
+- `mesh.py`: Translate shape key names, store `mmd_name_j` on each, serialize `mmd_morph_jp_map`
+- `physics.py`: Replace all `_build_bone_name_map()` calls with `json.loads(armature_obj["mmd_bone_index_map"])`. Translate RB/joint names.
+- `vmd/importer.py`: Replace `_build_bone_lookup()` with `json.loads(armature_obj["mmd_bone_jp_map"])`
+- `sdef.py`: Use `mmd_bone_index_map` keys to skip non-bone vertex groups
+- `vmd/importer.py` IK toggle: Use `mmd_bone_jp_map` directly
+
+**Impact:** All names English in Blender UI. Eliminates ~6 redundant O(n) bone scans. Single source of truth for name resolution. VMD matching still works via stored Japanese names.
+
 #### Performance & Mesh Optimizations
 
 - **UV foreach_set:** Replace per-loop UV assignment with flat-array `foreach_set` (same pattern as material_index assignment). Significant speedup on 100k+ vertex models.
