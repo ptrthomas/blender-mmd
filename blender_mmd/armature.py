@@ -132,6 +132,72 @@ def _set_auto_bone_roll(edit_bone: bpy.types.EditBone) -> None:
     edit_bone.align_roll(face_normal.cross(bone_dir))
 
 
+def _ensure_knee_prebend(
+    edit_bones: list[bpy.types.EditBone],
+    pmx_bones: list[Bone],
+) -> None:
+    """Nudge knee bones forward if their rest geometry lacks a clear pre-bend.
+
+    Blender's IK solver uses rest-pose geometry to pick the initial bend
+    direction.  Some models (especially PMD) have knee bones with a tiny
+    backward Y offset that makes the solver choose the wrong side, causing
+    large IK error.  This nudges only bones whose Japanese name contains
+    "ひざ" (knee) to avoid affecting arms, hair, or other IK chains.
+    """
+    for bone in pmx_bones:
+        if not bone.is_ik or not bone.ik_links:
+            continue
+        for link in bone.ik_links:
+            if not link.has_limits or link.limit_min is None:
+                continue
+            idx = link.bone_index
+            if idx < 0 or idx >= len(edit_bones):
+                continue
+            # Only touch knee bones
+            if "ひざ" not in pmx_bones[idx].name:
+                continue
+            eb = edit_bones[idx]
+            if eb.parent is None or eb.vector.length < MIN_BONE_LENGTH:
+                continue
+
+            parent_head = eb.parent.head
+            head = eb.head
+            tail = eb.tail
+
+            v1_y = head.y - parent_head.y
+            v1_z = head.z - parent_head.z
+            v2_y = tail.y - head.y
+            v2_z = tail.z - head.z
+            cross_x = v1_y * v2_z - v1_z * v2_y
+
+            # Threshold: 2% of product of vertical spans (~1° pre-bend)
+            min_cross = 0.02 * abs(v1_z) * abs(v2_z)
+            if min_cross < 1e-8:
+                continue
+
+            if cross_x >= min_cross:
+                continue
+
+            # Nudge knee head forward (-Y) so cross_x reaches 2× threshold
+            dz = tail.z - parent_head.z
+            if abs(dz) < 1e-6:
+                continue
+            target = min_cross * 2
+            nudge_y = (target - cross_x) / dz
+
+            old_head = eb.head.copy()
+            eb.head.y += nudge_y
+
+            # Keep parent tail connected if it tracked our head
+            if eb.parent and (eb.parent.tail - old_head).length < 0.01:
+                eb.parent.tail = eb.head.copy()
+
+            log.info(
+                "Knee pre-bend: bone %d (%s) nudged %.4f Y (cross %.6f -> %.6f)",
+                idx, pmx_bones[idx].name, nudge_y, cross_x, cross_x + nudge_y * dz,
+            )
+
+
 def _setup_additional_transforms(
     arm_obj: bpy.types.Object,
     pmx_bones: list[Bone],
@@ -400,6 +466,13 @@ def create_armature(
             _set_bone_roll_from_axes(eb, pmx_bone.local_axis_x, pmx_bone.local_axis_z)
         elif _needs_auto_local_axis(pmx_bone.name):
             _set_auto_bone_roll(eb)
+
+    # Nudge knee bones forward if their rest-pose geometry doesn't provide
+    # a clear forward pre-bend hint.  Some models (especially PMD) have tiny
+    # lateral offsets that dominate the forward offset, making Blender's IK
+    # solver choose the wrong bend direction.  Runs after roll computation
+    # and only touches bones named "ひざ" (knee) to avoid side-effects.
+    _ensure_knee_prebend(edit_bones, pmx_bones)
 
     bpy.ops.object.mode_set(mode="OBJECT")
 

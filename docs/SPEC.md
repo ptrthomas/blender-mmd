@@ -782,7 +782,7 @@ Both modes: Texture loading with dedup, per-face material assignment, UV V-flip,
 
 ### Milestone 6: Animation Polish
 
-Additional transforms done (grant parent, shadow bones). Remaining: VMD camera motion, CCD IK solver.
+Additional transforms done (grant parent, shadow bones). PMD format support + VMD bone name auto-mapping done. PMD WaistCancel fix neutralizes LowerBody-cancelling bones that break modern VMDs. Knee pre-bend nudge fixes IK solver convergence on PMD models with backward knee geometry. Remaining: VMD camera motion, CCD IK solver.
 
 ### Milestone 7: Creative Tools (planned)
 

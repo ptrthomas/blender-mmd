@@ -48,7 +48,7 @@ Both projects share the same core approach for IK constraints (first link bone p
 - **Rigid body physics** — correct PMX collision group/mask enforcement via bilateral check (both masks must agree), all joints `disable_collisions=True`, 3-phase build pipeline, auto-reset after VMD import. Debug tools: Inspect (copies full diagnostic to clipboard), Select Colliders (highlights eligible collision partners), Select Contacts (highlights bodies in contact at current frame). MMD4B panel for build/reset/clear with per-chain management
 - **Split by material** — each material becomes its own mesh object (default on). Enables Blender's light linking to exclude specific materials from illumination or shadows — useful for Lat-style models with 2D face overlays that should not receive scene lighting. Per-object `visible_shadow` honors PMX drop shadow flags
 - **Additional transforms** — grant parent system (D bones, shoulder cancel, arm twist, eye tracking)
-- **IK** — correct constraint placement, native limits, per-bone angle conversion
+- **IK** — correct constraint placement, native limits, per-bone angle conversion. Knee pre-bend nudge fixes IK solver convergence on PMD models where rest-pose geometry has insufficient forward offset (Lat-style models)
 
 ## Physics: correct collision filtering
 

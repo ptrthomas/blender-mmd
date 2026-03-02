@@ -563,6 +563,50 @@ def _convert_bones(pmd_bones: list[dict], pmd_iks: list[dict]) -> list[Bone]:
     return bones
 
 
+def _fix_waist_cancel(bones: list[Bone]) -> None:
+    """Neutralize PMD-era WaistCancel bones that cancel LowerBody rotation.
+
+    PMD models have WaistCancel bones with ``additional_transform = (LowerBody, -1.0)``
+    which cancels LowerBody's rotation from the leg chain.  Modern PMX models (e.g. YYB)
+    have WaistCancel that cancels a separate *Waist* bone (腰) instead — one that typically
+    carries no VMD animation, making the cancellation a no-op.
+
+    Modern VMDs are authored assuming legs inherit LowerBody's lean.  When a PMD model's
+    WaistCancel actively cancels LowerBody, the legs lose that lean and IK targets become
+    unreachable (0.47 unit error vs 0.00008 on a correctly structured PMX model).
+
+    The fix: strip the ``additional_transform`` and the ``ADDITIONAL_ROTATION`` flag from
+    WaistCancel bones that target LowerBody, converting them to passive passthrough bones.
+    The leg parent chain is preserved (Leg → WaistCancel → LowerBody) so any VMD that
+    targets WaistCancel directly still has a bone to land on.
+    """
+    lower_body_idx: int | None = None
+    for i, b in enumerate(bones):
+        if b.name == "下半身":
+            lower_body_idx = i
+            break
+
+    if lower_body_idx is None:
+        return
+
+    fixed = 0
+    for b in bones:
+        if b.name not in ("腰キャンセル左", "腰キャンセル右"):
+            continue
+        if b.additional_transform is None:
+            continue
+        target_idx, _factor = b.additional_transform
+        if target_idx != lower_body_idx:
+            continue
+
+        b.additional_transform = None
+        b.flags &= ~_ADDITIONAL_ROTATION
+        fixed += 1
+
+    if fixed:
+        log.info("PMD: Neutralized %d WaistCancel bone(s) that canceled LowerBody", fixed)
+
+
 def _convert_morphs(pmd_morphs: list[dict]) -> list[Morph]:
     """Convert PMD morphs (base + relative) to PMX vertex morphs with absolute indices."""
     if not pmd_morphs:
@@ -862,6 +906,9 @@ def parse(filepath: str | Path) -> Model:
 
     # Convert bones (includes IK merging)
     bones = _convert_bones(pmd_bones, pmd_iks)
+
+    # Neutralize PMD-era WaistCancel that cancels LowerBody (breaks modern VMDs)
+    _fix_waist_cancel(bones)
 
     # Set English names on bones
     for i, bone in enumerate(bones):

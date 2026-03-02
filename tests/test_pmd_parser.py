@@ -108,6 +108,25 @@ class TestBones:
                 assert bone.ik_links is not None
                 assert len(bone.ik_links) > 0
 
+    def test_knee_ik_links_have_limits(self, parsed_pmd):
+        """Knee bones in IK chains should have rotation limits for correct bending."""
+        import math
+        names = [b.name for b in parsed_pmd.bones]
+        for bone in parsed_pmd.bones:
+            if not bone.is_ik or not bone.ik_links:
+                continue
+            for link in bone.ik_links:
+                link_name = names[link.bone_index] if link.bone_index < len(names) else ""
+                if not link_name.endswith("ひざ"):
+                    continue
+                assert link.has_limits, f"Knee '{link_name}' should have IK limits"
+                assert link.limit_min is not None
+                assert link.limit_max is not None
+                # Limits should restrict to backward bend (X rotation in MMD space,
+                # already Y↔Z swapped by parser: min[0] ≈ -π, max[0] ≈ -0.5°)
+                assert link.limit_min[0] < -3.0, "Knee min limit should be near -π"
+                assert abs(link.limit_max[0]) < 0.02, "Knee max limit should be near -0.5°"
+
     def test_coordinate_conversion(self, parsed_pmd):
         """Root bone (Center) should be at Y=0 or positive Z in Blender coords."""
         # Just check that we have reasonable positions (not NaN/inf)
@@ -169,6 +188,54 @@ class TestJoints:
         for j in parsed_pmd.joints:
             assert 0 <= j.src_rigid < n
             assert 0 <= j.dest_rigid < n
+
+
+class TestWaistCancelFix:
+    """PMD WaistCancel neutralization for modern VMD compatibility."""
+
+    def test_waist_cancel_no_additional_transform(self, parsed_pmd):
+        """WaistCancel bones should have additional_transform stripped (no LowerBody cancel)."""
+        names = [b.name for b in parsed_pmd.bones]
+        for wc_name in ("腰キャンセル左", "腰キャンセル右"):
+            if wc_name not in names:
+                continue
+            wc = parsed_pmd.bones[names.index(wc_name)]
+            assert wc.additional_transform is None, (
+                f"{wc_name} should have additional_transform=None (neutralized), "
+                f"got {wc.additional_transform}"
+            )
+
+    def test_waist_cancel_no_additional_rotation_flag(self, parsed_pmd):
+        """WaistCancel bones should not have ADDITIONAL_ROTATION flag after neutralization."""
+        names = [b.name for b in parsed_pmd.bones]
+        for wc_name in ("腰キャンセル左", "腰キャンセル右"):
+            if wc_name not in names:
+                continue
+            wc = parsed_pmd.bones[names.index(wc_name)]
+            assert not wc.has_additional_rotation, (
+                f"{wc_name} should not have ADDITIONAL_ROTATION flag"
+            )
+
+    def test_waist_cancel_parent_is_lower_body(self, parsed_pmd):
+        """WaistCancel bones should remain children of LowerBody."""
+        names = [b.name for b in parsed_pmd.bones]
+        if "腰キャンセル左" not in names:
+            pytest.skip("No WaistCancel bones")
+        lower_body_idx = names.index("下半身")
+        for wc_name in ("腰キャンセル左", "腰キャンセル右"):
+            if wc_name in names:
+                wc = parsed_pmd.bones[names.index(wc_name)]
+                assert wc.parent == lower_body_idx
+
+    def test_leg_parented_to_waist_cancel(self, parsed_pmd):
+        """Leg bones should remain children of WaistCancel (passthrough)."""
+        names = [b.name for b in parsed_pmd.bones]
+        for leg_name, wc_name in (("左足", "腰キャンセル左"), ("右足", "腰キャンセル右")):
+            if leg_name not in names or wc_name not in names:
+                continue
+            leg = parsed_pmd.bones[names.index(leg_name)]
+            wc_idx = names.index(wc_name)
+            assert leg.parent == wc_idx
 
 
 class TestAllSections:
