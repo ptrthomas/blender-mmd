@@ -102,8 +102,12 @@ def _build_rigid_body_physics(
 
     _set_rigid_body_world_enabled(bpy.context.scene, False)
 
+    wm = bpy.context.window_manager
+    wm.progress_begin(0, 100)
+
     try:
         # --- Phase 1: CREATE (no depsgraph needed) ---
+        wm.progress_update(0)
 
         # Remove stale collections from previous builds (objects removed but
         # collections left behind → bpy.data.collections.new gives ".001" suffix).
@@ -147,7 +151,10 @@ def _build_rigid_body_physics(
             collision_disabled_chains=collision_disabled,
             rigid_to_chain=rigid_to_chain,
         )
+        wm.progress_update(20)
+
         joint_objects = _create_joints(model, armature_obj, rigid_objects, bone_names, scale, joint_col)
+        wm.progress_update(40)
 
         if ncc_mode == "draft":
             # Draft: skip NCC empties entirely. Set disable_collisions on joints.
@@ -167,6 +174,7 @@ def _build_rigid_body_physics(
                 ncc_proximity=effective_proximity,
                 scale=scale,
             )
+        wm.progress_update(70)
 
         # --- Phase 2: POSITION (needs depsgraph for matrix_world) ---
 
@@ -187,6 +195,7 @@ def _build_rigid_body_physics(
 
         # Flush after reparenting so parent inverse matrices are evaluated
         bpy.context.scene.frame_set(bpy.context.scene.frame_current)
+        wm.progress_update(90)
 
         # --- Phase 3: COUPLE & ACTIVATE ---
 
@@ -197,9 +206,11 @@ def _build_rigid_body_physics(
         vl_col = bpy.context.view_layer.layer_collection.children.get(col_name)
         if vl_col:
             vl_col.hide_viewport = True
+        wm.progress_update(100)
 
     finally:
         _set_rigid_body_world_enabled(bpy.context.scene, True)
+        wm.progress_end()
 
     # Store chains (already detected above)
     armature_obj["mmd_physics_chains"] = json.dumps(chain_dicts)

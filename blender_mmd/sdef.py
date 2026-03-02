@@ -426,13 +426,20 @@ def bake_sdef(armature_obj, frame_start: int, frame_end: int) -> dict:
     # Phase 3: Iterate frames
     log.info("SDEF bake: %d frames, %d meshes", frame_count, len(mesh_data))
 
-    for frame in range(frame_start, frame_end + 1):
+    wm = bpy.context.window_manager
+    wm.progress_begin(0, frame_count)
+
+    for i, frame in enumerate(range(frame_start, frame_end + 1)):
         scene.frame_set(frame)
         depsgraph = bpy.context.evaluated_depsgraph_get()
 
         for mesh_obj, pre in mesh_data.items():
             positions = compute_sdef_frame(armature_obj, mesh_obj, depsgraph, pre)
             frame_buffers[mesh_obj].append(positions)
+
+        wm.progress_update(i + 1)
+
+    wm.progress_end()
 
     # Phase 4: Write MDD files + apply modifiers
     for mesh_obj, frames in frame_buffers.items():
