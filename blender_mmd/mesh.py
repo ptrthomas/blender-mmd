@@ -87,6 +87,14 @@ def create_mesh(
                         [vi], weight, "REPLACE"
                     )
 
+    # --- Per-vertex edge scale ---
+    # Stored as a locked vertex group for Solidify modifier per-vertex thickness
+    vg_edge = mesh_obj.vertex_groups.new(name="mmd_edge_scale")
+    for vi, pmx_v in enumerate(pmx_verts):
+        if pmx_v.edge_scale > 0:
+            vg_edge.add([vi], pmx_v.edge_scale, "REPLACE")
+    vg_edge.lock_weight = True
+
     # --- UV coordinates ---
     # PMX uses DirectX convention (V=0 at top), Blender uses OpenGL (V=0 at bottom)
     uv_layer = mesh_data.uv_layers.new(name="UV")

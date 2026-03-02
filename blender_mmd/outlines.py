@@ -1,0 +1,170 @@
+"""Edge/outline rendering using Solidify modifier + Emission edge material.
+
+MMD uses an inverted hull method: mesh geometry extruded outward along normals
+with flipped faces. Backface culling makes only silhouette edges visible.
+
+Each material has edge_color (RGBA), edge_size (thickness), and
+enabled_toon_edge (flag). Per-vertex edge_scale is stored as the
+mmd_edge_scale vertex group.
+"""
+
+from __future__ import annotations
+
+import logging
+
+import bpy
+
+log = logging.getLogger("blender_mmd")
+
+# Thickness factor calibrated to match mmd_tools effective outline width.
+# MMD edge_size 1.0 at default scale 0.08: 1.0 * 0.08 * 0.05 = 0.004 BU
+_THICKNESS_FACTOR = 0.05
+
+_MODIFIER_NAME = "mmd_edge"
+_EDGE_MAT_PREFIX = "mmd_edge."
+
+
+def build_outlines(
+    armature_obj: bpy.types.Object,
+    thickness_mult: float = 1.0,
+) -> int:
+    """Build outline modifiers on all eligible mesh children.
+
+    Returns the number of meshes that received outlines.
+    """
+    scale = armature_obj.get("import_scale", 0.08)
+    count = 0
+
+    for obj in armature_obj.children:
+        if obj.type != "MESH":
+            continue
+        mat = obj.data.materials[0] if obj.data.materials else None
+        if mat is None:
+            continue
+        if not mat.get("mmd_edge_enabled", False):
+            continue
+
+        edge_color = mat.get("mmd_edge_color", [0.0, 0.0, 0.0, 1.0])
+        edge_size = mat.get("mmd_edge_size", 1.0)
+
+        # Create edge material and add as slot 1
+        edge_mat = _create_edge_material(mat.name, edge_color)
+        obj.data.materials.append(edge_mat)
+
+        # Add Solidify modifier
+        mod = obj.modifiers.new(name=_MODIFIER_NAME, type="SOLIDIFY")
+        mod.use_flip_normals = True
+        mod.use_rim = False
+        mod.offset = 1  # extrude outward
+        mod.material_offset = 1  # use slot 1 for shell
+        mod.thickness = edge_size * scale * _THICKNESS_FACTOR * thickness_mult
+
+        # Per-vertex thickness via mmd_edge_scale vertex group
+        if "mmd_edge_scale" in obj.vertex_groups:
+            mod.vertex_group = "mmd_edge_scale"
+
+        count += 1
+
+    if count > 0:
+        armature_obj["mmd_outlines_built"] = True
+
+    log.info("Built outlines on %d meshes (thickness_mult=%.2f)", count, thickness_mult)
+    return count
+
+
+def _create_edge_material(
+    base_name: str,
+    color: list | tuple,
+) -> bpy.types.Material:
+    """Create an unlit edge material using Emission BSDF.
+
+    Uses backface culling so only the outward-facing shell is visible.
+    Supports alpha via Mix Shader between Emission and Transparent.
+    """
+    mat_name = f"{_EDGE_MAT_PREFIX}{base_name}"
+    mat = bpy.data.materials.new(name=mat_name)
+    mat.use_nodes = True
+    mat.use_backface_culling = True
+    mat.use_backface_culling_shadow = True
+    mat.surface_render_method = "BLENDED"
+
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+
+    # Find or create output node
+    node_output = None
+    for n in nodes:
+        if isinstance(n, bpy.types.ShaderNodeOutputMaterial):
+            node_output = n
+            break
+    if node_output is None:
+        node_output = nodes.new("ShaderNodeOutputMaterial")
+    node_output.location = (400, 0)
+
+    # Remove default Principled BSDF
+    default_bsdf = nodes.get("Principled BSDF")
+    if default_bsdf:
+        nodes.remove(default_bsdf)
+
+    r, g, b = color[0], color[1], color[2]
+    alpha = color[3] if len(color) > 3 else 1.0
+
+    # Emission shader (unlit, lighting-independent)
+    emission = nodes.new("ShaderNodeEmission")
+    emission.location = (0, 0)
+    emission.inputs["Color"].default_value = (r, g, b, 1.0)
+    emission.inputs["Strength"].default_value = 1.0
+
+    if alpha < 1.0 - 1e-3:
+        # Mix between Emission and Transparent for alpha edges
+        transparent = nodes.new("ShaderNodeBsdfTransparent")
+        transparent.location = (0, -150)
+
+        mix = nodes.new("ShaderNodeMixShader")
+        mix.location = (200, 0)
+        mix.inputs["Fac"].default_value = alpha
+
+        links.new(transparent.outputs["BSDF"], mix.inputs[1])
+        links.new(emission.outputs["Emission"], mix.inputs[2])
+        links.new(mix.outputs["Shader"], node_output.inputs["Surface"])
+
+        mat.use_transparent_shadow = True
+    else:
+        links.new(emission.outputs["Emission"], node_output.inputs["Surface"])
+
+    # Viewport display
+    mat.diffuse_color = (r, g, b, alpha)
+
+    return mat
+
+
+def remove_outlines(armature_obj: bpy.types.Object) -> None:
+    """Remove all outline modifiers and edge materials."""
+    orphaned_mats: set[str] = set()
+
+    for obj in armature_obj.children:
+        if obj.type != "MESH":
+            continue
+
+        # Remove Solidify modifier
+        mod = obj.modifiers.get(_MODIFIER_NAME)
+        if mod:
+            obj.modifiers.remove(mod)
+
+        # Remove edge material slots (iterate backwards to handle index shifts)
+        for i in range(len(obj.data.materials) - 1, -1, -1):
+            mat = obj.data.materials[i]
+            if mat and mat.name.startswith(_EDGE_MAT_PREFIX):
+                orphaned_mats.add(mat.name)
+                obj.data.materials.pop(index=i)
+
+    # Delete orphaned edge materials from bpy.data
+    for mat_name in orphaned_mats:
+        mat = bpy.data.materials.get(mat_name)
+        if mat and mat.users == 0:
+            bpy.data.materials.remove(mat)
+
+    if "mmd_outlines_built" in armature_obj:
+        del armature_obj["mmd_outlines_built"]
+
+    log.info("Removed outlines from armature '%s'", armature_obj.name)

@@ -280,6 +280,63 @@ class BLENDER_MMD_PT_animation(bpy.types.Panel):
             layout.label(text="No animation", icon="INFO")
 
 
+class BLENDER_MMD_PT_outlines(bpy.types.Panel):
+    """MMD4B — edge/outline rendering controls."""
+
+    bl_label = "Outlines"
+    bl_idname = "BLENDER_MMD_PT_outlines"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "MMD4B"
+    bl_parent_id = "BLENDER_MMD_PT_main"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    @classmethod
+    def poll(cls, context):
+        return find_mmd_armature(context) is not None
+
+    def draw(self, context):
+        layout = self.layout
+        armature_obj = find_mmd_armature(context)
+
+        has_outlines = armature_obj.get("mmd_outlines_built", False)
+
+        if has_outlines:
+            # Count meshes with outline modifier
+            outline_count = sum(
+                1 for c in armature_obj.children
+                if c.type == "MESH" and c.modifiers.get("mmd_edge")
+            )
+            layout.label(
+                text=f"Active: {outline_count} meshes with outlines",
+                icon="MOD_SOLIDIFY",
+            )
+
+            # Thickness slider + Rebuild/Remove
+            row = layout.row(align=True)
+            row.prop(context.scene, "mmd_edge_thickness", text="Thickness")
+
+            row = layout.row(align=True)
+            row.operator(
+                "blender_mmd.build_outlines",
+                text="Rebuild",
+                icon="FILE_REFRESH",
+            )
+            row.operator(
+                "blender_mmd.remove_outlines",
+                text="Remove",
+                icon="TRASH",
+            )
+        else:
+            row = layout.row(align=True)
+            row.prop(context.scene, "mmd_edge_thickness", text="Thickness")
+            layout.operator(
+                "blender_mmd.build_outlines",
+                text="Build Outlines",
+                icon="MOD_SOLIDIFY",
+            )
+
+
 class BLENDER_MMD_PT_main(bpy.types.Panel):
     """MMD4B — main panel container."""
 
@@ -300,6 +357,7 @@ class BLENDER_MMD_PT_main(bpy.types.Panel):
 
 _classes = (
     BLENDER_MMD_PT_main,
+    BLENDER_MMD_PT_outlines,
     BLENDER_MMD_PT_animation,
     BLENDER_MMD_PT_physics,
     BLENDER_MMD_PT_ik_toggle,
@@ -309,6 +367,14 @@ _classes = (
 def register():
     for cls in _classes:
         bpy.utils.register_class(cls)
+    bpy.types.Scene.mmd_edge_thickness = FloatProperty(
+        name="Edge Thickness",
+        description="Multiplier for edge/outline thickness",
+        default=1.0,
+        min=0.1,
+        max=5.0,
+        step=10,
+    )
     bpy.types.Scene.mmd_ncc_mode = EnumProperty(
         name="NCC Mode",
         description="Non-collision constraint mode",
@@ -330,6 +396,8 @@ def register():
 
 
 def unregister():
+    if hasattr(bpy.types.Scene, "mmd_edge_thickness"):
+        del bpy.types.Scene.mmd_edge_thickness
     if hasattr(bpy.types.Scene, "mmd_ncc_proximity"):
         del bpy.types.Scene.mmd_ncc_proximity
     if hasattr(bpy.types.Scene, "mmd_ncc_mode"):

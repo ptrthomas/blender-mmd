@@ -63,6 +63,7 @@ blender-mmd/
 │   ├── armature.py           # Bone creation, IK setup, additional transforms, shadow bones
 │   ├── mesh.py               # Mesh creation and vertex weights
 │   ├── materials.py          # Material/shader creation, texture loading
+│   ├── outlines.py           # Edge/outline rendering (Solidify + Emission material)
 │   ├── operators.py          # Thin Blender operator layer
 │   ├── panels.py             # MMD4B N-panel for physics controls
 │   ├── helpers.py            # Introspection and query helpers for Claude
@@ -609,6 +610,8 @@ blender_mmd.select_contacts            # Select RBs in contact with active RB at
 blender_mmd.clear_animation            # Clear bone/morph keyframes, reset to rest pose
 blender_mmd.toggle_ik                  # Toggle IK for one chain (target_bone)
 blender_mmd.toggle_all_ik              # Enable/disable all IK (enable: bool)
+blender_mmd.build_outlines             # Build edge outlines (Solidify + Emission)
+blender_mmd.remove_outlines            # Remove edge outlines
 ```
 
 ### VMD binary format
@@ -761,6 +764,15 @@ Rigid body creation, GENERIC_SPRING joints with spring values, collision layers 
 - Physics build/clear preserves user mute state (saved/restored around internal IK muting)
 - Chains discovered by scanning pose bones for IK constraints
 
+**Outlines sub-panel** (collapsed by default):
+- **No outlines state:** Thickness multiplier slider (default 1.0, range 0.1–5.0) + "Build Outlines" button
+- **Outlines active:** Shows count of meshes with outlines, thickness slider, "Rebuild" button (remove + build with new thickness), "Remove" button
+- Uses Solidify modifier (`mmd_edge`) per mesh child with `use_flip_normals=True`, `offset=1` (outward), `material_offset=1` (edge material in slot 1)
+- Edge material: Emission BSDF (unlit, lighting-independent) with PMX edge color. Alpha < 1.0 uses Mix Shader (Emission + Transparent) with BLENDED surface render method
+- Per-vertex thickness modulation via `mmd_edge_scale` vertex group (populated during mesh import from PMX `edge_scale` data)
+- Only builds on meshes where material has `mmd_edge_enabled=True` (eyes, face details, etc. skipped)
+- Thickness formula: `edge_size × import_scale × 0.05 × thickness_mult`
+
 **Workflow:** Import PMX → click "Build Rigid Bodies" in MMD4B panel → optionally import VMD (physics auto-resets) → play animation. Use "Reset" after changing pose to reposition rigid bodies without full rebuild. Use "Clear Animation" to strip all keyframes and reload a different VMD. Use per-chain X buttons to remove physics from specific parts (e.g. remove skirt physics to replace with cloth sim). Use IK Toggle to disable IK chains for non-standard poses. Select a rigid body and use Inspect/Colliders/Contacts for debugging collision issues.
 
 ### Milestone 5: Materials & Textures ✅
@@ -784,9 +796,9 @@ Both modes: Texture loading with dedup, per-face material assignment, UV V-flip,
 
 Additional transforms done (grant parent, shadow bones). PMD format support + VMD bone name auto-mapping done. PMD WaistCancel fix neutralizes LowerBody-cancelling bones that break modern VMDs. Knee pre-bend nudge fixes IK solver convergence on PMD models with backward knee geometry. Remaining: VMD camera motion, CCD IK solver.
 
-### Milestone 7: Creative Tools (planned)
+### Milestone 7: Creative Tools (in progress)
 
-- Edge/outline rendering (solidify + inverted-normals material, per-material control)
+- Edge/outline rendering ✅ (Solidify modifier + Emission edge material, per-material edge color/size/alpha from PMX, per-vertex edge_scale, Build/Rebuild/Remove in MMD4B panel)
 - Material morphs (VMD material keyframes → Blender property drivers)
 - Per-material mesh split ✅ (done — default on import, enables per-object modifiers/shadows)
 

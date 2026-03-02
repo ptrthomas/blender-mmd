@@ -635,6 +635,62 @@ def _shape_radius(rb_data: dict, scale: float) -> float:
     return 0.01
 
 
+class BLENDER_MMD_OT_build_outlines(bpy.types.Operator):
+    """Build edge outlines on MMD model meshes"""
+
+    bl_idname = "blender_mmd.build_outlines"
+    bl_label = "Build Outlines"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        from .outlines import build_outlines, remove_outlines
+
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        # Remove existing outlines first (supports rebuild)
+        if armature_obj.get("mmd_outlines_built"):
+            remove_outlines(armature_obj)
+
+        thickness_mult = context.scene.get("mmd_edge_thickness", 1.0)
+
+        try:
+            count = build_outlines(armature_obj, thickness_mult)
+            self.report({"INFO"}, f"Outlines built on {count} meshes")
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("Outline build failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
+class BLENDER_MMD_OT_remove_outlines(bpy.types.Operator):
+    """Remove edge outlines from MMD model"""
+
+    bl_idname = "blender_mmd.remove_outlines"
+    bl_label = "Remove Outlines"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        from .outlines import remove_outlines
+
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        try:
+            remove_outlines(armature_obj)
+            self.report({"INFO"}, "Outlines removed.")
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("Outline removal failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
 class BLENDER_MMD_OT_rebuild_ncc(bpy.types.Operator):
     """Rebuild non-collision constraint empties (respects self-collision settings)"""
 
@@ -754,6 +810,8 @@ _classes = (
     BLENDER_MMD_OT_build_physics,
     BLENDER_MMD_OT_clear_physics,
     BLENDER_MMD_OT_reset_physics,
+    BLENDER_MMD_OT_build_outlines,
+    BLENDER_MMD_OT_remove_outlines,
     BLENDER_MMD_OT_rebuild_ncc,
     BLENDER_MMD_OT_select_chain,
     BLENDER_MMD_OT_remove_chain,
