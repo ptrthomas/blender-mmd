@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import struct
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -230,9 +231,9 @@ def compute_sdef_frame(
         if rot1.dot(rot0) < 0:
             rot1 = -rot1
 
-        # Convert matrices to numpy for vectorized math
-        mat0_np = np.array(mat0, dtype=np.float64)[:3, :3]
-        mat1_np = np.array(mat1, dtype=np.float64)[:3, :3]
+        # Convert to numpy — full 4x4 for cr0/cr1 (need translation)
+        mat0_np = np.array(mat0, dtype=np.float64)
+        mat1_np = np.array(mat1, dtype=np.float64)
 
         for vi_idx in vert_indices:
             vd = precomputed.vertices[vi_idx]
@@ -244,10 +245,14 @@ def compute_sdef_frame(
 
             # SDEF position:
             # (mat_rot @ pos_c) + (mat0 @ cr0) * w0 + (mat1 @ cr1) * w1
+            # mat_rot is 3x3 (pure rotation from blended quat)
+            # mat0/mat1 are 4x4 (rotation + translation from bone deformation)
+            cr0_h = np.append(vd.cr0.astype(np.float64), 1.0)
+            cr1_h = np.append(vd.cr1.astype(np.float64), 1.0)
             new_pos = (
                 mat_rot @ vd.pos_c.astype(np.float64)
-                + (mat0_np @ vd.cr0.astype(np.float64)) * vd.w0
-                + (mat1_np @ vd.cr1.astype(np.float64)) * vd.w1
+                + (mat0_np @ cr0_h)[:3] * vd.w0
+                + (mat1_np @ cr1_h)[:3] * vd.w1
             )
 
             positions[vd.index] = new_pos.astype(np.float32)
@@ -259,16 +264,25 @@ def compute_sdef_frame(
 # MDD writer
 # ---------------------------------------------------------------------------
 
-def write_mdd(path: str | Path, frames: list[np.ndarray]) -> None:
-    """Write vertex positions to an MDD (Motion Dynamics Data) file.
+def write_mdd(
+    path: str | Path,
+    frames: list[np.ndarray],
+    fps: float = 30.0,
+) -> None:
+    """Write vertex positions to an MDD (LightWave PointCache2) file.
 
-    MDD is a simple per-frame vertex cache format read by Blender's
-    Mesh Cache modifier. **Big-endian** byte order is required.
+    MDD format (all big-endian):
+      int32   frame_count
+      int32   vertex_count
+      float32[frame_count]  timestamps (seconds)
+      Per frame:
+        float32[vertex_count * 3]  positions (x, y, z interleaved)
 
     Args:
         path: Output file path.
         frames: List of NumPy arrays, each shape (vertex_count, 3).
             All frames must have the same vertex count.
+        fps: Frames per second for timestamp generation (default 30).
     """
     if not frames:
         raise ValueError("No frames to write")
@@ -283,15 +297,18 @@ def write_mdd(path: str | Path, frames: list[np.ndarray]) -> None:
         # Header: frame_count, vertex_count (big-endian int32)
         f.write(struct.pack(">ii", frame_count, vertex_count))
 
+        # Timestamps: one float per frame (seconds)
+        timestamps = np.arange(frame_count, dtype=np.float32) / fps
+        f.write(timestamps.astype(">f4").tobytes())
+
         for frame_positions in frames:
             if frame_positions.shape[0] != vertex_count:
                 raise ValueError(
                     f"Frame vertex count mismatch: expected {vertex_count}, "
                     f"got {frame_positions.shape[0]}"
                 )
-            # Flatten to (vertex_count * 3,) and write as big-endian float32
-            flat = frame_positions.astype(np.float32).flatten()
-            f.write(struct.pack(f">{len(flat)}f", *flat))
+            # Write as big-endian float32
+            f.write(frame_positions.astype(">f4").tobytes())
 
 
 def read_mdd(path: str | Path) -> tuple[int, int, list[np.ndarray]]:
@@ -306,16 +323,255 @@ def read_mdd(path: str | Path) -> tuple[int, int, list[np.ndarray]]:
         header = f.read(8)
         frame_count, vertex_count = struct.unpack(">ii", header)
 
+        # Skip timestamps
+        f.read(frame_count * 4)
+
         frames = []
-        floats_per_frame = vertex_count * 3
-        bytes_per_frame = floats_per_frame * 4
+        bytes_per_frame = vertex_count * 3 * 4
 
         for _ in range(frame_count):
             raw = f.read(bytes_per_frame)
             if len(raw) < bytes_per_frame:
                 raise ValueError("Unexpected end of MDD file")
-            values = struct.unpack(f">{floats_per_frame}f", raw)
-            arr = np.array(values, dtype=np.float32).reshape(vertex_count, 3)
+            arr = np.frombuffer(raw, dtype=">f4").astype(np.float32).reshape(vertex_count, 3)
             frames.append(arr)
 
     return frame_count, vertex_count, frames
+
+
+# ---------------------------------------------------------------------------
+# Bake pipeline (requires Blender — bpy)
+# ---------------------------------------------------------------------------
+
+
+def _cache_dir(armature_obj) -> Path:
+    """Return the MDD cache directory for this armature, as an absolute path."""
+    import bpy
+
+    blend_path = Path(bpy.data.filepath)
+    blend_stem = blend_path.stem  # e.g. "miku_scene"
+    arm_name = armature_obj.name
+    return blend_path.parent / f"{blend_stem}_sdef" / arm_name
+
+
+def _mesh_has_sdef(mesh_obj) -> bool:
+    """Check if a mesh object has SDEF attributes."""
+    mesh = mesh_obj.data
+    return (
+        mesh.attributes.get("mmd_sdef_c") is not None
+        and mesh.attributes.get("mmd_sdef_r0") is not None
+        and mesh.attributes.get("mmd_sdef_r1") is not None
+        and mesh_obj.vertex_groups.get("mmd_sdef") is not None
+    )
+
+
+def _get_sdef_meshes(armature_obj) -> list:
+    """Return child mesh objects that have SDEF data."""
+    return [
+        child for child in armature_obj.children
+        if child.type == "MESH" and _mesh_has_sdef(child)
+    ]
+
+
+def bake_sdef(armature_obj, frame_start: int, frame_end: int) -> dict:
+    """Bake SDEF deformation to MDD files for all SDEF meshes.
+
+    For each mesh with SDEF vertices:
+    1. Precompute per-vertex SDEF constants from rest-pose data
+    2. For each frame: evaluate depsgraph (LBS), replace SDEF verts, store
+    3. Write MDD file per mesh
+    4. Apply Mesh Cache modifier, mute Armature modifier
+
+    Args:
+        armature_obj: The MMD armature object.
+        frame_start: First frame to bake.
+        frame_end: Last frame to bake (inclusive).
+
+    Returns:
+        Dict with 'meshes' (count), 'frames' (count), 'time' (seconds),
+        'cache_dir' (absolute path string).
+    """
+    import bpy
+
+    t0 = time.perf_counter()
+    scene = bpy.context.scene
+    cache = _cache_dir(armature_obj)
+
+    sdef_meshes = _get_sdef_meshes(armature_obj)
+    if not sdef_meshes:
+        raise RuntimeError("No SDEF meshes found on armature")
+
+    frame_count = frame_end - frame_start + 1
+
+    # Build bone name mapping (vertex group name → bone name, typically identity)
+    bone_names = {}
+    for bone in armature_obj.data.bones:
+        bone_names[bone.name] = bone.name
+
+    # Phase 1: Precompute per-mesh SDEF data
+    mesh_data = {}
+    for mesh_obj in sdef_meshes:
+        pre = _precompute_sdef_data(mesh_obj.data, mesh_obj.vertex_groups, bone_names)
+        if pre.vertices:
+            mesh_data[mesh_obj] = pre
+
+    if not mesh_data:
+        raise RuntimeError("No SDEF vertices found after precomputation")
+
+    # Phase 2: Allocate frame buffers
+    frame_buffers: dict = {}  # mesh_obj -> list[np.ndarray]
+    for mesh_obj in mesh_data:
+        frame_buffers[mesh_obj] = []
+
+    # Phase 3: Iterate frames
+    log.info("SDEF bake: %d frames, %d meshes", frame_count, len(mesh_data))
+
+    for frame in range(frame_start, frame_end + 1):
+        scene.frame_set(frame)
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+
+        for mesh_obj, pre in mesh_data.items():
+            positions = compute_sdef_frame(armature_obj, mesh_obj, depsgraph, pre)
+            frame_buffers[mesh_obj].append(positions)
+
+    # Phase 4: Write MDD files + apply modifiers
+    for mesh_obj, frames in frame_buffers.items():
+        mdd_path = cache / f"{mesh_obj.name}.mdd"
+        write_mdd(mdd_path, frames)
+        log.info("SDEF bake: wrote %s (%d frames, %d verts)",
+                 mdd_path, len(frames), frames[0].shape[0])
+
+        # Remove existing Mesh Cache modifier if present
+        existing = mesh_obj.modifiers.get("mmd_sdef")
+        if existing:
+            mesh_obj.modifiers.remove(existing)
+
+        # Add Mesh Cache modifier
+        mod = mesh_obj.modifiers.new(name="mmd_sdef", type="MESH_CACHE")
+        mod.cache_format = "MDD"
+        mod.filepath = str(mdd_path)
+        mod.frame_start = frame_start
+        # Play mode: index by frame number
+        mod.play_mode = "SCENE"
+        mod.show_viewport = True
+        mod.show_render = True
+
+        # Move Mesh Cache before Armature in modifier stack
+        # (we want it to replace armature deformation)
+        # Actually, since we mute Armature, order doesn't matter much,
+        # but ensure it's high in the stack
+        while mesh_obj.modifiers.find("mmd_sdef") > 0:
+            bpy.context.view_layer.objects.active = mesh_obj
+            bpy.ops.object.modifier_move_up(modifier="mmd_sdef")
+
+        # Mute the Armature modifier (MDD provides all deformation)
+        arm_mod = mesh_obj.modifiers.get("Armature")
+        if arm_mod:
+            arm_mod.show_viewport = False
+            arm_mod.show_render = False
+
+    # Phase 5: Store bake metadata on armature
+    armature_obj["mmd_sdef_baked"] = True
+    armature_obj["mmd_sdef_enabled"] = True
+    armature_obj["mmd_sdef_frame_start"] = frame_start
+    armature_obj["mmd_sdef_frame_end"] = frame_end
+
+    elapsed = time.perf_counter() - t0
+    log.info("SDEF bake complete: %.1fs", elapsed)
+
+    return {
+        "meshes": len(mesh_data),
+        "frames": frame_count,
+        "time": elapsed,
+        "cache_dir": str(cache),
+    }
+
+
+def clear_sdef_bake(armature_obj) -> int:
+    """Remove SDEF bake: delete Mesh Cache modifiers, restore Armature, delete MDD files.
+
+    Returns:
+        Number of meshes cleared.
+    """
+    import bpy
+
+    count = 0
+    for child in armature_obj.children:
+        if child.type != "MESH":
+            continue
+        mod = child.modifiers.get("mmd_sdef")
+        if mod is None:
+            continue
+
+        # Remove Mesh Cache modifier
+        child.modifiers.remove(mod)
+
+        # Unmute Armature modifier
+        arm_mod = child.modifiers.get("Armature")
+        if arm_mod:
+            arm_mod.show_viewport = True
+            arm_mod.show_render = True
+
+        count += 1
+
+    # Delete MDD files
+    cache = _cache_dir(armature_obj)
+    if cache.exists():
+        import shutil
+        shutil.rmtree(cache, ignore_errors=True)
+        # Also remove parent dir if empty
+        parent = cache.parent
+        if parent.exists() and not any(parent.iterdir()):
+            parent.rmdir()
+
+    # Clear metadata
+    for key in ("mmd_sdef_baked", "mmd_sdef_enabled",
+                "mmd_sdef_frame_start", "mmd_sdef_frame_end"):
+        if key in armature_obj:
+            del armature_obj[key]
+
+    log.info("SDEF bake cleared: %d meshes", count)
+    return count
+
+
+def toggle_sdef(armature_obj) -> bool:
+    """Toggle SDEF on/off by swapping Mesh Cache vs Armature modifier visibility.
+
+    Only affects meshes that have a baked Mesh Cache modifier.
+
+    Returns:
+        New state: True = SDEF active, False = LBS active.
+    """
+    if not armature_obj.get("mmd_sdef_baked"):
+        raise RuntimeError("No SDEF bake to toggle")
+
+    currently_enabled = armature_obj.get("mmd_sdef_enabled", True)
+    new_state = not currently_enabled
+
+    for child in armature_obj.children:
+        if child.type != "MESH":
+            continue
+        sdef_mod = child.modifiers.get("mmd_sdef")
+        if sdef_mod is None:
+            continue
+
+        arm_mod = child.modifiers.get("Armature")
+
+        if new_state:
+            # SDEF on: Mesh Cache visible, Armature hidden
+            sdef_mod.show_viewport = True
+            sdef_mod.show_render = True
+            if arm_mod:
+                arm_mod.show_viewport = False
+                arm_mod.show_render = False
+        else:
+            # SDEF off (LBS): Mesh Cache hidden, Armature visible
+            sdef_mod.show_viewport = False
+            sdef_mod.show_render = False
+            if arm_mod:
+                arm_mod.show_viewport = True
+                arm_mod.show_render = True
+
+    armature_obj["mmd_sdef_enabled"] = new_state
+    log.info("SDEF toggled: %s", "ON" if new_state else "OFF")
+    return new_state

@@ -370,37 +370,25 @@ Example: for `miku_scene.blend` with armature "YYB Miku" and mesh "Body01":
   - Attributes survive `mesh.separate()`, non-zero C/R0/R1 confirmed
 - [ ] Commit (pending — commit with Session 2 work)
 
-### Session 2: Bake pipeline + UI + visual verification
+### Session 2: Bake pipeline + UI + visual verification — DONE
 
-- [ ] Step 5: Bake/clear functions in `sdef.py`
+- [x] Step 5: Bake/clear functions in `sdef.py`
   - `bake_sdef()` — full frame-range bake to MDD + apply Mesh Cache + mute Armature
   - `clear_sdef_bake()` — remove Mesh Cache + unmute Armature + delete MDD
-  - `toggle_sdef(armature_obj)` — swap modifier visibility on SDEF meshes:
-    - SDEF on: Mesh Cache `show_viewport=True`, Armature `show_viewport=False`
-    - SDEF off: Mesh Cache `show_viewport=False`, Armature `show_viewport=True`
-    - Only affects meshes that have a Mesh Cache modifier (i.e. were baked)
-    - Instant — no recomputation, just flips modifier visibility
-    - Store current state on armature as `mmd_sdef_enabled` (bool)
-- [ ] Step 6: SDEF visualization operator (`operators.py`)
+  - `toggle_sdef(armature_obj)` — swap modifier visibility on SDEF meshes
+- [x] Step 6: SDEF visualization operator (`operators.py`)
   - `BLENDER_MMD_OT_select_sdef_vertices` — enter edit mode, select SDEF verts
-- [ ] Step 7: Bake/clear/toggle operators (`operators.py`)
-  - `BLENDER_MMD_OT_bake_sdef` — check .blend saved, call `bake_sdef()`
-  - `BLENDER_MMD_OT_clear_sdef_bake` — call `clear_sdef_bake()`
-  - `BLENDER_MMD_OT_toggle_sdef` — call `toggle_sdef()`, label shows "Disable SDEF" / "Enable SDEF" based on current state
-- [ ] Step 8: SDEF panel (`panels.py`)
-  - `BLENDER_MMD_PT_sdef` sub-panel with:
-    - Bake / Rebake / Clear buttons
-    - Toggle SDEF on/off button (only visible when baked) — instant A/B comparison on any frame
-    - Select SDEF Vertices button
-    - Status label: vertex count, bake frame range, enabled/disabled state
-- [ ] Step 9: Visual verification
-  - Import YYB Miku + VMD with arm movement (e.g. waving/dancing)
-  - Go to a frame with forearm twist or elbow bend
-  - Bake SDEF
-  - Use toggle button to flip between SDEF and LBS on the same frame
-  - **Best test areas**: forearm twist (most dramatic), elbow bend, knee bend
-  - **Quick manual test**: unhide Armature bones, select forearm bone, rotate ~90° in pose mode — the "candy wrapper" pinch at the wrist is what SDEF fixes
-- [ ] Step 10: Update CLAUDE.md, SPEC.md, commit
+- [x] Step 7: Bake/clear/toggle operators (`operators.py`)
+  - `BLENDER_MMD_OT_bake_sdef`, `BLENDER_MMD_OT_clear_sdef_bake`, `BLENDER_MMD_OT_toggle_sdef`
+- [x] Step 8: SDEF panel (`panels.py`)
+  - `BLENDER_MMD_PT_sdef` sub-panel with Bake/Rebake/Clear/Toggle/Select
+- [x] Step 9: Visual verification
+  - YYB Miku: 6,032 SDEF vertices across 8 baked meshes
+  - Rest pose: SDEF vs LBS max diff < 1e-6 (identity verified)
+  - 90° ArmTwist: SDEF vs LBS max diff 0.005 (subtle volume preservation)
+  - Bake: ~1s for 10 frames × 8 meshes. Toggle instant.
+  - Bugs fixed: MDD timestamps (LightWave format), C/R0/R1 scale (import_scale), 4x4 matrix for cr0/cr1 (translation component)
+- [x] Step 10: Update CLAUDE.md, SPEC.md, README.md, commit
 
 ---
 

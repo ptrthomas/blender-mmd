@@ -427,7 +427,8 @@ class TestMDDRoundTrip:
 
         write_mdd(path, frames)
 
-        expected_size = 8 + n_frames * n_verts * 3 * 4
+        # header(8) + timestamps(n_frames*4) + positions(n_frames*n_verts*3*4)
+        expected_size = 8 + n_frames * 4 + n_frames * n_verts * 3 * 4
         assert path.stat().st_size == expected_size
 
     def test_big_endian_header(self, tmp_path):

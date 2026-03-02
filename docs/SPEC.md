@@ -799,6 +799,7 @@ Additional transforms done (grant parent, shadow bones). PMD format support + VM
 ### Milestone 7: Creative Tools (in progress)
 
 - Edge/outline rendering ✅ (Solidify modifier + Emission edge material, per-material edge color/size/alpha from PMX, per-vertex edge_scale, Build/Rebuild/Remove in MMD4B panel)
+- SDEF ✅ (bake-to-MDD pipeline, Mesh Cache playback, toggle A/B comparison, MMD4B panel)
 - Material morphs (VMD material keyframes → Blender property drivers)
 - Per-material mesh split ✅ (done — default on import, enables per-object modifiers/shadows)
 
@@ -812,12 +813,7 @@ PMX supports SDEF bone weighting as an alternative to standard linear blend skin
 
 **How it works in MMD:** Each SDEF vertex stores three extra parameters: C (center point), R0, and R1 (reference positions for each bone). Instead of linearly blending the two bone transforms, SDEF spherically interpolates rotations around C, keeping the mesh surface on a sphere and preventing volume loss.
 
-**Current state:** Our parser reads and stores SDEF data (`BoneWeightSDEF` with `center`, `r0`, `r1` fields). Weight assignment uses the same BDEF2 logic (linear blend). The spherical correction is not applied.
-
-**Implementation options:**
-1. **Geometry Nodes** (most Blender-native, Blender 5.0+ has Geometry Attribute Constraint): Compute corrective offsets per-vertex based on bone rotations and SDEF parameters. Would run as a modifier after Armature.
-2. **Shape key driver** approach: Pre-compute corrective shape keys for key rotation angles, blend via drivers. Approximation but fast.
-3. **Corrective Smooth modifier** (quick approximation): Already available, preserves volume but not SDEF-accurate. Could be a "good enough" interim solution.
+**Implementation:** Bake-to-MDD pipeline in `sdef.py`. SDEF C/R0/R1 stored as `mmd_sdef_c`/`mmd_sdef_r0`/`mmd_sdef_r1` float3 mesh attributes (scaled by import_scale, Y↔Z swapped by parser). Per-vertex NLERP quaternion blending computes volume-preserving positions. Results written to MDD (LightWave PointCache2 format) and played back via Mesh Cache modifier (zero-cost). Armature modifier muted on baked meshes. Toggle swaps modifier visibility for instant SDEF/LBS A/B. MMD4B SDEF sub-panel with Bake/Clear/Toggle/Select. See `docs/SDEF.md` for full algorithm and architecture.
 
 **Impact:** High for character animation quality. Noticeable on elbows, knees, shoulders. Most visible in close-up renders and extreme poses.
 

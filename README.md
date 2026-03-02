@@ -27,6 +27,7 @@ mmd_tools is a battle-tested addon that has served the MMD-Blender community for
 | Coordinate conversion | `.xzy` swizzles scattered across importer, bone, physics code | Done once in parser — downstream is pure Blender coords |
 | IK toggle (VMD) | Custom `mmd_ik_toggle` property + update callback | Constraint influence keyframes (more Blender-native) |
 | Materials | Custom ~20-node shader group per material | Bare Principled BSDF (default) — native Blender shader, responds to scene lighting and reflections. Optional toon/sphere mode for full MMD look |
+| SDEF skinning | Per-frame Python driver (runs every frame, tanks FPS on complex models) | Bake-to-MDD + Mesh Cache modifier (zero-cost playback, instant toggle for A/B comparison) |
 | Hair/skirt physics | Rigid body only | Rigid body (cloth-on-cage planned) |
 | Format support | PMX only (PMD via separate addon) | PMX and PMD natively, with cross-era VMD bone name mapping |
 | Collision filtering | Proximity-filtered — drops distant pairs that may collide during animation | Shared layer 0 + NCC empties for correct bilateral mask enforcement |
@@ -49,6 +50,7 @@ Both projects share the same core approach for IK constraints (first link bone p
 - **Split by material** — each material becomes its own mesh object (default on). Enables Blender's light linking to exclude specific materials from illumination or shadows — useful for Lat-style models with 2D face overlays that should not receive scene lighting. Per-object `visible_shadow` honors PMX drop shadow flags
 - **Additional transforms** — grant parent system (D bones, shoulder cancel, arm twist, eye tracking)
 - **IK** — correct constraint placement, native limits, per-bone angle conversion. Knee pre-bend nudge fixes IK solver convergence on PMD models where rest-pose geometry has insufficient forward offset (Lat-style models)
+- **SDEF** — spherical deformation for volume-preserving skinning. Baked to MDD mesh cache files for zero-cost playback (no per-frame Python). Instant A/B toggle to compare SDEF vs standard linear blend skinning. MMD4B panel with Bake/Clear/Toggle/Select controls
 
 ## Physics: correct collision filtering
 
@@ -114,7 +116,6 @@ The project is designed for development with Claude Code. The full specification
 - VMD camera motion import
 - CCD IK solver
 - Performance optimizations (UV foreach_set, degenerate face cleanup)
-- SDEF spherical deformation
 
 ## License
 

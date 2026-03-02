@@ -337,6 +337,88 @@ class BLENDER_MMD_PT_outlines(bpy.types.Panel):
             )
 
 
+class BLENDER_MMD_PT_sdef(bpy.types.Panel):
+    """MMD4B — SDEF (spherical deformation) controls."""
+
+    bl_label = "SDEF"
+    bl_idname = "BLENDER_MMD_PT_sdef"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "MMD4B"
+    bl_parent_id = "BLENDER_MMD_PT_main"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    @classmethod
+    def poll(cls, context):
+        arm = find_mmd_armature(context)
+        return arm is not None and arm.get("mmd_has_sdef", False)
+
+    def draw(self, context):
+        layout = self.layout
+        armature_obj = find_mmd_armature(context)
+
+        sdef_count = armature_obj.get("mmd_sdef_count", 0)
+        is_baked = armature_obj.get("mmd_sdef_baked", False)
+        is_enabled = armature_obj.get("mmd_sdef_enabled", True)
+
+        # Count SDEF meshes
+        sdef_mesh_count = 0
+        for child in armature_obj.children:
+            if child.type == "MESH" and child.vertex_groups.get("mmd_sdef"):
+                sdef_mesh_count += 1
+
+        layout.label(
+            text=f"{sdef_count} SDEF vertices across {sdef_mesh_count} meshes",
+            icon="MESH_ICOSPHERE",
+        )
+
+        if is_baked:
+            fs = armature_obj.get("mmd_sdef_frame_start", "?")
+            fe = armature_obj.get("mmd_sdef_frame_end", "?")
+            state = "ON" if is_enabled else "OFF (LBS)"
+            layout.label(text=f"Baked: frames {fs}\u2013{fe} | {state}")
+
+            # Toggle button
+            toggle_text = "Disable SDEF" if is_enabled else "Enable SDEF"
+            toggle_icon = "PAUSE" if is_enabled else "PLAY"
+            layout.operator(
+                "blender_mmd.toggle_sdef",
+                text=toggle_text,
+                icon=toggle_icon,
+            )
+
+            row = layout.row(align=True)
+            row.operator(
+                "blender_mmd.bake_sdef",
+                text="Rebake",
+                icon="FILE_REFRESH",
+            )
+            row.operator(
+                "blender_mmd.clear_sdef_bake",
+                text="Clear",
+                icon="TRASH",
+            )
+        else:
+            import bpy as _bpy
+            if not _bpy.data.is_saved:
+                layout.label(text="Save .blend to enable baking", icon="ERROR")
+                row = layout.row()
+                row.enabled = False
+                row.operator("blender_mmd.bake_sdef", text="Bake SDEF", icon="RENDER_ANIMATION")
+            else:
+                layout.operator(
+                    "blender_mmd.bake_sdef",
+                    text="Bake SDEF",
+                    icon="RENDER_ANIMATION",
+                )
+
+        layout.operator(
+            "blender_mmd.select_sdef_vertices",
+            text="Select SDEF Vertices",
+            icon="VERTEXSEL",
+        )
+
+
 class BLENDER_MMD_PT_main(bpy.types.Panel):
     """MMD4B — main panel container."""
 
@@ -358,6 +440,7 @@ class BLENDER_MMD_PT_main(bpy.types.Panel):
 _classes = (
     BLENDER_MMD_PT_main,
     BLENDER_MMD_PT_outlines,
+    BLENDER_MMD_PT_sdef,
     BLENDER_MMD_PT_animation,
     BLENDER_MMD_PT_physics,
     BLENDER_MMD_PT_ik_toggle,

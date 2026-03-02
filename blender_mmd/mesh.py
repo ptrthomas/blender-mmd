@@ -112,9 +112,9 @@ def create_mesh(
 
         for vi, w in sdef_verts:
             base = vi * 3
-            c_data[base:base + 3] = w.c
-            r0_data[base:base + 3] = w.r0
-            r1_data[base:base + 3] = w.r1
+            c_data[base:base + 3] = [v * scale for v in w.c]
+            r0_data[base:base + 3] = [v * scale for v in w.r0]
+            r1_data[base:base + 3] = [v * scale for v in w.r1]
 
         # Look up by name after all attributes exist
         mesh_data.attributes["mmd_sdef_c"].data.foreach_set("vector", c_data)

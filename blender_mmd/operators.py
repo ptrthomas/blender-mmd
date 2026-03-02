@@ -635,6 +635,172 @@ def _shape_radius(rb_data: dict, scale: float) -> float:
     return 0.01
 
 
+class BLENDER_MMD_OT_select_sdef_vertices(bpy.types.Operator):
+    """Select all SDEF vertices on the active mesh (or first mesh child)"""
+
+    bl_idname = "blender_mmd.select_sdef_vertices"
+    bl_label = "Select SDEF Vertices"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        import bmesh
+
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        # Find a mesh to work with — prefer active object if it's a mesh child
+        mesh_obj = None
+        if context.active_object and context.active_object.type == "MESH":
+            if context.active_object.parent == armature_obj:
+                mesh_obj = context.active_object
+
+        # If no active mesh child, pick the first one with SDEF
+        if mesh_obj is None:
+            for child in armature_obj.children:
+                if child.type == "MESH" and child.vertex_groups.get("mmd_sdef"):
+                    mesh_obj = child
+                    break
+
+        if mesh_obj is None:
+            self.report({"ERROR"}, "No mesh with SDEF vertices found.")
+            return {"CANCELLED"}
+
+        # Select mesh, enter edit mode
+        bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.ops.object.select_all(action="DESELECT")
+        mesh_obj.select_set(True)
+        context.view_layer.objects.active = mesh_obj
+        bpy.ops.object.mode_set(mode="EDIT")
+
+        bm = bmesh.from_edit_mesh(mesh_obj.data)
+
+        # Find SDEF group index
+        vg_sdef = mesh_obj.vertex_groups.get("mmd_sdef")
+        if vg_sdef is None:
+            bpy.ops.object.mode_set(mode="OBJECT")
+            self.report({"ERROR"}, "No mmd_sdef vertex group.")
+            return {"CANCELLED"}
+
+        deform_layer = bm.verts.layers.deform.active
+        if deform_layer is None:
+            bpy.ops.object.mode_set(mode="OBJECT")
+            self.report({"ERROR"}, "No deform layer.")
+            return {"CANCELLED"}
+
+        # Deselect all, then select SDEF verts
+        bm.select_flush(False)
+        for v in bm.verts:
+            v.select = False
+        count = 0
+        gi = vg_sdef.index
+        for v in bm.verts:
+            dvert = v[deform_layer]
+            if gi in dvert:
+                v.select = True
+                count += 1
+
+        bm.select_flush(True)
+        bmesh.update_edit_mesh(mesh_obj.data)
+
+        self.report({"INFO"}, f"Selected {count} SDEF vertices on {mesh_obj.name}")
+        return {"FINISHED"}
+
+
+class BLENDER_MMD_OT_bake_sdef(bpy.types.Operator):
+    """Bake SDEF deformation to MDD mesh cache files"""
+
+    bl_idname = "blender_mmd.bake_sdef"
+    bl_label = "Bake SDEF"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        from .sdef import bake_sdef
+
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        import bpy
+        if not bpy.data.is_saved:
+            self.report({"ERROR"}, "Save the .blend file before baking SDEF.")
+            return {"CANCELLED"}
+
+        # Use scene frame range
+        frame_start = context.scene.frame_start
+        frame_end = context.scene.frame_end
+
+        # Ensure we're in object mode
+        if context.active_object and context.active_object.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+
+        try:
+            result = bake_sdef(armature_obj, frame_start, frame_end)
+            self.report(
+                {"INFO"},
+                f"SDEF baked: {result['meshes']} meshes, "
+                f"{result['frames']} frames in {result['time']:.1f}s",
+            )
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("SDEF bake failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
+class BLENDER_MMD_OT_clear_sdef_bake(bpy.types.Operator):
+    """Clear SDEF bake: remove Mesh Cache modifiers, restore Armature, delete MDD files"""
+
+    bl_idname = "blender_mmd.clear_sdef_bake"
+    bl_label = "Clear SDEF Bake"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        from .sdef import clear_sdef_bake
+
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        try:
+            count = clear_sdef_bake(armature_obj)
+            self.report({"INFO"}, f"SDEF bake cleared: {count} meshes")
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("SDEF clear failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
+class BLENDER_MMD_OT_toggle_sdef(bpy.types.Operator):
+    """Toggle SDEF on/off (swap Mesh Cache vs Armature modifier visibility)"""
+
+    bl_idname = "blender_mmd.toggle_sdef"
+    bl_label = "Toggle SDEF"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        from .sdef import toggle_sdef
+
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        try:
+            new_state = toggle_sdef(armature_obj)
+            state = "enabled" if new_state else "disabled"
+            self.report({"INFO"}, f"SDEF {state}")
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("SDEF toggle failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
 class BLENDER_MMD_OT_build_outlines(bpy.types.Operator):
     """Build edge outlines on MMD model meshes"""
 
@@ -823,6 +989,10 @@ _classes = (
     BLENDER_MMD_OT_inspect_physics,
     BLENDER_MMD_OT_select_colliders,
     BLENDER_MMD_OT_select_contacts,
+    BLENDER_MMD_OT_select_sdef_vertices,
+    BLENDER_MMD_OT_bake_sdef,
+    BLENDER_MMD_OT_clear_sdef_bake,
+    BLENDER_MMD_OT_toggle_sdef,
 )
 
 

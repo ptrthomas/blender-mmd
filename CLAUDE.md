@@ -100,6 +100,7 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
 - **PMD support**: PMD parser (`pmd/parser.py`) outputs the same `pmx.types.Model` dataclasses — entire downstream pipeline unchanged. Auto-detected by `.pmd` extension in `import_pmx()`. PMD bone types (0-9) mapped to PMX flags. Morph base→absolute index remapping. Rigid body bone-relative→absolute position conversion. English extension parsed for bone/morph names. WaistCancel bones that cancel LowerBody rotation are neutralized (PMD-era convention breaks modern VMDs that assume legs inherit LowerBody lean).
 - **Knee pre-bend**: `_ensure_knee_prebend()` in `armature.py` nudges knee bone heads forward (-Y) when rest-pose geometry lacks a clear forward offset. Only touches bones named "ひざ" (knee). Some models (especially PMD) have tiny lateral offsets that dominate the forward component, making Blender's IK solver choose the wrong bend direction. Runs after roll computation to avoid affecting bone rolls.
 - **VMD bone name auto-mapping**: `_build_bone_lookup()` in `vmd/importer.py` includes NFKC normalization (half-width↔full-width katakana) and alias table (PMD/PMX era naming differences like `人指`↔`人差指`) for cross-era VMD compatibility.
+- **SDEF**: Spherical DEFormation — volume-preserving skinning via bake-to-MDD pipeline. SDEF C/R0/R1 stored as `mmd_sdef_c`/`mmd_sdef_r0`/`mmd_sdef_r1` float3 mesh attributes (scaled by `import_scale`). `mmd_sdef` vertex group marks SDEF vertices. `bake_sdef()` iterates frame range, computes NLERP quaternion blending per vertex, writes MDD files (LightWave PointCache2 format with timestamps). Mesh Cache modifier replaces Armature modifier on baked meshes. `toggle_sdef()` swaps modifier visibility for instant SDEF/LBS A/B comparison. `clear_sdef_bake()` removes Mesh Cache, restores Armature, deletes MDD files. Cache stored alongside .blend as `{blend_stem}_sdef/{armature_name}/{mesh_name}.mdd`. MMD4B SDEF sub-panel with Bake/Clear/Toggle/Select controls.
 - **No export**: One-way import only. No PMX/VMD/PMD export.
 - **Logging**: Use blender-agent's log (`output/agent.log`). Python `logging` to stderr for diagnostics.
 
@@ -136,6 +137,17 @@ build_outlines(arm, thickness_mult=1.0)  # uses PMX edge_color/edge_size per mat
 # Rebuild with different thickness
 remove_outlines(arm)
 build_outlines(arm, thickness_mult=2.0)
+
+# Bake SDEF deformation (requires .blend to be saved)
+from bl_ext.user_default.blender_mmd.sdef import bake_sdef, clear_sdef_bake, toggle_sdef
+result = bake_sdef(arm, frame_start=1, frame_end=300)  # writes MDD, applies Mesh Cache
+
+# Toggle SDEF on/off for A/B comparison (instant, no recomputation)
+toggle_sdef(arm)  # SDEF off (LBS)
+toggle_sdef(arm)  # SDEF on
+
+# Clear bake (restore Armature modifier, delete MDD files)
+clear_sdef_bake(arm)
 ```
 
 ## Testing
