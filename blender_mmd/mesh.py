@@ -63,31 +63,29 @@ def create_mesh(
             if 0 <= w.bone < len(bone_names):
                 vg = mesh_obj.vertex_groups[bone_names[w.bone]]
                 vg.add([vi], 1.0, "REPLACE")
-        elif isinstance(w, BoneWeightBDEF2):
-            if 0 <= w.bone1 < len(bone_names) and w.weight > 0:
-                mesh_obj.vertex_groups[bone_names[w.bone1]].add(
-                    [vi], w.weight, "REPLACE"
-                )
-            if 0 <= w.bone2 < len(bone_names) and (1.0 - w.weight) > 0:
-                mesh_obj.vertex_groups[bone_names[w.bone2]].add(
-                    [vi], 1.0 - w.weight, "REPLACE"
-                )
+        elif isinstance(w, (BoneWeightBDEF2, BoneWeightSDEF)):
+            if w.bone1 == w.bone2:
+                # Both bones identical — assign weight 1.0 to avoid
+                # second assignment overwriting the first with near-zero
+                if 0 <= w.bone1 < len(bone_names):
+                    mesh_obj.vertex_groups[bone_names[w.bone1]].add(
+                        [vi], 1.0, "REPLACE"
+                    )
+            else:
+                if 0 <= w.bone1 < len(bone_names) and w.weight > 0:
+                    mesh_obj.vertex_groups[bone_names[w.bone1]].add(
+                        [vi], w.weight, "REPLACE"
+                    )
+                if 0 <= w.bone2 < len(bone_names) and (1.0 - w.weight) > 0:
+                    mesh_obj.vertex_groups[bone_names[w.bone2]].add(
+                        [vi], 1.0 - w.weight, "REPLACE"
+                    )
         elif isinstance(w, (BoneWeightBDEF4, BoneWeightQDEF)):
             for bone_idx, weight in zip(w.bones, w.weights):
                 if 0 <= bone_idx < len(bone_names) and weight > 0:
                     mesh_obj.vertex_groups[bone_names[bone_idx]].add(
                         [vi], weight, "REPLACE"
                     )
-        elif isinstance(w, BoneWeightSDEF):
-            # SDEF uses same weight assignment as BDEF2
-            if 0 <= w.bone1 < len(bone_names) and w.weight > 0:
-                mesh_obj.vertex_groups[bone_names[w.bone1]].add(
-                    [vi], w.weight, "REPLACE"
-                )
-            if 0 <= w.bone2 < len(bone_names) and (1.0 - w.weight) > 0:
-                mesh_obj.vertex_groups[bone_names[w.bone2]].add(
-                    [vi], 1.0 - w.weight, "REPLACE"
-                )
 
     # --- UV coordinates ---
     # PMX uses DirectX convention (V=0 at top), Blender uses OpenGL (V=0 at bottom)
