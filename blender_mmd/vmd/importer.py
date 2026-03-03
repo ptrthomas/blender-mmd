@@ -640,6 +640,7 @@ def _apply_ik_toggle_keyframes(
                         ik_constraints[jp_name].append((pb, c))
 
     applied = 0
+    ik_fcurves: set = set()
     for kf in property_keyframes:
         for ik_name, enabled in kf.ik_states:
             entries = ik_constraints.get(ik_name)
@@ -662,13 +663,13 @@ def _apply_ik_toggle_keyframes(
                 kp = fc.keyframe_points[kp_count]
                 kp.co = (frame, influence)
                 kp.interpolation = "CONSTANT"
+                ik_fcurves.add(fc)
 
             applied += 1
 
     # Finalize all IK toggle F-curves
-    for fc in bone_action.fcurves:
-        if "influence" in fc.data_path:
-            fc.update()
+    for fc in ik_fcurves:
+        fc.update()
 
     if applied:
         log.info("VMD IK toggles: %d state changes applied", applied)

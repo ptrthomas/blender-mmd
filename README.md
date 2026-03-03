@@ -23,7 +23,7 @@ mmd_tools is a battle-tested addon that has served the MMD-Blender community for
 | Blender version | 2.83–4.x | 5.0+ only |
 | Codebase | ~15k LOC, accumulated over years | ~11k LOC, clean rewrite with full spec |
 | Object hierarchy | Root Empty > Armature > Mesh | Armature > Mesh (no root empty) |
-| Bone names | Japanese by default (optional translation) | English by default (Japanese stored as `mmd_name_j`) |
+| Name translation | Japanese by default, optional translation via table lookup | Comprehensive 4-tier translation engine: full-name table → English name validation → chunk-based translation → Japanese fallback. All names English by default — bones, shape keys, materials, rigid bodies, joints. Japanese stored as `mmd_name_j` for VMD matching |
 | Coordinate conversion | `.xzy` swizzles scattered across importer, bone, physics code | Done once in parser — downstream is pure Blender coords |
 | IK toggle (VMD) | Custom `mmd_ik_toggle` property + update callback | Constraint influence keyframes (more Blender-native) |
 | Materials | Custom ~20-node shader group per material | Bare Principled BSDF (default) — native Blender shader, responds to scene lighting and reflections. Optional toon/sphere mode for full MMD look |

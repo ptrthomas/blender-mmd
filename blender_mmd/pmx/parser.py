@@ -190,7 +190,7 @@ def _rot3(v: tuple[float, float, float]) -> tuple[float, float, float]:
 
 def _parse_header(r: _Reader) -> Header:
     magic = r.read_bytes(4)
-    if magic != b"PMX ":
+    if magic[:3] != b"PMX":
         raise ValueError(f"Not a PMX file: magic={magic!r}")
 
     version = r.read_float()

@@ -101,10 +101,16 @@ class TestGroupMorphOffsets:
 
 
 class TestMorphNameResolution:
-    def test_resolve_uses_english_name(self):
-        """If PMX provides name_e, it should be used."""
+    def test_table_wins_over_english(self):
+        """Table lookup takes priority over PMX name_e (matches bone behavior)."""
         from blender_mmd.translations import resolve_morph_name
-        assert resolve_morph_name("あ", "A_from_pmx") == "A_from_pmx"
+        # "あ" is in MORPH_NAMES → "A", so table wins
+        assert resolve_morph_name("あ", "A_from_pmx") == "A"
+
+    def test_english_used_when_not_in_table(self):
+        """If not in table, use name_e when it looks English."""
+        from blender_mmd.translations import resolve_morph_name
+        assert resolve_morph_name("不明モーフ", "CustomMorph") == "CustomMorph"
 
     def test_resolve_uses_translation_table(self):
         """If no name_e, fall back to translation table."""

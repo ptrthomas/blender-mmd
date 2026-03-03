@@ -10,7 +10,7 @@ import bpy
 from mathutils import Matrix, Vector
 
 from .pmx.types import Bone, Model
-from .translations import normalize_lr, translate
+from .translations import BONE_NAMES, normalize_lr, resolve_name
 
 log = logging.getLogger("blender_mmd")
 
@@ -41,16 +41,10 @@ class _ShadowBoneSpec:
 def _resolve_bone_name(bone: Bone) -> str:
     """Choose the Blender bone name from PMX data.
 
-    Priority: translation table → English name → Japanese name as-is.
-    Translation table wins because PMX English names are often abbreviated
-    or incorrect (e.g. "view cnt", "D", "arm twist_L").
+    Uses resolve_name() with BONE_NAMES table for unified resolution:
+    table lookup → English name (if ASCII) → chunk translation → Japanese fallback.
     """
-    translated = translate(bone.name)
-    if translated:
-        return translated
-    if bone.name_e and bone.name_e.strip():
-        return normalize_lr(bone.name_e.strip())
-    return bone.name
+    return resolve_name(bone.name, bone.name_e, BONE_NAMES)
 
 
 def _ensure_unique_names(bones: list[Bone]) -> list[str]:

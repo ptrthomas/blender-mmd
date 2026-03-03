@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 
 from .pmx.types import Material, Model
+from .translations import MATERIAL_NAMES, resolve_name
 
 log = logging.getLogger("blender_mmd")
 
@@ -582,7 +583,7 @@ def create_materials(
         bpy.context.view_layer.update()
 
     for mat_data in model.materials:
-        mat_name = mat_data.name_e if mat_data.name_e else mat_data.name
+        mat_name = resolve_name(mat_data.name, mat_data.name_e, MATERIAL_NAMES)
         mat = bpy.data.materials.new(name=mat_name)
         mat.use_nodes = True
         nodes = mat.node_tree.nodes
@@ -667,6 +668,9 @@ def create_materials(
         # alpha-aware shadows so they don't create solid shadow silhouettes
         if alpha < 1.0 - 1e-3:
             mat.use_transparent_shadow = True
+
+        # Store Japanese name for reverse lookup (e.g. VMD material morphs)
+        mat["mmd_name_j"] = mat_data.name
 
         # Store PMX flags as custom properties for future use.
         # Blender 5.0 removed per-material shadow_method — shadow casting

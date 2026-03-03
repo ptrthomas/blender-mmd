@@ -201,8 +201,8 @@ def create_mesh(
 
 def _resolve_morph_name(morph: "Morph") -> str:
     """Choose English shape key name for a morph."""
-    from .translations import resolve_morph_name
-    return resolve_morph_name(morph.name, morph.name_e)
+    from .translations import MORPH_NAMES, resolve_name
+    return resolve_name(morph.name, morph.name_e, MORPH_NAMES)
 
 
 def _create_shape_keys(

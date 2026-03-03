@@ -11,6 +11,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from .pmx.types import RigidBody, RigidMode, RigidShape
+from .translations import BONE_NAMES, resolve_name
 
 if TYPE_CHECKING:
     import bpy
@@ -1095,11 +1096,13 @@ def _create_rigid_bodies(
     rigid_objects = []
 
     for i, rigid in enumerate(model.rigid_bodies):
-        name = f"RB_{i:03d}_{rigid.name}"
+        en_name = resolve_name(rigid.name, rigid.name_e, BONE_NAMES)
+        name = f"RB_{i:03d}_{en_name}"
 
         # Create mesh with actual geometry matching the collision shape
         mesh = bpy.data.meshes.new(name)
         obj = bpy.data.objects.new(name, mesh)
+        obj["mmd_name_j"] = rigid.name
         collection.objects.link(obj)
 
         _build_shape_mesh(obj, rigid, scale)
@@ -1342,9 +1345,11 @@ def _create_joints(model, armature_obj, rigid_objects: list, bone_names: dict,
     joint_objects = []
 
     for i, joint in enumerate(model.joints):
-        name = f"J_{i:03d}_{joint.name}"
+        en_name = resolve_name(joint.name, joint.name_e, BONE_NAMES)
+        name = f"J_{i:03d}_{en_name}"
 
         obj = bpy.data.objects.new(name, None)
+        obj["mmd_name_j"] = joint.name
         obj.empty_display_type = "ARROWS"
         obj.empty_display_size = 0.02
         collection.objects.link(obj)

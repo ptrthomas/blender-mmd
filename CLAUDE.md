@@ -73,6 +73,7 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
 
 ## Key decisions
 
+- **Name translation**: Unified `resolve_name()` in `translations.py` for all categories (bones, morphs, materials, rigid bodies, joints). Priority: full-name table → English name (if pure ASCII, no CJK/kana) → chunk-based translation → Japanese fallback. `translate_chunks()` does greedy longest-match against `NAME_CHUNKS` dict (~150 entries), handles 左/右→.L/.R, NFKC normalization. Covers Japanese and simplified Chinese model names. Japanese names stored as `mmd_name_j` custom properties for VMD matching.
 - **Bone names**: English in Blender, Japanese stored as `mmd_name_j` custom property (for VMD matching)
 - **Coordinate conversion**: Done in parser. Downstream code uses Blender coords only.
 - **IK constraints**: Placed on first link bone (e.g. knee), NOT the end effector (ankle). Uses Blender-native `ik_min_x/max_x` properties instead of `LIMIT_ROTATION` constraints. `ik_loop_factor` param (default 5) multiplies PMX iteration count for good foot placement.
