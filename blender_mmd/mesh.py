@@ -212,15 +212,61 @@ def _resolve_morph_name(morph: "Morph") -> str:
     return resolve_name(morph.name, morph.name_e, MORPH_NAMES)
 
 
+def _flatten_group_morph(
+    model: Model,
+    morph_index: int,
+    factor: float,
+    vertex_deltas: dict[int, list[float]],
+    visited: set[int],
+    n_verts: int,
+    scale: float,
+) -> int:
+    """Recursively resolve a group morph into accumulated vertex deltas.
+
+    Returns count of skipped non-vertex children (UV/BONE/MATERIAL).
+    """
+    morph = model.morphs[morph_index]
+    skipped = 0
+
+    for child_offset in morph.offsets:
+        ci = child_offset.morph_index
+        if ci < 0 or ci >= len(model.morphs):
+            continue
+        child = model.morphs[ci]
+        effective = factor * child_offset.factor
+
+        if child.morph_type == MorphType.VERTEX:
+            for off in child.offsets:
+                vi = off.vertex_index
+                if 0 <= vi < n_verts:
+                    if vi not in vertex_deltas:
+                        vertex_deltas[vi] = [0.0, 0.0, 0.0]
+                    vertex_deltas[vi][0] += off.offset[0] * scale * effective
+                    vertex_deltas[vi][1] += off.offset[1] * scale * effective
+                    vertex_deltas[vi][2] += off.offset[2] * scale * effective
+        elif child.morph_type == MorphType.GROUP:
+            if ci not in visited:
+                visited.add(ci)
+                skipped += _flatten_group_morph(
+                    model, ci, effective, vertex_deltas, visited, n_verts, scale
+                )
+        else:
+            skipped += 1
+
+    return skipped
+
+
 def _create_shape_keys(
     model: Model,
     mesh_obj: bpy.types.Object,
     scale: float,
 ) -> None:
-    """Create Blender shape keys from PMX vertex morphs.
+    """Create Blender shape keys from PMX vertex and group morphs.
 
-    Only vertex morphs become shape keys. Bone, material, UV, and group
-    morphs are stored as metadata for later milestones (VMD import).
+    Vertex morphs become shape keys directly. Group morphs are flattened
+    into composite vertex shape keys by recursively resolving their
+    vertex morph children (non-vertex children like UV/BONE/MATERIAL
+    are skipped).
 
     Shape keys are named in English where possible. A mapping from
     Japanese name → shape key name is stored on the mesh object as
@@ -229,7 +275,11 @@ def _create_shape_keys(
     vertex_morphs = [
         m for m in model.morphs if m.morph_type == MorphType.VERTEX
     ]
-    if not vertex_morphs:
+    group_morphs = [
+        (i, m) for i, m in enumerate(model.morphs)
+        if m.morph_type == MorphType.GROUP
+    ]
+    if not vertex_morphs and not group_morphs:
         return
 
     # Create basis shape key
@@ -246,6 +296,7 @@ def _create_shape_keys(
     # Track used names to avoid duplicates
     used_names: set[str] = {"Basis"}
 
+    # --- Pass 1: vertex morphs → shape keys (unchanged) ---
     for morph in vertex_morphs:
         name = _resolve_morph_name(morph)
         # Ensure unique name
@@ -272,6 +323,74 @@ def _create_shape_keys(
 
         sk.data.foreach_set("co", coords)
 
+    # --- Pass 2: group morphs → flattened composite shape keys ---
+    n_group_created = 0
+    total_skipped = 0
+    for morph_idx, morph in group_morphs:
+        name = _resolve_morph_name(morph)
+        # Skip if a vertex morph already created this name
+        if name in used_names:
+            # Still record in morph_map if the name maps to an existing key
+            if morph.name not in morph_map and name in used_names:
+                # Find the existing shape key name (could be the vertex morph's)
+                for existing_jp, existing_sk in morph_map.items():
+                    if existing_sk == name:
+                        morph_map[morph.name] = existing_sk
+                        break
+            continue
+
+        # Flatten: accumulate vertex deltas from all vertex-type descendants
+        vertex_deltas: dict[int, list[float]] = {}
+        visited: set[int] = {morph_idx}
+        skipped = 0
+
+        for child_offset in morph.offsets:
+            ci = child_offset.morph_index
+            if ci < 0 or ci >= len(model.morphs):
+                continue
+            child = model.morphs[ci]
+            effective = child_offset.factor
+
+            if child.morph_type == MorphType.VERTEX:
+                for off in child.offsets:
+                    vi = off.vertex_index
+                    if 0 <= vi < n_verts:
+                        if vi not in vertex_deltas:
+                            vertex_deltas[vi] = [0.0, 0.0, 0.0]
+                        vertex_deltas[vi][0] += off.offset[0] * scale * effective
+                        vertex_deltas[vi][1] += off.offset[1] * scale * effective
+                        vertex_deltas[vi][2] += off.offset[2] * scale * effective
+            elif child.morph_type == MorphType.GROUP:
+                if ci not in visited:
+                    visited.add(ci)
+                    skipped += _flatten_group_morph(
+                        model, ci, effective, vertex_deltas, visited, n_verts, scale
+                    )
+            else:
+                skipped += 1
+
+        total_skipped += skipped
+
+        # Skip pure non-vertex groups (no vertex deltas to create)
+        if not vertex_deltas:
+            continue
+
+        used_names.add(name)
+        sk = mesh_obj.shape_key_add(name=name, from_mix=False)
+        sk.value = 0.0
+        morph_map[morph.name] = sk.name
+
+        # Apply accumulated deltas to basis coords
+        coords = basis_coords.copy()
+        for vi, delta in vertex_deltas.items():
+            base = vi * 3
+            coords[base] += delta[0]
+            coords[base + 1] += delta[1]
+            coords[base + 2] += delta[2]
+
+        sk.data.foreach_set("co", coords)
+        n_group_created += 1
+
     # Store mapping on mesh object for VMD import
     import json
     mesh_obj["mmd_morph_map"] = json.dumps(morph_map, ensure_ascii=False)
@@ -281,3 +400,8 @@ def _create_shape_keys(
         "Created %d shape keys from vertex morphs (%d translated)",
         len(vertex_morphs), translated,
     )
+    if n_group_created:
+        log.info(
+            "Created %d shape keys from group morphs (%d non-vertex children skipped)",
+            n_group_created, total_skipped,
+        )

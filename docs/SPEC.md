@@ -717,7 +717,7 @@ PMX parser (clean rewrite), armature with bones, mesh with geometry/weights/norm
 
 ### Milestone 2: Morphs & Shape Keys ✅
 
-Vertex/UV/bone/material/group morphs imported as Blender shape keys.
+Vertex morphs imported as Blender shape keys. Group morphs flattened into composite vertex shape keys at import time (recursively resolves vertex morph children, accumulates weighted deltas; non-vertex children like UV/BONE/MATERIAL skipped). This enables VMD mouth/face animation on models that use group morphs (e.g. YYB Miku's あ/い/う/え/お).
 
 ### Milestone 3: VMD Motion Import ✅
 
@@ -857,9 +857,9 @@ Centralized reverse-lookup maps on the armature to eliminate redundant O(n) scan
 
 Import VMD camera keyframes (position, rotation, FOV, distance) as Blender camera animation. VMD camera data is already parsed; just needs the Blender camera creation and F-curve setup.
 
-#### Bone Morphs / Group Morphs
+#### Bone Morphs
 
-VMD can keyframe bone morphs (pose presets like "T-pose", "fist") and group morphs (combinations). Currently parsed but not applied. Needs driver or action-based implementation.
+VMD can keyframe bone morphs (pose presets like "T-pose", "fist"). Currently parsed but not applied. Needs driver or action-based implementation.
 
 #### UV Morphs
 

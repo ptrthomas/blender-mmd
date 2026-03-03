@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+import sys
+from unittest.mock import MagicMock
+
+# mesh.py imports bpy/mathutils which aren't available outside Blender.
+# Mock them so we can import the pure-Python _flatten_group_morph helper.
+sys.modules.setdefault("bpy", MagicMock())
+sys.modules.setdefault("mathutils", MagicMock())
+
+from blender_mmd.mesh import _flatten_group_morph
 from blender_mmd.pmx.types import (
     MorphType,
     VertexMorphOffset,
@@ -121,6 +130,88 @@ class TestMorphNameResolution:
         """If no name_e and no translation, use Japanese name."""
         from blender_mmd.translations import resolve_morph_name
         assert resolve_morph_name("カスタムモーフ", "") == "カスタムモーフ"
+
+
+class TestGroupMorphFlattening:
+    """Test group morph → composite vertex shape key flattening.
+
+    Uses the sample model's TestGroup morph [18]:
+      -> [15] MATERIAL "TestMat" factor=1.0
+      -> [16] UV "TestUV" factor=1.0
+      -> [17] BONE "TestBone" factor=1.0
+      -> [0] VERTEX "あ" factor=1.0
+    """
+
+    def test_sample_has_group_morph(self, parsed_model):
+        """Confirm the sample fixture has at least one GROUP morph."""
+        group_morphs = [
+            m for m in parsed_model.morphs if m.morph_type == MorphType.GROUP
+        ]
+        assert len(group_morphs) > 0
+
+    def test_flatten_finds_vertex_child(self, parsed_model):
+        """Flattening TestGroup should produce non-empty vertex_deltas from 'あ'."""
+        # _flatten_group_morph imported at module level
+
+        # Find TestGroup
+        group_idx = None
+        for i, m in enumerate(parsed_model.morphs):
+            if m.morph_type == MorphType.GROUP and m.name == "TestGroup":
+                group_idx = i
+                break
+        assert group_idx is not None, "TestGroup not found in sample model"
+
+        n_verts = len(parsed_model.vertices)
+        vertex_deltas: dict[int, list[float]] = {}
+        visited: set[int] = {group_idx}
+        skipped = _flatten_group_morph(
+            parsed_model, group_idx, 1.0, vertex_deltas, visited, n_verts, scale=1.0
+        )
+        assert len(vertex_deltas) > 0, "Should have vertex deltas from child 'あ'"
+
+    def test_flatten_skips_non_vertex(self, parsed_model):
+        """Flattening TestGroup should skip 3 non-vertex children (MAT+UV+BONE)."""
+        # _flatten_group_morph imported at module level
+
+        group_idx = None
+        for i, m in enumerate(parsed_model.morphs):
+            if m.morph_type == MorphType.GROUP and m.name == "TestGroup":
+                group_idx = i
+                break
+        assert group_idx is not None
+
+        n_verts = len(parsed_model.vertices)
+        vertex_deltas: dict[int, list[float]] = {}
+        visited: set[int] = {group_idx}
+        skipped = _flatten_group_morph(
+            parsed_model, group_idx, 1.0, vertex_deltas, visited, n_verts, scale=1.0
+        )
+        assert skipped == 3, f"Expected 3 skipped (MAT+UV+BONE), got {skipped}"
+
+    def test_flatten_cycle_detection(self):
+        """A group morph referencing itself should not infinite-loop."""
+        # _flatten_group_morph imported at module level
+        from blender_mmd.pmx.types import Morph, MorphCategory
+
+        # Synthetic model with a single group morph pointing at itself
+        self_ref = Morph(
+            name="SelfRef", name_e="", category=MorphCategory.OTHER,
+            morph_type=MorphType.GROUP,
+            offsets=[GroupMorphOffset(morph_index=0, factor=1.0)],
+        )
+
+        class FakeModel:
+            morphs = [self_ref]
+            vertices = []
+
+        vertex_deltas: dict[int, list[float]] = {}
+        visited: set[int] = {0}
+        # Should return immediately without recursion (0 is already in visited)
+        skipped = _flatten_group_morph(
+            FakeModel(), 0, 1.0, vertex_deltas, visited, 0, scale=1.0
+        )
+        assert skipped == 0
+        assert len(vertex_deltas) == 0
 
 
 class TestMorphCoverage:
