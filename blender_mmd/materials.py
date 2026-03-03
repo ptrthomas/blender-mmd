@@ -439,13 +439,16 @@ def update_materials(armature_obj: "bpy.types.Object") -> None:
 # ---------------------------------------------------------------------------
 
 
-def _create_tex_node(nodes, name, label, filepath, location):
+def _create_tex_node(nodes, name, label, filepath, location, tex_cache=None):
     """Create a ShaderNodeTexImage with loaded image."""
     tex_node = nodes.new("ShaderNodeTexImage")
     tex_node.name = name
     tex_node.label = label
     tex_node.location = location
-    tex_node.image = _load_image(filepath)
+    if tex_cache is not None and filepath in tex_cache:
+        tex_node.image = tex_cache[filepath]
+    else:
+        tex_node.image = _load_image(filepath)
     return tex_node
 
 
@@ -458,6 +461,7 @@ def _setup_toon_texture(
     node_uv,
     tex_paths: list,
     pmx_dir: str,
+    tex_cache: dict | None = None,
 ) -> "bpy.types.ShaderNode | None":
     """Set up toon texture node. Returns the tex node or None."""
     toon_path = None
@@ -478,6 +482,7 @@ def _setup_toon_texture(
     toon_tex_node = _create_tex_node(
         nodes, "Toon Texture", "Toon Texture", toon_path,
         node_shader.location + Vector((-3 * 210, -1.5 * 220)),
+        tex_cache=tex_cache,
     )
     links.new(toon_tex_node.outputs["Color"], node_shader.inputs["Toon Tex"])
     links.new(node_uv.outputs["Toon"], toon_tex_node.inputs["Vector"])
@@ -491,6 +496,7 @@ def _setup_sphere_texture(
     node_shader,
     node_uv,
     tex_paths: list,
+    tex_cache: dict | None = None,
 ) -> "bpy.types.ShaderNode | None":
     """Set up sphere texture node. Returns the tex node or None."""
     if mat_data.sphere_mode not in (1, 2, 3):
@@ -503,6 +509,7 @@ def _setup_sphere_texture(
             sphere_tex_node = _create_tex_node(
                 nodes, "Sphere Texture", "Sphere Texture", sphere_path,
                 node_shader.location + Vector((-2 * 210, -2 * 220)),
+                tex_cache=tex_cache,
             )
 
             # Color space: Add mode uses Linear
@@ -567,6 +574,18 @@ def create_materials(
     tex_paths: list[str | None] = []
     for tex in model.textures:
         tex_paths.append(resolve_texture_path(pmx_dir, tex.path))
+
+    # Pre-load all unique textures into a cache (O(1) lookup per material)
+    tex_cache: dict[str, bpy.types.Image] = {}
+    for path in tex_paths:
+        if path and path not in tex_cache and os.path.exists(path):
+            tex_cache[path] = _load_image(path)
+    # Pre-cache shared toon textures if toon/sphere mode is enabled
+    if use_toon_sphere:
+        for toon_idx in range(10):
+            toon_path = resolve_shared_toon(pmx_dir, toon_idx)
+            if toon_path and toon_path not in tex_cache:
+                tex_cache[toon_path] = _load_image(toon_path)
 
     # Get/create node groups based on mode
     if use_toon_sphere:
@@ -690,6 +709,7 @@ def create_materials(
                 base_tex_node = _create_tex_node(
                     nodes, "Base Texture", "Base Texture", tex_path,
                     node_shader.location + Vector((-4 * 210, -1 * 220)),
+                    tex_cache=tex_cache,
                 )
                 if node_uv is not None:
                     links.new(
@@ -719,10 +739,11 @@ def create_materials(
         if use_toon_sphere and node_uv is not None:
             _setup_toon_texture(
                 mat_data, model, nodes, links, node_shader, node_uv,
-                tex_paths, pmx_dir,
+                tex_paths, pmx_dir, tex_cache=tex_cache,
             )
             _setup_sphere_texture(
                 mat_data, nodes, links, node_shader, node_uv, tex_paths,
+                tex_cache=tex_cache,
             )
 
         # Append material to mesh

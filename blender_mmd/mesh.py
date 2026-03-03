@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+import numpy as np
 import bpy
 from mathutils import Vector
 
@@ -104,7 +105,6 @@ def create_mesh(
         mesh_data.attributes.new("mmd_sdef_r1", "FLOAT_VECTOR", "POINT")
 
         # Build flat arrays (all zeros initially, SDEF verts get their values)
-        import numpy as np
         c_data = np.zeros(n_verts * 3, dtype=np.float32)
         r0_data = np.zeros(n_verts * 3, dtype=np.float32)
         r1_data = np.zeros(n_verts * 3, dtype=np.float32)
@@ -141,24 +141,35 @@ def create_mesh(
 
     # --- UV coordinates ---
     # PMX uses DirectX convention (V=0 at top), Blender uses OpenGL (V=0 at bottom)
+    # Bulk assign via foreach_set for performance (avoids 300k+ Python-level assignments)
+    n_loops = len(mesh_data.loops)
+
+    # Get loop→vertex mapping (bulk read)
+    vi_array = np.empty(n_loops, dtype=np.int32)
+    mesh_data.loops.foreach_get("vertex_index", vi_array)
+
+    # Build per-vertex UV array from PMX data, V-flipped
+    vert_uvs = np.array([v.uv for v in pmx_verts], dtype=np.float32)  # (n_verts, 2)
+    vert_uvs[:, 1] = 1.0 - vert_uvs[:, 1]  # V-flip
+
+    # Index by loop vertex to get per-loop UVs, flatten for foreach_set
+    loop_uvs = vert_uvs[vi_array].ravel()  # (n_loops * 2,)
+
     uv_layer = mesh_data.uv_layers.new(name="UV")
-    for face in mesh_data.polygons:
-        for li in face.loop_indices:
-            loop = mesh_data.loops[li]
-            vi = loop.vertex_index
-            u, v = pmx_verts[vi].uv
-            uv_layer.data[li].uv = (u, 1.0 - v)
+    uv_layer.data.foreach_set("uv", loop_uvs)
 
     # Additional UV layers
     for uv_idx in range(model.header.additional_uv_count):
         extra_uv = mesh_data.uv_layers.new(name=f"UV{uv_idx + 1}")
-        for face in mesh_data.polygons:
-            for li in face.loop_indices:
-                loop = mesh_data.loops[li]
-                vi = loop.vertex_index
-                if uv_idx < len(pmx_verts[vi].additional_uvs):
-                    auv = pmx_verts[vi].additional_uvs[uv_idx]
-                    extra_uv.data[li].uv = (auv[0], 1.0 - auv[1])
+        # Build per-vertex extra UV array (zero for vertices without this UV)
+        n_verts = len(pmx_verts)
+        extra_vert_uvs = np.zeros((n_verts, 2), dtype=np.float32)
+        for vi, pmx_v in enumerate(pmx_verts):
+            if uv_idx < len(pmx_v.additional_uvs):
+                auv = pmx_v.additional_uvs[uv_idx]
+                extra_vert_uvs[vi] = (auv[0], 1.0 - auv[1])
+        extra_loop_uvs = extra_vert_uvs[vi_array].ravel()
+        extra_uv.data.foreach_set("uv", extra_loop_uvs)
 
     # --- Smooth shading on all faces ---
     mesh_data.polygons.foreach_set(
