@@ -176,15 +176,18 @@ def create_mesh(
         "use_smooth", (True,) * len(mesh_data.polygons)
     )
 
-    # --- Mark all edges sharp for custom normals ---
-    # normals_split_custom_set needs edges marked sharp to split normals.
-    # Previously used bpy.ops.mesh.edges_select_sharp (179°) but that operator
-    # and bmesh.normal_update() both hang on meshes with degenerate topology.
-    # Marking ALL edges sharp is safe — custom normals override everything,
-    # so over-marking has no visual effect.
-    mesh_data.edges.foreach_set(
-        "use_edge_sharp", (True,) * len(mesh_data.edges)
-    )
+    # --- Mark sharp edges before custom normals ---
+    # normals_split_custom_set requires sharp edges to be marked first.
+    # 179° threshold preserves nearly all custom normals (180° misses some).
+    # Degenerate faces are filtered out by _filter_degenerate_faces() before
+    # we get here, so the edit-mode operator won't hang.
+    import math
+    bpy.context.view_layer.objects.active = mesh_obj
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="DESELECT")
+    bpy.ops.mesh.edges_select_sharp(sharpness=math.radians(179))
+    bpy.ops.mesh.mark_sharp()
+    bpy.ops.object.mode_set(mode="OBJECT")
 
     # --- Custom split normals ---
     normals = [pmx_verts[v.vertex_index].normal for v in mesh_data.loops]
