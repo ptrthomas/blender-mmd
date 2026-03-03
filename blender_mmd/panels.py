@@ -363,21 +363,76 @@ class BLENDER_MMD_PT_animation(bpy.types.Panel):
         layout = self.layout
         armature_obj = find_mmd_armature(context)
 
-        has_anim = (
+        # --- Bone action info ---
+        has_bone_anim = (
             armature_obj.animation_data is not None
             and armature_obj.animation_data.action is not None
         )
 
-        if has_anim:
+        if has_bone_anim:
             action = armature_obj.animation_data.action
-            layout.label(text=action.name, icon="ACTION")
-            layout.operator(
-                "blender_mmd.clear_animation",
-                text="Clear Animation",
-                icon="TRASH",
+            row = layout.row()
+            row.label(text=action.name, icon="ACTION")
+            if action.asset_data:
+                row.label(text="", icon="ASSET_MANAGER")
+
+        # --- Morph action info ---
+        morph_action = _find_morph_action(armature_obj)
+        if morph_action:
+            row = layout.row()
+            row.label(text=morph_action.name, icon="SHAPEKEY_DATA")
+            if morph_action.asset_data:
+                row.label(text="", icon="ASSET_MANAGER")
+
+        # --- NLA track info ---
+        nla_bone_tracks = 0
+        nla_morph_tracks = 0
+        if armature_obj.animation_data:
+            nla_bone_tracks = len(armature_obj.animation_data.nla_tracks)
+        for child in armature_obj.children:
+            if child.type == "MESH" and child.data.shape_keys:
+                sk = child.data.shape_keys
+                if sk.animation_data:
+                    nla_morph_tracks = len(sk.animation_data.nla_tracks)
+                break
+
+        if nla_bone_tracks or nla_morph_tracks:
+            layout.label(
+                text=f"NLA: {nla_bone_tracks} bone, {nla_morph_tracks} morph tracks",
+                icon="NLA",
             )
-        else:
+
+        has_anything = has_bone_anim or morph_action or nla_bone_tracks or nla_morph_tracks
+        if not has_anything:
             layout.label(text="No animation", icon="INFO")
+            return
+
+        # --- Action buttons ---
+        layout.separator()
+
+        if has_bone_anim or morph_action:
+            row = layout.row(align=True)
+            row.operator("blender_mmd.push_to_nla", text="Push to NLA", icon="NLA_PUSHDOWN")
+
+        row = layout.row(align=True)
+        row.operator("blender_mmd.mark_actions_as_assets", text="Mark as Assets", icon="ASSET_MANAGER")
+
+        layout.operator(
+            "blender_mmd.clear_animation",
+            text="Clear Animation",
+            icon="TRASH",
+        )
+
+
+def _find_morph_action(armature_obj) -> "bpy.types.Action | None":
+    """Find the morph action from child meshes."""
+    for child in armature_obj.children:
+        if child.type != "MESH":
+            continue
+        sk = child.data.shape_keys
+        if sk and sk.animation_data and sk.animation_data.action:
+            return sk.animation_data.action
+    return None
 
 
 class BLENDER_MMD_PT_outlines(bpy.types.Panel):

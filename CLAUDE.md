@@ -14,6 +14,7 @@ Read `docs/SPEC.md` first. It is the single source of truth for architecture, de
 - **Milestone 5** (done): Materials & textures — Principled BSDF-based "MMD Shader" node group, bundled toon textures with fallback, global controls via armature drivers (emission/toon/sphere), per-face assignment, UV V-flip, overlapping face fix.
 - **Milestone 6** (in progress): Animation polish — additional transforms done (grant parent, shadow bones). PMD format support + VMD bone name auto-mapping done. Remaining: VMD camera, CCD IK
 - **Milestone 7** (in progress): Creative tools — edge/outline rendering done. Material morphs remaining.
+- **Milestone 8** (in progress): NLA & animation workflow — FPS control done, NLA push-down done, asset marking done. See `docs/NLA.md` for design doc. Remaining: body-part splitting, asset library, remixing tools, rig retargeting.
 
 ## Reference repos (siblings in ../  )
 
@@ -89,7 +90,7 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
   - **NCC rebuild**: `rebuild_ncc()` reuses existing NCC empties by reassigning pairs, only creating/deleting the difference. Respects proximity setting and disabled chains. ~0.1s for 13K empties.
   - **Debug inspector**: Select a rigid body → Inspect (copies full diagnostic report to clipboard), Select Colliders (highlights collision-eligible bodies), Select Contacts (highlights bodies in contact at current frame using shape-aware distance check).
   - **Auto-reset**: VMD import automatically resets physics if rigid bodies exist.
-- **MMD4B panel**: N-panel (tab "MMD4B"), all sub-panels collapsed by default. Sub-panels: Mesh (visible when mesh child selected — info, per-mesh outline toggle/color/thickness, physics chains with select, Delete Mesh), Outlines (global thickness slider, Build/Rebuild/Remove), SDEF (context-aware: per-mesh count when SDEF mesh selected, model-wide when armature selected), Physics (NCC mode dropdown [Draft/Proximity/All] + proximity slider, Build/Reset/Rebuild NCCs/Remove, selected RB info with Inspect/Colliders/Contacts, per-chain list with collision/physics toggles), IK Toggle (per-chain toggles + All On/Off), Animation (action name, Clear Animation).
+- **MMD4B panel**: N-panel (tab "MMD4B"), all sub-panels collapsed by default. Sub-panels: Mesh (visible when mesh child selected — info, per-mesh outline toggle/color/thickness, physics chains with select, Delete Mesh), Outlines (global thickness slider, Build/Rebuild/Remove), SDEF (context-aware: per-mesh count when SDEF mesh selected, model-wide when armature selected), Physics (NCC mode dropdown [Draft/Proximity/All] + proximity slider, Build/Reset/Rebuild NCCs/Remove, selected RB info with Inspect/Colliders/Contacts, per-chain list with collision/physics toggles), IK Toggle (per-chain toggles + All On/Off), Animation (bone action name, morph action name, NLA track counts, Push to NLA, Mark as Assets, Clear Animation).
 - **Materials**: Two shader modes controlled by "Toon & Sphere Textures" checkbox on PMX import (off by default):
   - **Basic** (default): Bare Principled BSDF named "MMD Shader" — no node group. PMX specular mapped to native BSDF: `specular` luminance → `Specular IOR Level` (0–0.5), `specular` color → `Specular Tint`, `shininess` → `Roughness`. Models respond to scene lighting and reflections out of the box.
   - **Full** (checkbox on): "MMD Shader" node group with toon/sphere inputs via `ShaderNodeMix`. Adds "MMD UV" group for toon/sphere UVs. Bundled toon textures (toon01-10.bmp) with fallback resolution. Specular IOR Level = 0.0 (toon textures provide specular control).
@@ -98,6 +99,8 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
 - **Split by material**: Mesh is split into per-material objects after import (default on). Enables per-object modifiers (cloth, solidify for outlines), light linking, and per-object `visible_shadow` (honors `mmd_drop_shadow`). Custom normals backed up as `mmd_normal` attribute before split, restored after. `mmd_morph_map` moved to armature for VMD import. All objects organized into a collection named after the model. VMD morph action shared across all split meshes via Blender 5.0 slotted actions: `fcurve_ensure_for_datablock` auto-creates a slot on the primary mesh's ShapeKey, secondary meshes share that same slot via `animation_data.action_slot`. Shape key names preserved by `mesh.separate`.
 - **Group morph flattening**: GROUP morphs (type 0) are flattened into composite vertex shape keys at import time. `_flatten_group_morph()` recursively walks the morph tree, accumulating weighted vertex deltas from VERTEX children. Non-vertex children (UV/BONE/MATERIAL) are skipped with a log count. Cycle detection via `visited` set. This enables VMD mouth animation (あ/い/う/え/お) on models like YYB Miku where these are GROUP morphs composing vertex morph children.
 - **VMD append mode**: `import_vmd()` defaults to `create_new_action=False` — reuses existing bone/morph actions and appends keyframes. Allows layering motions (e.g., body dance + lip sync from separate VMDs). `create_new_action=True` replaces existing actions. Morph-only VMDs (no bone keyframes) skip bone action creation entirely, preserving existing bone animation. File browser exposes "Create New Action" checkbox.
+- **VMD FPS control**: `import_vmd(target_fps=N)` scales all keyframe frame positions by `N/30` and sets scene to target FPS. Default 30 (no scaling). File browser exposes FPS dropdown (30/60/Custom). Bézier handles auto-scale since `_set_bezier_handles()` uses relative frame deltas. Note: changing FPS does NOT rescale existing animations — all VMDs in a project should use the same target FPS.
+- **NLA push-down**: `push_to_nla(armature_obj, strip_name)` pushes bone and morph actions to NLA strips. Bone action → one NLA track on armature. Morph action → **one NLA track on primary mesh only** (first child with shape keys). Secondary meshes get `animation_data_clear()` and are synced via a `frame_change_post` handler that copies primary mesh shape key values on each frame. Primary mesh name stored as `armature["mmd_morph_sync"]`. Handler registered in `__init__.py` `load_post` for persistence across file load. Material nodetree animation_data (emission drivers) cleared during push to prevent "Shader Nodetree" NLA clutter — restored by `clear_animation` via `setup_drivers()`. Deleting the primary mesh is blocked while `mmd_morph_sync` is set. Actions get `use_fake_user=True`. Strips use `blend_type='COMBINE'`, `extrapolation='NOTHING'`. MMD4B Animation panel has "Push to NLA" and "Mark as Assets" buttons. See `docs/NLA.md` for full design doc.
 - **Armature visibility**: STICK display, bones hidden by default. All three bone collections start hidden (`is_visible = False`): "Armature" (standard), "Physics" (dynamic RB bones, orange), "mmd_shadow" (helper bones). Unhide from armature properties when needed.
 - **PMD support**: PMD parser (`pmd/parser.py`) outputs the same `pmx.types.Model` dataclasses — entire downstream pipeline unchanged. Auto-detected by `.pmd` extension in `import_pmx()`. PMD bone types (0-9) mapped to PMX flags. Morph base→absolute index remapping. Rigid body bone-relative→absolute position conversion. English extension parsed for bone/morph names. WaistCancel bones that cancel LowerBody rotation are neutralized (PMD-era convention breaks modern VMDs that assume legs inherit LowerBody lean).
 - **Knee pre-bend**: `_ensure_knee_prebend()` in `armature.py` nudges knee bone heads forward (-Y) when rest-pose geometry lacks a clear forward offset. Only touches bones named "ひざ" (knee). Some models (especially PMD) have tiny lateral offsets that dominate the forward component, making Blender's IK solver choose the wrong bend direction. Runs after roll computation to avoid affecting bone rolls.
@@ -125,12 +128,21 @@ import bl_ext.user_default.blender_mmd.vmd.importer as vmd_importer
 motion = vmd_parser.parse("/path/to/motion.vmd")
 vmd_importer.import_vmd(motion, arm)
 
+# VMD import at custom FPS (scale keyframes, set scene to target fps)
+vmd_importer.import_vmd(motion, arm, target_fps=60)  # 60fps: frames doubled
+
 # Layer a second VMD (e.g. lip sync) — appends to existing actions by default
 lip = vmd_parser.parse("/path/to/lip.vmd")
 vmd_importer.import_vmd(lip, arm)  # create_new_action=False (default)
 
 # Replace all actions instead of appending
 vmd_importer.import_vmd(motion, arm, create_new_action=True)
+
+# Push current actions to NLA strips (enables layering via NLA)
+vmd_importer.push_to_nla(arm, strip_name="Dance")
+# Import second motion and push to another NLA layer
+vmd_importer.import_vmd(lip, arm)
+vmd_importer.push_to_nla(arm, strip_name="LipSync")
 
 # Build edge outlines (after import, split meshes only)
 from bl_ext.user_default.blender_mmd.outlines import build_outlines, remove_outlines

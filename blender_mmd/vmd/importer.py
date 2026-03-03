@@ -57,6 +57,7 @@ def import_vmd(
     armature_obj: bpy.types.Object,
     scale: float = 0.08,
     create_new_action: bool = False,
+    target_fps: int = 30,
 ) -> None:
     """Apply VMD motion to an armature and its child mesh.
 
@@ -67,7 +68,10 @@ def import_vmd(
     Args:
         create_new_action: If True, always create new actions (replaces existing).
             If False (default), reuse existing actions and append keyframes.
+        target_fps: Target frame rate. 30 = MMD standard (no scaling). Other values
+            scale all keyframe positions by target_fps/30.
     """
+    fps_scale = target_fps / 30.0
     # Build Japanese name → Blender bone name lookup
     jp_to_bone = _build_bone_lookup(armature_obj)
 
@@ -116,6 +120,7 @@ def import_vmd(
             matched_bones += 1
             _apply_bone_keyframes(
                 bone_action, armature_obj, pose_bone, keyframes, scale,
+                fps_scale,
             )
 
         if unmatched_bones:
@@ -131,7 +136,7 @@ def import_vmd(
     unmatched_morphs: list[str] = []
     if vmd.morph_keyframes:
         morph_count, unmatched_morphs = _apply_morph_keyframes(
-            vmd.morph_keyframes, armature_obj, create_new_action,
+            vmd.morph_keyframes, armature_obj, create_new_action, fps_scale,
         )
 
     # Apply IK toggle keyframes (use whichever bone action is active)
@@ -148,10 +153,11 @@ def import_vmd(
                 armature_obj.animation_data.action = bone_action
         ik_toggle_count = _apply_ik_toggle_keyframes(
             vmd.property_keyframes, armature_obj, bone_action, jp_to_bone,
+            fps_scale,
         )
 
-    # Set scene FPS to 30 (MMD standard) and adjust frame range
-    _setup_scene_settings(armature_obj)
+    # Set scene FPS and adjust frame range
+    _setup_scene_settings(armature_obj, target_fps)
 
     # Auto-reset physics if rigid bodies are built — prevents displaced bodies
     # after VMD import without requiring manual reset
@@ -212,16 +218,15 @@ def _log_vmd_report(
         txt.write(report_text)
 
 
-def _setup_scene_settings(armature_obj: bpy.types.Object) -> None:
+def _setup_scene_settings(armature_obj: bpy.types.Object, target_fps: int = 30) -> None:
     """Set scene FPS and frame range to match the imported VMD.
 
-    MMD animations run at 30fps. The frame range is derived from all actions
-    on the armature and its child meshes (shape key actions).
+    The frame range is derived from all actions on the armature and its child
+    meshes (shape key actions). Keyframes are already scaled to target_fps.
     """
     scene = bpy.context.scene
 
-    # MMD standard: 30fps
-    scene.render.fps = 30
+    scene.render.fps = target_fps
     scene.render.fps_base = 1
 
     # Collect frame range from all relevant actions
@@ -234,7 +239,7 @@ def _setup_scene_settings(armature_obj: bpy.types.Object) -> None:
 
     if frame_end > scene.frame_end:
         scene.frame_end = frame_end
-        log.info("Scene frame range set to %d–%d at 30fps", scene.frame_start, frame_end)
+        log.info("Scene frame range set to %d–%d at %dfps", scene.frame_start, frame_end, target_fps)
 
     # Match rigid body cache end to animation length
     if scene.rigidbody_world and scene.rigidbody_world.point_cache:
@@ -393,6 +398,7 @@ def _apply_bone_keyframes(
     pose_bone: bpy.types.PoseBone,
     keyframes: list[BoneKeyframe],
     scale: float,
+    fps_scale: float = 1.0,
 ) -> None:
     """Create F-curves for a single bone's keyframes."""
     bone_name = pose_bone.name
@@ -427,7 +433,7 @@ def _apply_bone_keyframes(
     for ki, kf in enumerate(keyframes):
         loc = converter.convert_location(kf.location)
         rot = converter.convert_rotation(kf.rotation)
-        frame = float(kf.frame)
+        frame = float(kf.frame) * fps_scale
 
         # Ensure quaternion sign consistency between adjacent keyframes
         if prev_rot is not None:
@@ -559,6 +565,7 @@ def _apply_morph_keyframes(
     morph_keyframes: list[MorphKeyframe],
     armature_obj: bpy.types.Object,
     create_new_action: bool = False,
+    fps_scale: float = 1.0,
 ) -> int:
     """Apply morph keyframes to shape key F-curves on child meshes.
 
@@ -656,19 +663,23 @@ def _apply_morph_keyframes(
 
         for ki, kf in enumerate(keyframes):
             kp = fc.keyframe_points[ki]
-            kp.co = (float(kf.frame), kf.weight)
+            kp.co = (float(kf.frame) * fps_scale, kf.weight)
             kp.interpolation = "LINEAR"
 
         fc.update()
         applied += 1
 
-    # Share the same action + slot across all other meshes with shape keys.
-    # Blender 5.0 slotted actions: assigning the action auto-creates a slot for
-    # the primary mesh via fcurve_ensure_for_datablock. Secondary meshes share
-    # that same slot — identical data paths mean the F-curves animate all meshes.
+    # Share the same action + slot across other meshes that aren't handler-synced.
+    # After push_to_nla(), secondary meshes have no animation_data — a frame_change
+    # handler syncs their shape key values from the primary mesh. Skip those.
+    # Without handler (fresh import), use Blender 5.0 slotted actions to share.
     primary_slot = morph_action.slots[0] if morph_action.slots else None
+    has_morph_sync = armature_obj.get("mmd_morph_sync") is not None
     for obj in mesh_objs[1:]:
         sk = obj.data.shape_keys
+        # Skip if morph sync handler is active (post-NLA push state)
+        if has_morph_sync:
+            continue
         if sk.animation_data is None:
             sk.animation_data_create()
         sk.animation_data.action = morph_action
@@ -695,6 +706,7 @@ def _apply_ik_toggle_keyframes(
     armature_obj: bpy.types.Object,
     bone_action: bpy.types.Action,
     jp_to_bone: dict[str, str],
+    fps_scale: float = 1.0,
 ) -> int:
     """Apply IK toggle keyframes by animating IK constraint influence.
 
@@ -727,7 +739,7 @@ def _apply_ik_toggle_keyframes(
                 continue
 
             influence = 1.0 if enabled else 0.0
-            frame = float(kf.frame)
+            frame = float(kf.frame) * fps_scale
 
             for pb, constraint in entries:
                 constraint.influence = influence
@@ -753,3 +765,158 @@ def _apply_ik_toggle_keyframes(
     if applied:
         log.info("VMD IK toggles: %d state changes applied", applied)
     return len(ik_constraints)
+
+
+def push_to_nla(
+    armature_obj: bpy.types.Object,
+    strip_name: str = "VMD",
+) -> dict[str, int]:
+    """Push current bone and morph actions to NLA strips.
+
+    After pushing, the active action slots are cleared so subsequent VMD
+    imports create fresh actions that layer on top via NLA.  Actions get
+    ``use_fake_user`` to prevent garbage collection.
+
+    Returns:
+        Dict with ``bone_strips`` and ``morph_strips`` counts.
+    """
+    bone_strips = 0
+    morph_strips = 0
+
+    # --- Bone action ---
+    anim = armature_obj.animation_data
+    if anim and anim.action:
+        action = anim.action
+        action.use_fake_user = True
+
+        track = anim.nla_tracks.new()
+        track.name = strip_name
+
+        start = int(action.frame_range[0])
+        strip = track.strips.new(strip_name, start, action)
+        strip.extrapolation = "NOTHING"
+        strip.blend_type = "COMBINE"
+
+        anim.action = None
+        bone_strips = 1
+        log.info("Pushed bone action '%s' to NLA track '%s'", action.name, strip_name)
+
+    # --- Morph action (primary mesh gets NLA, secondaries synced via handler) ---
+    mesh_objs = [
+        c for c in armature_obj.children
+        if c.type == "MESH"
+        and c.data.shape_keys
+        and c.data.shape_keys.animation_data
+        and c.data.shape_keys.animation_data.action
+    ]
+    if mesh_objs:
+        primary_mesh = mesh_objs[0]
+        primary_sk = primary_mesh.data.shape_keys
+        morph_action = primary_sk.animation_data.action
+        morph_action.use_fake_user = True
+        start = int(morph_action.frame_range[0])
+        morph_strip_name = f"{strip_name}_Morphs"
+
+        # Push NLA strip on primary mesh only
+        sk_anim = primary_sk.animation_data
+        slot = sk_anim.action_slot
+        track = sk_anim.nla_tracks.new()
+        track.name = morph_strip_name
+        strip = track.strips.new(morph_strip_name, start, morph_action)
+        strip.extrapolation = "NOTHING"
+        strip.blend_type = "COMBINE"
+        if slot is not None:
+            strip.action_slot = slot
+        sk_anim.action = None
+        morph_strips = 1
+
+        # Secondary meshes: clear action + animation_data entirely so they
+        # don't appear in the NLA editor. A frame_change handler syncs values.
+        for mesh_obj in mesh_objs[1:]:
+            sk = mesh_obj.data.shape_keys
+            if sk.animation_data:
+                sk.animation_data.action = None
+                # Clear animation_data so mesh doesn't appear in NLA editor
+                sk.animation_data_clear()
+
+        # Mark armature for morph sync handler
+        armature_obj["mmd_morph_sync"] = primary_mesh.name
+        _ensure_morph_sync_handler()
+
+        log.info(
+            "Pushed morph action '%s' to NLA on primary mesh '%s', "
+            "%d secondary meshes synced via handler",
+            morph_action.name, primary_mesh.name, len(mesh_objs) - 1,
+        )
+
+    # --- Clean up material nodetree animation_data (emission drivers) ---
+    # These clutter the NLA editor with "Shader Nodetree" entries.
+    # Bake current emission value and remove the drivers.
+    _clear_material_drivers(armature_obj)
+
+    return {"bone_strips": bone_strips, "morph_strips": morph_strips}
+
+
+def _clear_material_drivers(armature_obj: bpy.types.Object) -> None:
+    """Remove animation_data from material nodetrees on child meshes.
+
+    Material emission drivers read the armature's mmd_emission property.
+    Clearing them removes "Shader Nodetree" clutter from the NLA editor.
+    The current emission value is preserved on the nodes.
+    """
+    seen = set()
+    for child in armature_obj.children:
+        if child.type != "MESH":
+            continue
+        for slot in child.material_slots:
+            mat = slot.material
+            if mat and mat.name not in seen and mat.node_tree and mat.node_tree.animation_data:
+                mat.node_tree.animation_data_clear()
+                seen.add(mat.name)
+    if seen:
+        log.info("Cleared material nodetree animation_data from %d materials", len(seen))
+
+
+def _morph_sync_handler(scene: bpy.types.Scene) -> None:
+    """frame_change_post handler: copy primary mesh shape key values to secondaries."""
+    for obj in scene.objects:
+        if obj.type != "ARMATURE":
+            continue
+        primary_name = obj.get("mmd_morph_sync")
+        if not primary_name:
+            continue
+        primary = None
+        secondaries = []
+        for c in obj.children:
+            if c.type != "MESH" or not c.data.shape_keys:
+                continue
+            if c.name == primary_name:
+                primary = c
+            else:
+                secondaries.append(c)
+        if not primary or not secondaries:
+            continue
+        primary_sk = primary.data.shape_keys
+        for sec in secondaries:
+            for kb in sec.data.shape_keys.key_blocks:
+                if kb == sec.data.shape_keys.reference_key:
+                    continue
+                src = primary_sk.key_blocks.get(kb.name)
+                if src is not None:
+                    kb.value = src.value
+
+
+def _ensure_morph_sync_handler() -> None:
+    """Register the morph sync handler if not already registered."""
+    for h in bpy.app.handlers.frame_change_post:
+        if getattr(h, "__name__", "") == "_morph_sync_handler":
+            return
+    bpy.app.handlers.frame_change_post.append(_morph_sync_handler)
+
+
+def _remove_morph_sync_handler() -> None:
+    """Unregister the morph sync handler."""
+    bpy.app.handlers.frame_change_post[:] = [
+        h for h in bpy.app.handlers.frame_change_post
+        if getattr(h, "__name__", "") != "_morph_sync_handler"
+    ]

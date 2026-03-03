@@ -78,6 +78,32 @@ class BLENDER_MMD_OT_import_vmd(bpy.types.Operator, ImportHelper):
         default=False,
     )
 
+    fps_mode: EnumProperty(
+        name="FPS",
+        description="Frame rate for imported animation",
+        items=[
+            ("30", "30 fps (MMD)", "Keep original 30fps timing"),
+            ("60", "60 fps", "Scale keyframes to 60fps"),
+            ("CUSTOM", "Custom", "Specify a custom frame rate"),
+        ],
+        default="30",
+    )
+
+    fps_custom: IntProperty(
+        name="Custom FPS",
+        description="Custom frame rate (used when FPS is set to Custom)",
+        default=30,
+        min=1,
+        max=120,
+    )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "create_new_action")
+        layout.prop(self, "fps_mode")
+        if self.fps_mode == "CUSTOM":
+            layout.prop(self, "fps_custom")
+
     def execute(self, context):
         from .vmd import parse
         from .vmd.importer import import_vmd
@@ -92,15 +118,21 @@ class BLENDER_MMD_OT_import_vmd(bpy.types.Operator, ImportHelper):
             return {"CANCELLED"}
 
         scale = armature_obj.get("import_scale", 0.08)
+        target_fps = self.fps_custom if self.fps_mode == "CUSTOM" else int(self.fps_mode)
 
         try:
             vmd = parse(self.filepath)
-            import_vmd(vmd, armature_obj, scale, create_new_action=self.create_new_action)
+            import_vmd(
+                vmd, armature_obj, scale,
+                create_new_action=self.create_new_action,
+                target_fps=target_fps,
+            )
             self.report(
                 {"INFO"},
                 f"VMD applied to '{armature_obj.name}': "
                 f"{len(vmd.bone_keyframes)} bone kf, "
-                f"{len(vmd.morph_keyframes)} morph kf",
+                f"{len(vmd.morph_keyframes)} morph kf"
+                f" ({target_fps}fps)",
             )
             return {"FINISHED"}
         except Exception as e:
@@ -419,12 +451,23 @@ class BLENDER_MMD_OT_clear_animation(bpy.types.Operator):
         cleared = []
 
         # Clear armature action (bone keyframes, IK toggle keyframes)
-        if armature_obj.animation_data and armature_obj.animation_data.action:
-            action = armature_obj.animation_data.action
-            armature_obj.animation_data.action = None
-            if action.users == 0:
-                bpy.data.actions.remove(action)
-            cleared.append("bone keyframes")
+        if armature_obj.animation_data:
+            if armature_obj.animation_data.action:
+                action = armature_obj.animation_data.action
+                armature_obj.animation_data.action = None
+                if action.users == 0:
+                    bpy.data.actions.remove(action)
+                cleared.append("bone keyframes")
+            # Clear bone NLA tracks
+            nla = armature_obj.animation_data.nla_tracks
+            if len(nla):
+                for track in list(nla):
+                    for strip in track.strips:
+                        action = strip.action
+                        if action:
+                            action.use_fake_user = False
+                    nla.remove(track)
+                cleared.append("bone NLA")
 
         # Reset all pose bones to rest position
         for pb in armature_obj.pose.bones:
@@ -435,24 +478,49 @@ class BLENDER_MMD_OT_clear_animation(bpy.types.Operator):
 
         # Clear shape key animation on child meshes
         morph_cleared = False
+        morph_nla_cleared = False
         for child in armature_obj.children:
             if child.type != "MESH":
                 continue
             sk = child.data.shape_keys
             if sk is None:
                 continue
-            if sk.animation_data and sk.animation_data.action:
-                action = sk.animation_data.action
-                sk.animation_data.action = None
-                if action.users == 0:
-                    bpy.data.actions.remove(action)
-                morph_cleared = True
+            if sk.animation_data:
+                if sk.animation_data.action:
+                    action = sk.animation_data.action
+                    sk.animation_data.action = None
+                    if action.users == 0:
+                        bpy.data.actions.remove(action)
+                    morph_cleared = True
+                # Clear morph NLA tracks
+                nla = sk.animation_data.nla_tracks
+                if len(nla):
+                    for track in list(nla):
+                        for strip in track.strips:
+                            action = strip.action
+                            if action:
+                                action.use_fake_user = False
+                        nla.remove(track)
+                    morph_nla_cleared = True
             # Reset shape key values to 0
             for kb in sk.key_blocks:
                 if kb != sk.reference_key:
                     kb.value = 0.0
         if morph_cleared:
             cleared.append("morph keyframes")
+        if morph_nla_cleared:
+            cleared.append("morph NLA")
+
+        # Clear morph sync handler
+        if armature_obj.get("mmd_morph_sync"):
+            from .vmd.importer import _remove_morph_sync_handler
+            del armature_obj["mmd_morph_sync"]
+            _remove_morph_sync_handler()
+            cleared.append("morph sync")
+
+        # Restore material emission drivers (cleared during NLA push)
+        from .materials import setup_drivers
+        setup_drivers(armature_obj)
 
         # Go to frame 1 for clean state
         bpy.context.scene.frame_set(1)
@@ -1103,6 +1171,18 @@ class BLENDER_MMD_OT_delete_mesh(bpy.types.Operator):
             return {"CANCELLED"}
 
         armature_obj = mesh_obj.parent
+
+        # Prevent deleting the primary morph mesh when it holds NLA strips
+        # or is the sync source for secondary meshes
+        primary_name = armature_obj.get("mmd_morph_sync")
+        if primary_name and mesh_obj.name == primary_name:
+            self.report(
+                {"ERROR"},
+                "Cannot delete: this mesh holds morph NLA strips. "
+                "Clear animation first.",
+            )
+            return {"CANCELLED"}
+
         name = mesh_obj.name
         vert_count = len(mesh_obj.data.vertices)
 
@@ -1163,6 +1243,109 @@ class BLENDER_MMD_OT_view_import_report(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class BLENDER_MMD_OT_push_to_nla(bpy.types.Operator):
+    """Push current VMD actions to NLA strips for layering"""
+
+    bl_idname = "blender_mmd.push_to_nla"
+    bl_label = "Push to NLA"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        arm = find_mmd_armature(context)
+        if not arm:
+            return False
+        has_bone = arm.animation_data and arm.animation_data.action
+        has_morph = any(
+            c.type == "MESH"
+            and c.data.shape_keys
+            and c.data.shape_keys.animation_data
+            and c.data.shape_keys.animation_data.action
+            for c in arm.children
+        )
+        return has_bone or has_morph
+
+    def execute(self, context):
+        from .vmd.importer import push_to_nla
+
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        # Use bone action name as strip name, or fallback
+        strip_name = "VMD"
+        if armature_obj.animation_data and armature_obj.animation_data.action:
+            strip_name = armature_obj.animation_data.action.name
+
+        try:
+            result = push_to_nla(armature_obj, strip_name)
+            self.report(
+                {"INFO"},
+                f"Pushed to NLA: {result['bone_strips']} bone, "
+                f"{result['morph_strips']} morph strips",
+            )
+            return {"FINISHED"}
+        except Exception as e:
+            log.exception("NLA push failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+
+class BLENDER_MMD_OT_mark_actions_as_assets(bpy.types.Operator):
+    """Mark bone and morph actions as Blender assets for reuse"""
+
+    bl_idname = "blender_mmd.mark_actions_as_assets"
+    bl_label = "Mark Actions as Assets"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        arm = find_mmd_armature(context)
+        return arm is not None
+
+    def execute(self, context):
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        marked = []
+        seen = set()
+
+        def _mark(action):
+            if action and action.name not in seen and not action.asset_data:
+                action.asset_mark()
+                marked.append(action.name)
+                seen.add(action.name)
+
+        # Active bone action
+        if armature_obj.animation_data:
+            _mark(armature_obj.animation_data.action)
+            # NLA-stashed bone actions
+            for track in armature_obj.animation_data.nla_tracks:
+                for strip in track.strips:
+                    _mark(strip.action)
+
+        # Active + NLA morph actions
+        for child in armature_obj.children:
+            if child.type != "MESH":
+                continue
+            sk = child.data.shape_keys
+            if sk and sk.animation_data:
+                _mark(sk.animation_data.action)
+                for track in sk.animation_data.nla_tracks:
+                    for strip in track.strips:
+                        _mark(strip.action)
+            break  # only check primary mesh (all share same action)
+
+        if marked:
+            self.report({"INFO"}, f"Marked as assets: {', '.join(marked)}")
+        else:
+            self.report({"INFO"}, "No new actions to mark")
+        return {"FINISHED"}
+
+
 def menu_func_import(self, context):
     self.layout.operator(
         BLENDER_MMD_OT_import_pmx.bl_idname,
@@ -1202,6 +1385,8 @@ _classes = (
     BLENDER_MMD_OT_select_mesh_rigid_bodies,
     BLENDER_MMD_OT_delete_mesh,
     BLENDER_MMD_OT_view_import_report,
+    BLENDER_MMD_OT_push_to_nla,
+    BLENDER_MMD_OT_mark_actions_as_assets,
 )
 
 

@@ -608,6 +608,8 @@ blender_mmd.inspect_physics            # Copy full RB diagnostic report to clipb
 blender_mmd.select_colliders           # Select all collision-eligible RBs for active RB
 blender_mmd.select_contacts            # Select RBs in contact with active RB at current frame
 blender_mmd.clear_animation            # Clear bone/morph keyframes, reset to rest pose
+blender_mmd.push_to_nla                # Push bone/morph actions to NLA strips
+blender_mmd.mark_actions_as_assets     # Mark all actions as Blender assets
 blender_mmd.view_import_report         # Open MMD Import Report in Text Editor
 blender_mmd.toggle_ik                  # Toggle IK for one chain (target_bone)
 blender_mmd.toggle_all_ik              # Enable/disable all IK (enable: bool)
