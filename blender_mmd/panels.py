@@ -434,7 +434,13 @@ class BLENDER_MMD_PT_main(bpy.types.Panel):
 
     def draw(self, context):
         armature_obj = find_mmd_armature(context)
-        self.layout.label(text=armature_obj.name, icon="ARMATURE_DATA")
+        row = self.layout.row()
+        row.label(text=armature_obj.name, icon="ARMATURE_DATA")
+        if bpy.data.texts.get("MMD Import Report"):
+            row.operator(
+                "blender_mmd.view_import_report",
+                text="", icon="TEXT",
+            )
 
 
 _classes = (

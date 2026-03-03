@@ -608,6 +608,7 @@ blender_mmd.inspect_physics            # Copy full RB diagnostic report to clipb
 blender_mmd.select_colliders           # Select all collision-eligible RBs for active RB
 blender_mmd.select_contacts            # Select RBs in contact with active RB at current frame
 blender_mmd.clear_animation            # Clear bone/morph keyframes, reset to rest pose
+blender_mmd.view_import_report         # Open MMD Import Report in Text Editor
 blender_mmd.toggle_ik                  # Toggle IK for one chain (target_bone)
 blender_mmd.toggle_all_ik              # Enable/disable all IK (enable: bool)
 blender_mmd.build_outlines             # Build edge outlines (Solidify + Emission)
@@ -659,6 +660,8 @@ Behavior:
 **Interpolation axis remapping**: VMD Bézier interpolation curves are per-axis (X, Y, Z location + rotation). The `_InterpolationHelper` class computes the correct axis permutation from the bone's conversion matrix, reading from the full 64-byte VMD interpolation block at proper row offsets. Matches mmd_tools' `_InterpolationHelper`. Previous implementation used a hardcoded Y↔Z swap which was incorrect for bones with unusual local axis orientations.
 
 **F-curve handle fixing**: First and last keyframe handles are set explicitly to prevent extrapolation artifacts. Matches mmd_tools' `__fixFcurveHandles`.
+
+**Morph fallback aliases**: When a VMD references a morph the model doesn't have (e.g. `ワ`), `MORPH_ALIASES` maps it to a similar morph that might exist (e.g. `あ` / A). ~18 aliases for common mouth shapes, eye expressions, and brow morphs. First match wins. Neither mmd_tools nor MMD itself does this — VMD morphs that don't match are silently dropped.
 
 ---
 
@@ -735,7 +738,9 @@ Rigid body creation, GENERIC_SPRING joints with spring values, collision layers 
 
 **N-panel**: Tab "MMD4B" in 3D Viewport sidebar. Visible when active object is an MMD armature (or child mesh).
 
-**Layout** (parent panel shows model name, sub-panels below):
+**Layout** (parent panel shows model name + report button, sub-panels below):
+
+**Header:** Model name with text icon button (visible when "MMD Import Report" text exists). Clicking opens the report in a Text Editor area — shows untranslated names from PMX import and unmatched names from VMD import.
 
 **Animation sub-panel:**
 - Shows current action name when animation is loaded
@@ -823,14 +828,18 @@ All user-visible names in Blender are English. Implemented in `translations.py` 
 
 **`resolve_name(name_j, name_e, table)`** — unified resolver used by bones, morphs, materials, rigid bodies, and joints:
 
-1. **Full-name table lookup** — `BONE_NAMES` (200+ entries), `MORPH_NAMES` (100+ entries), `MATERIAL_NAMES` (50+ entries). NFKC-normalized before lookup.
+1. **Full-name table lookup** — small override tables only for names where chunks produce no result or misleading results: `BONE_NAMES` (empty — chunks handle everything), `MORPH_NAMES` (47 entries — single hiragana vowels, symbols, unique onomatopoeia), `MATERIAL_NAMES` (6 entries — compound words like 黒目→Iris). NFKC-normalized before lookup.
 2. **English name validation** — uses `name_e` from PMX only if it "looks English" (>50% of non-whitespace chars are ASCII). Filters out garbage `name_e` values (e.g. `ﾀｧ､・`) that model authors copy from the Japanese field.
-3. **Chunk-based translation** — `translate_chunks()` splits the Japanese name into chunks (kanji runs, kana runs, ASCII runs, numbers) and translates each via `NAME_CHUNKS` table (~120 entries). Greedy longest-match. Handles `左`/`右` → `.L`/`.R` Blender suffix convention. Example: `右スリーブ１IK` → `Sleeve1IK.R`.
+3. **Chunk-based translation** — `translate_chunks()` splits the Japanese name into chunks (kanji runs, kana runs, ASCII runs, numbers) and translates each via `NAME_CHUNKS` table (~320 entries). Greedy longest-match. Handles `左`/`右` → `.L`/`.R` Blender suffix convention. Example: `右スリーブ１IK` → `Sleeve1IK.R`. This is the workhorse — handles 95%+ of all translations.
 4. **Japanese fallback** — original name as-is.
+
+`translate()` and `translate_morph()` also fall through to `translate_chunks()` when their tables have no match, so even the legacy API benefits from chunk translation.
 
 **Per-object `mmd_name_j` storage:** Original Japanese names stored as custom properties on bones, materials, rigid bodies, and joints for VMD matching and debugging. Shape keys use `mmd_morph_map` JSON (on armature) since Blender 5.0 shape keys don't support custom properties.
 
-**Coverage** (tested on つみ式ミクさん): 100% English across all categories — bones (284/284), shape keys (1209/1209), materials (31/31), rigid bodies, joints.
+**Coverage** (tested on MikuV4X): bones 360/360, morphs 63/63, materials 75/77 translated.
+
+**Import report:** After PMX import (and VMD import), a "MMD Import Report" Blender Text datablock is created listing all untranslated names and unmatched VMD bones/morphs. Viewable via Text Editor or the report button in the MMD4B panel header. Helps identify candidates for new chunk/table entries.
 
 #### Lookup Consolidation (future)
 
@@ -839,8 +848,8 @@ Centralized reverse-lookup maps on the armature to eliminate redundant O(n) scan
 #### Performance & Mesh Optimizations
 
 - **UV foreach_set:** Replace per-loop UV assignment with flat-array `foreach_set` (same pattern as material_index assignment). Significant speedup on 100k+ vertex models.
-- **Degenerate face cleanup:** Remove zero-area faces during import (matching mmd_tools). Prevents rendering artifacts and reduces poly count.
-- **Sharp edge marking:** Detect edge angles from custom normals and mark sharp edges (mmd_tools does this at 179° threshold). Affects auto-smooth and edge split behavior.
+- **Degenerate face cleanup:** ✅ Done. `_filter_degenerate_faces()` in `importer.py` removes triangles with duplicate vertex indices before geometry creation, adjusting per-material `face_count` to keep material assignment correct. Prevents `normals_split_custom_set` crash on models with degenerate topology.
+- **Sharp edge marking:** ✅ Done. All edges marked sharp via `foreach_set("use_edge_sharp", True)` — safe because custom normals override sharpness. Avoids `bpy.ops.mesh.edges_select_sharp` and `bmesh.normal_update()` which both hang on degenerate topology.
 - **Parallel texture loading:** Load textures in batch rather than one-at-a-time during material setup.
 - **Decimate / face reduction:** Many MMD models are over-tessellated (100k+ faces where 30k would suffice). Post-import decimate pass or operator that intelligently reduces face count while preserving UV seams, shape keys, and material boundaries. Could use Blender's Decimate modifier with smart settings, or a custom approach that respects MMD-specific topology (face layers, edge loops at material boundaries).
 

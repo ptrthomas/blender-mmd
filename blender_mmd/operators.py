@@ -959,6 +959,53 @@ class BLENDER_MMD_OT_toggle_chain_physics(bpy.types.Operator):
             return {"CANCELLED"}
 
 
+class BLENDER_MMD_OT_view_import_report(bpy.types.Operator):
+    """Open the MMD Import Report in a text editor area"""
+
+    bl_idname = "blender_mmd.view_import_report"
+    bl_label = "View Import Report"
+
+    @classmethod
+    def poll(cls, context):
+        return bpy.data.texts.get("MMD Import Report") is not None
+
+    def execute(self, context):
+        txt = bpy.data.texts.get("MMD Import Report")
+        if not txt:
+            self.report({"WARNING"}, "No import report found")
+            return {"CANCELLED"}
+
+        # Find an existing text editor area, or convert the smallest area
+        text_area = None
+        for area in context.screen.areas:
+            if area.type == "TEXT_EDITOR":
+                text_area = area
+                break
+
+        if text_area is None:
+            # Find the smallest non-VIEW_3D area to convert
+            candidates = [
+                a for a in context.screen.areas
+                if a.type not in ("VIEW_3D", "PROPERTIES", "OUTLINER")
+            ]
+            if not candidates:
+                candidates = [
+                    a for a in context.screen.areas
+                    if a.type == "OUTLINER"
+                ]
+            if candidates:
+                text_area = min(candidates, key=lambda a: a.width * a.height)
+                text_area.type = "TEXT_EDITOR"
+
+        if text_area:
+            for space in text_area.spaces:
+                if space.type == "TEXT_EDITOR":
+                    space.text = txt
+                    break
+
+        return {"FINISHED"}
+
+
 def menu_func_import(self, context):
     self.layout.operator(
         BLENDER_MMD_OT_import_pmx.bl_idname,
@@ -993,6 +1040,7 @@ _classes = (
     BLENDER_MMD_OT_bake_sdef,
     BLENDER_MMD_OT_clear_sdef_bake,
     BLENDER_MMD_OT_toggle_sdef,
+    BLENDER_MMD_OT_view_import_report,
 )
 
 

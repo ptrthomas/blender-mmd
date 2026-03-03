@@ -20,6 +20,124 @@ log = logging.getLogger("blender_mmd")
 DEFAULT_SCALE = 0.08
 
 
+def _log_import_report(armature_obj: bpy.types.Object) -> None:
+    """Log untranslated names to a Blender Text Editor datablock.
+
+    Creates/updates a text called "MMD Import Report" visible in any
+    Text Editor area.  Also prints to the system console.
+    """
+    from .translations import _looks_english
+
+    # Bones
+    bone_jp = []
+    for bone in armature_obj.data.bones:
+        if not _looks_english(bone.name):
+            bone_jp.append(bone.name)
+
+    # Shape keys (morphs) — first mesh only (all share same names after split)
+    morph_jp = []
+    n_morphs = 0
+    for child in armature_obj.children:
+        if child.type == "MESH" and child.data.shape_keys:
+            for kb in child.data.shape_keys.key_blocks:
+                if kb.name == "Basis":
+                    continue
+                n_morphs += 1
+                if not _looks_english(kb.name):
+                    morph_jp.append(kb.name)
+            break
+
+    # Materials (deduplicate across split meshes)
+    seen_mats: set[str] = set()
+    mat_jp = []
+    for child in armature_obj.children:
+        if child.type == "MESH":
+            for mat in child.data.materials:
+                if mat and mat.name not in seen_mats:
+                    seen_mats.add(mat.name)
+                    if not _looks_english(mat.name):
+                        mat_jp.append(mat.name)
+    n_mats = len(seen_mats)
+    n_bones = len(armature_obj.data.bones)
+
+    lines = [f"=== Import Report: {armature_obj.name} ===", ""]
+    lines.append(f"Bones: {n_bones - len(bone_jp)}/{n_bones} translated")
+    if bone_jp:
+        for name in bone_jp:
+            lines.append(f"  {name}")
+    lines.append("")
+    lines.append(f"Morphs: {n_morphs - len(morph_jp)}/{n_morphs} translated")
+    if morph_jp:
+        for name in morph_jp:
+            lines.append(f"  {name}")
+    lines.append("")
+    lines.append(f"Materials: {n_mats - len(mat_jp)}/{n_mats} translated")
+    if mat_jp:
+        for name in mat_jp:
+            lines.append(f"  {name}")
+
+    report_text = "\n".join(lines)
+
+    # Write to Blender Text datablock
+    _write_report_text(report_text)
+
+    # Summary to log
+    log.info(
+        "Import report: bones %d/%d, morphs %d/%d, materials %d/%d translated"
+        " (see 'MMD Import Report' in Text Editor)",
+        n_bones - len(bone_jp), n_bones,
+        n_morphs - len(morph_jp), n_morphs,
+        n_mats - len(mat_jp), n_mats,
+    )
+
+
+def _write_report_text(text: str, name: str = "MMD Import Report") -> None:
+    """Write text to a Blender Text datablock, creating or replacing it."""
+    txt = bpy.data.texts.get(name)
+    if txt:
+        txt.clear()
+    else:
+        txt = bpy.data.texts.new(name)
+    txt.write(text)
+
+
+def _filter_degenerate_faces(model: Model) -> None:
+    """Remove degenerate faces (duplicate vertex indices) from model data.
+
+    Degenerate triangles (where two or more vertex indices are identical)
+    produce zero-area polygons that crash Blender's normals_split_custom_set.
+    This mutates model.faces and adjusts material face_counts to match.
+    """
+    faces = model.faces
+    materials = model.materials
+
+    # Build per-face material index from sequential face_count ranges
+    mat_face_counts = []
+    for mat in materials:
+        mat_face_counts.append(mat.face_count // 3)
+
+    clean_faces = []
+    clean_mat_counts = [0] * len(materials)
+    face_idx = 0
+    for mat_idx, n_faces in enumerate(mat_face_counts):
+        for _ in range(n_faces):
+            if face_idx < len(faces):
+                f = faces[face_idx]
+                if f[0] != f[1] and f[1] != f[2] and f[0] != f[2]:
+                    clean_faces.append(f)
+                    clean_mat_counts[mat_idx] += 1
+                face_idx += 1
+
+    removed = len(faces) - len(clean_faces)
+    if removed > 0:
+        log.warning(
+            "Removed %d degenerate faces (duplicate vertex indices)", removed
+        )
+        model.faces = clean_faces
+        for i, mat in enumerate(materials):
+            mat.face_count = clean_mat_counts[i] * 3
+
+
 def _setup_bone_collections(armature_obj, model) -> None:
     """Create bone collections and color-code physics bones.
 
@@ -210,6 +328,9 @@ def import_pmx(
         from .pmx import parse as pmx_parse
         model = pmx_parse(filepath)
 
+    # Remove degenerate faces before building geometry
+    _filter_degenerate_faces(model)
+
     # Deselect everything
     bpy.ops.object.select_all(action="DESELECT")
 
@@ -249,4 +370,7 @@ def import_pmx(
         len(model.bones),
         len(model.vertices),
     )
+
+    _log_import_report(armature_obj)
+
     return armature_obj

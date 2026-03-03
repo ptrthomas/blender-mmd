@@ -1,4 +1,4 @@
-"""Unit tests for bone, morph, and material name translation tables + chunk translator."""
+"""Unit tests for translation tables + chunk translator."""
 
 from __future__ import annotations
 
@@ -34,26 +34,13 @@ class TestTranslate:
         for name_j in required:
             assert translate(name_j) is not None, f"Missing translation for {name_j}"
 
-    def test_no_empty_values(self):
-        for name_j, name_e in BONE_NAMES.items():
-            assert name_j, "Empty Japanese key"
-            assert name_e, f"Empty English value for {name_j}"
-
-    def test_blender_lr_convention(self):
-        """All L/R bones use Blender's .L/.R suffix, not _L/_R."""
-        for name_j, name_e in BONE_NAMES.items():
-            assert "_L" not in name_e and "_R" not in name_e or \
-                   "_D." in name_e or "EX." in name_e or \
-                   not name_e.endswith(("_L", "_R")), \
-                f"{name_j} -> {name_e} uses _L/_R instead of .L/.R"
-
 
 class TestTranslateMorph:
     def test_known_morphs(self):
         assert translate_morph("まばたき") == "Blink"
         assert translate_morph("あ") == "A"
         assert translate_morph("笑い") == "Smile"
-        assert translate_morph("ウィンク") == "Wink.L"
+        assert translate_morph("ウィンク") == "Wink"
 
     def test_unknown_returns_none(self):
         assert translate_morph("存在しないモーフ") is None
@@ -80,16 +67,6 @@ class TestTranslateMorph:
         for name_j, name_e in MORPH_NAMES.items():
             assert name_j, "Empty Japanese key in MORPH_NAMES"
             assert name_e, f"Empty English value for morph {name_j}"
-
-    def test_lr_convention(self):
-        """L/R morphs use Blender's .L/.R suffix."""
-        for name_j, name_e in MORPH_NAMES.items():
-            if name_e.endswith((".L", ".R")):
-                # Good — uses Blender convention
-                continue
-            assert not name_e.endswith(("_L", "_R")), (
-                f"Morph {name_j} -> {name_e} uses _L/_R instead of .L/.R"
-            )
 
 
 class TestNormalizeLR:
@@ -183,9 +160,13 @@ class TestTranslateChunks:
 
 
 class TestResolveName:
-    def test_table_wins(self):
-        # Table entry should take priority
-        assert resolve_name("センター", "center", BONE_NAMES) == "Center"
+    def test_english_name_used(self):
+        # With empty BONE_NAMES, name_e is used when it looks English
+        assert resolve_name("センター", "center", BONE_NAMES) == "center"
+
+    def test_chunks_used_when_no_name_e(self):
+        # No name_e → chunks translate
+        assert resolve_name("センター", "", BONE_NAMES) == "Center"
 
     def test_english_name_fallback(self):
         # Unknown Japanese, good English name
@@ -208,9 +189,8 @@ class TestResolveName:
         result = resolve_name("完全に不明", "", BONE_NAMES)
         assert result == "完全に不明"
 
-    def test_nfkc_table_lookup(self):
-        # NFKC normalized form should also match
-        # 左足ＩＫ has fullwidth ＩＫ in the table
+    def test_nfkc_chunk_lookup(self):
+        # Fullwidth ＩＫ normalized via chunks
         assert resolve_name("左足ＩＫ", "", BONE_NAMES) == "LegIK.L"
 
     def test_lr_normalization_on_english(self):
@@ -219,6 +199,12 @@ class TestResolveName:
         assert result == "arm.L"
 
     def test_material_table(self):
+        # Materials resolved via chunks (+ small override table)
         assert resolve_name("顔", "", MATERIAL_NAMES) == "Face"
         assert resolve_name("髪", "", MATERIAL_NAMES) == "Hair"
         assert resolve_name("スカート", "", MATERIAL_NAMES) == "Skirt"
+
+    def test_material_override(self):
+        # MATERIAL_NAMES overrides prevent bad chunk decomposition
+        assert resolve_name("黒目", "", MATERIAL_NAMES) == "Iris"
+        assert resolve_name("帽子", "", MATERIAL_NAMES) == "Hat"

@@ -23,6 +23,34 @@ from .types import BoneKeyframe, MorphKeyframe, PropertyKeyframe, VmdMotion
 
 log = logging.getLogger("blender_mmd")
 
+# Morph fallback aliases: VMD morph name → list of alternative Japanese names.
+# When a VMD references a morph the model doesn't have, try these alternatives.
+# Ordered by similarity — first match wins.
+# fmt: off
+MORPH_ALIASES: dict[str, list[str]] = {
+    # Mouth shapes
+    "ワ": ["あ"],                  # wa mouth ≈ open mouth (A)
+    "わ": ["あ"],
+    "えー": ["え"],                # elongated E ≈ E
+    "にやり": ["笑い", "にこり"],  # smirk ≈ smile
+    "にっこり": ["笑い", "にこり"],
+    "なごみ": ["笑い"],            # gentle ≈ smile
+    "はぅ": ["困る"],              # distressed sigh ≈ troubled
+    "叫び": ["あ"],                # shout ≈ open mouth
+    "わらい口": ["笑い"],          # laughing mouth ≈ smile
+    "ぺろっ": ["あ"],              # tongue out ≈ open mouth
+    # Eyes
+    "笑い目": ["笑い"],            # smiling eyes ≈ smile
+    "じと目": ["なごみ"],          # staring ≈ gentle
+    "たれ目": ["なごみ"],          # droopy eyes ≈ gentle
+    "つり目": ["怒り"],            # sharp eyes ≈ angry
+    "瞳小": ["びっくり"],          # small pupils ≈ surprised
+    # Brows
+    "平行": ["真面目"],            # flat brows ≈ serious
+    "短": ["真面目"],              # short brows ≈ serious
+}
+# fmt: on
+
 
 def import_vmd(
     vmd: VmdMotion,
@@ -100,8 +128,9 @@ def import_vmd(
 
     # Apply morph keyframes to shape keys
     morph_count = 0
+    unmatched_morphs: list[str] = []
     if vmd.morph_keyframes:
-        morph_count = _apply_morph_keyframes(
+        morph_count, unmatched_morphs = _apply_morph_keyframes(
             vmd.morph_keyframes, armature_obj, create_new_action,
         )
 
@@ -141,6 +170,46 @@ def import_vmd(
         ik_toggle_count,
         len(vmd.bone_keyframes),
     )
+
+    # Write VMD report to Blender Text Editor
+    _log_vmd_report(
+        armature_obj, vmd,
+        matched_bones, bone_group_count, unmatched_bones,
+        morph_count, unmatched_morphs,
+    )
+
+
+def _log_vmd_report(
+    armature_obj: bpy.types.Object,
+    vmd: VmdMotion,
+    matched_bones: int,
+    total_bone_groups: int,
+    unmatched_bones: list[str],
+    morph_count: int,
+    unmatched_morphs: list[str],
+) -> None:
+    """Append VMD match report to the 'MMD Import Report' Text datablock."""
+    lines = ["", f"=== VMD Report: {vmd.model_name} ===", ""]
+    lines.append(f"Bones: {matched_bones}/{total_bone_groups} matched")
+    if unmatched_bones:
+        for name in unmatched_bones:
+            lines.append(f"  {name}")
+    lines.append("")
+    morph_total = morph_count + len(unmatched_morphs)
+    lines.append(f"Morphs: {morph_count}/{morph_total} matched")
+    if unmatched_morphs:
+        for name in unmatched_morphs:
+            lines.append(f"  {name}")
+
+    report_text = "\n".join(lines)
+
+    # Append to existing report text (PMX report may already be there)
+    txt = bpy.data.texts.get("MMD Import Report")
+    if txt:
+        txt.write(report_text)
+    else:
+        txt = bpy.data.texts.new("MMD Import Report")
+        txt.write(report_text)
 
 
 def _setup_scene_settings(armature_obj: bpy.types.Object) -> None:
@@ -546,19 +615,29 @@ def _apply_morph_keyframes(
     unmatched: list[str] = []
 
     for jp_name, keyframes in morph_groups.items():
-        # Find the shape key name
+        # Find the shape key name: morph_map → direct match → alias fallback
         sk_name = morph_map.get(jp_name)
         if sk_name is None:
             # Try direct match on any mesh
-            found = False
             for obj in mesh_objs:
                 if jp_name in obj.data.shape_keys.key_blocks:
                     sk_name = jp_name
-                    found = True
                     break
-            if not found:
-                unmatched.append(jp_name)
-                continue
+        if sk_name is None:
+            # Try alias fallback — map to alternative Japanese morph name
+            for alias_jp in MORPH_ALIASES.get(jp_name, []):
+                alias_en = morph_map.get(alias_jp)
+                if alias_en and any(
+                    alias_en in obj.data.shape_keys.key_blocks
+                    for obj in mesh_objs
+                ):
+                    sk_name = alias_en
+                    log.debug("VMD morph alias: '%s' → '%s' (%s)", jp_name, alias_jp, sk_name)
+                    break
+
+        if sk_name is None:
+            unmatched.append(jp_name)
+            continue
 
         # Check if this shape key exists on at least one mesh
         if not any(
@@ -608,7 +687,7 @@ def _apply_morph_keyframes(
         "VMD morphs: %d/%d channels applied across %d meshes",
         applied, len(morph_groups), len(mesh_objs),
     )
-    return applied
+    return applied, unmatched
 
 
 def _apply_ik_toggle_keyframes(

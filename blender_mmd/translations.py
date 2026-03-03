@@ -13,664 +13,59 @@ Uses Blender's `.L` / `.R` suffix convention for mirror operations.
 import re
 import unicodedata
 
-# fmt: off
-BONE_NAMES: dict[str, str] = {
-    # Core body
-    "操作中心": "ViewCenter",
-    "全ての親": "ParentNode",
-    "センター": "Center",
-    "グルーブ": "Groove",
-    "腰": "Waist",
-    "上半身": "UpperBody",
-    "上半身2": "UpperBody2",
-    "上半身3": "UpperBody3",
-    "下半身": "LowerBody",
-    "首": "Neck",
-    "頭": "Head",
-    "あご": "Jaw",
+# Full-name override tables. Most translation is handled by NAME_CHUNKS.
+# These tables are only for names where chunk decomposition gives no result
+# or a misleading result.
 
-    # Eyes and brows
-    "両目": "Eyes",
-    "左目": "Eye.L",
-    "右目": "Eye.R",
-    "左眉": "Brow.L",
-    "右眉": "Brow.R",
-    "左眉頭": "BrowInner.L",
-    "右眉頭": "BrowInner.R",
-
-    # Left arm
-    "左肩": "Shoulder.L",
-    "左腕": "Arm.L",
-    "左腕捩": "ArmTwist.L",
-    "左ひじ": "Elbow.L",
-    "左手捩": "HandTwist.L",
-    "左手首": "Wrist.L",
-
-    # Left hand fingers
-    "左親指０": "Thumb0.L",
-    "左親指１": "Thumb1.L",
-    "左親指２": "Thumb2.L",
-    "左人指１": "IndexFinger1.L",
-    "左人指２": "IndexFinger2.L",
-    "左人指３": "IndexFinger3.L",
-    # PMD-era abbreviated form (人差指 → 人指)
-    "左人差指１": "IndexFinger1.L",
-    "左人差指２": "IndexFinger2.L",
-    "左人差指３": "IndexFinger3.L",
-    "左中指１": "MiddleFinger1.L",
-    "左中指２": "MiddleFinger2.L",
-    "左中指３": "MiddleFinger3.L",
-    "左薬指１": "RingFinger1.L",
-    "左薬指２": "RingFinger2.L",
-    "左薬指３": "RingFinger3.L",
-    "左小指１": "LittleFinger1.L",
-    "左小指２": "LittleFinger2.L",
-    "左小指３": "LittleFinger3.L",
-
-    # Right arm
-    "右肩": "Shoulder.R",
-    "右腕": "Arm.R",
-    "右腕捩": "ArmTwist.R",
-    "右ひじ": "Elbow.R",
-    "右手捩": "HandTwist.R",
-    "右手首": "Wrist.R",
-
-    # Right hand fingers
-    "右親指０": "Thumb0.R",
-    "右親指１": "Thumb1.R",
-    "右親指２": "Thumb2.R",
-    "右人指１": "IndexFinger1.R",
-    "右人指２": "IndexFinger2.R",
-    "右人指３": "IndexFinger3.R",
-    # PMD-era abbreviated form
-    "右人差指１": "IndexFinger1.R",
-    "右人差指２": "IndexFinger2.R",
-    "右人差指３": "IndexFinger3.R",
-    "右中指１": "MiddleFinger1.R",
-    "右中指２": "MiddleFinger2.R",
-    "右中指３": "MiddleFinger3.R",
-    "右薬指１": "RingFinger1.R",
-    "右薬指２": "RingFinger2.R",
-    "右薬指３": "RingFinger3.R",
-    "右小指１": "LittleFinger1.R",
-    "右小指２": "LittleFinger2.R",
-    "右小指３": "LittleFinger3.R",
-
-    # Left leg
-    "左足": "Leg.L",
-    "左ひざ": "Knee.L",
-    "左足首": "Ankle.L",
-    "左つま先": "Toe.L",
-
-    # Right leg
-    "右足": "Leg.R",
-    "右ひざ": "Knee.R",
-    "右足首": "Ankle.R",
-    "右つま先": "Toe.R",
-
-    # IK
-    "左足ＩＫ": "LegIK.L",
-    "右足ＩＫ": "LegIK.R",
-    "左つま先ＩＫ": "ToeIK.L",
-    "右つま先ＩＫ": "ToeIK.R",
-
-    # IK parents
-    "左足IK親": "LegIKParent.L",
-    "右足IK親": "LegIKParent.R",
-
-    # D-bones (double / deformation)
-    "左足D": "Leg_D.L",
-    "右足D": "Leg_D.R",
-    "左ひざD": "Knee_D.L",
-    "右ひざD": "Knee_D.R",
-    "左足首D": "Ankle_D.L",
-    "右足首D": "Ankle_D.R",
-    "左足先EX": "ToeTipEX.L",
-    "右足先EX": "ToeTipEX.R",
-    "左ひざD1": "Knee_D1.L",
-    "右ひざD1": "Knee_D1.R",
-    "左ひざD2": "Knee_D2.L",
-    "右ひざD2": "Knee_D2.R",
-    "左ひざDIK": "Knee_D_IK.L",
-    "右ひざDIK": "Knee_D_IK.R",
-    "左足DS": "Leg_DS.L",
-    "右足DS": "Leg_DS.R",
-    "左足DS先": "Leg_DSTip.L",
-    "右足DS先": "Leg_DSTip.R",
-
-    # Shoulder sub-bones
-    "左肩P": "ShoulderP.L",
-    "右肩P": "ShoulderP.R",
-    "左肩C": "ShoulderC.L",
-    "右肩C": "ShoulderC.R",
-
-    # Hair
-    "前髪1": "Bangs1",
-    "前髪2": "Bangs2",
-    "前髪3": "Bangs3",
-    "左前髪": "SideBangs.L",
-    "右前髪": "SideBangs.R",
-    "左前髪1": "SideBangs1.L",
-    "右前髪1": "SideBangs1.R",
-    "左横": "SideHair.L",
-    "右横": "SideHair.R",
-    "後髪1": "BackHair1",
-    "後髪2": "BackHair2",
-    "後髪3": "BackHair3",
-
-    # Accessories
-    "ﾈｸﾀｲ1": "Necktie1",
-    "ﾈｸﾀｲ2": "Necktie2",
-    "ﾈｸﾀｲ3": "Necktie3",
-    "ﾈｸﾀｲ4": "Necktie4",
-
-    # Ribbon / accessories
-    "左リボン": "Ribbon.L",
-    "右リボン": "Ribbon.R",
-    "左ダミー": "Dummy.L",
-    "右ダミー": "Dummy.R",
-    "左r": "HairR.L",
-    "左r先": "HairRTip.L",
-    "右r": "HairR.R",
-    "右r先": "HairRTip.R",
-
-    # Skirt (fullwidth katakana — PMX style)
-    "左スカート前": "SkirtFront.L",
-    "右スカート前": "SkirtFront.R",
-    "左スカート後": "SkirtBack.L",
-    "右スカート後": "SkirtBack.R",
-
-    # Skirt (halfwidth katakana — PMD style, e.g. Lat式ミク)
-    "左ｽｶｰﾄ前": "SkirtFront.L",
-    "右ｽｶｰﾄ前": "SkirtFront.R",
-    "左ｽｶｰﾄ後": "SkirtBack.L",
-    "右ｽｶｰﾄ後": "SkirtBack.R",
-
-    # Glasses / accessories
-    "眼鏡": "Glasses",
-
-    # Twist sub-bones
-    "左腕捩1": "ArmTwist1.L",
-    "左腕捩2": "ArmTwist2.L",
-    "左腕捩3": "ArmTwist3.L",
-    "右腕捩1": "ArmTwist1.R",
-    "右腕捩2": "ArmTwist2.R",
-    "右腕捩3": "ArmTwist3.R",
-    "左手捩1": "HandTwist1.L",
-    "左手捩2": "HandTwist2.L",
-    "左手捩3": "HandTwist3.L",
-    "右手捩1": "HandTwist1.R",
-    "右手捩2": "HandTwist2.R",
-    "右手捩3": "HandTwist3.R",
-
-    # Waist cancel
-    "腰キャンセル左": "WaistCancel.L",
-    "腰キャンセル右": "WaistCancel.R",
-
-    # Face / mouth
-    "舌0": "Tongue0",
-    "舌1": "Tongue1",
-    "舌2": "Tongue2",
-    "舌3": "Tongue3",
-    "上歯": "UpperTeeth",
-    "下歯": "LowerTeeth",
-
-    # Tip bones (先 = tip/end)
-    "頭先": "HeadTip",
-    "右目先": "EyeTip.R",
-    "左目先": "EyeTip.L",
-    "両目先": "EyesTip",
-    "左手先": "WristTip.L",
-    "右手先": "WristTip.R",
-    "左親指２先": "Thumb2Tip.L",
-    "右親指２先": "Thumb2Tip.R",
-    "左人指３先": "IndexFinger3Tip.L",
-    "右人指３先": "IndexFinger3Tip.R",
-    "左人差指３先": "IndexFinger3Tip.L",
-    "右人差指３先": "IndexFinger3Tip.R",
-    "左中指３先": "MiddleFinger3Tip.L",
-    "右中指３先": "MiddleFinger3Tip.R",
-    "左薬指３先": "RingFinger3Tip.L",
-    "右薬指３先": "RingFinger3Tip.R",
-    "左小指３先": "LittleFinger3Tip.L",
-    "右小指３先": "LittleFinger3Tip.R",
-    "下半身先": "LowerBodyTip",
-    "左つま先ＩＫ先": "ToeIKTip.L",
-    "右つま先ＩＫ先": "ToeIKTip.R",
-    "左足ＩＫ先": "LegIKTip.L",
-    "右足ＩＫ先": "LegIKTip.R",
-    "センター先": "CenterTip",
-
-    # Additional common bones (from mining 3,912 files)
-    "左胸": "Chest.L",
-    "右胸": "Chest.R",
-    "左胸先": "ChestTip.L",
-    "右胸先": "ChestTip.R",
-    "おっぱい": "Breast",
-    "ネクタイ1": "Necktie1",
-    "ネクタイ2": "Necktie2",
-    "ネクタイ3": "Necktie3",
-    "ネクタイ4": "Necktie4",
-    "左袖": "Sleeve.L",
-    "右袖": "Sleeve.R",
-    "左袖先": "SleeveTip.L",
-    "右袖先": "SleeveTip.R",
-    "左スカート": "Skirt.L",
-    "右スカート": "Skirt.R",
-    "しっぽ1": "Tail1",
-    "しっぽ2": "Tail2",
-    "しっぽ3": "Tail3",
-    "しっぽ先": "TailTip",
-    "左もみあげ": "Sideburn.L",
-    "右もみあげ": "Sideburn.R",
-    "左おさげ": "Braid.L",
-    "右おさげ": "Braid.R",
-    "左ツインテ": "Twintail.L",
-    "右ツインテ": "Twintail.R",
-    "左耳": "Ear.L",
-    "右耳": "Ear.R",
-
-    # Kanji-form bones (not reachable via chunks)
-    "顎": "Jaw",
-    "背中": "Back",
-}
-# fmt: on
+BONE_NAMES: dict[str, str] = {}
 
 
 # fmt: off
 MORPH_NAMES: dict[str, str] = {
-    # --- Eyebrows ---
-    "真面目": "Serious",
-    "困る": "Troubled",
-    "にこり": "Cheerful",
-    "怒り": "Angry",
-    "上": "BrowUp",
-    "下": "BrowDown",
-    "前": "BrowForward",
-    "平行": "BrowFlat",
-    "左上": "BrowUp.L",
-    "右上": "BrowUp.R",
-    "左下": "BrowDown.L",
-    "右下": "BrowDown.R",
-    "眉頭": "BrowInner",
-    "左眉頭": "BrowInner.L",
-    "右眉頭": "BrowInner.R",
-    "眉粗": "BrowCoarse",
-    "左怒り": "Angry.L",
-    "右怒り": "Angry.R",
+    # Only names where chunks produce no result (single hiragana/katakana,
+    # symbols, unique onomatopoeia). Everything else handled by NAME_CHUNKS.
 
-    # --- Eyes (open/close) ---
-    "まばたき": "Blink",
-    "笑い": "Smile",
-    "笑い目": "SmileEyes",
-    "ウィンク": "Wink.L",
-    "ウィンク２": "Wink2.L",
-    "ウィンク右": "Wink.R",
-    "ｳｨﾝｸ２右": "Wink2.R",
-    # b-variants (bottom eyelid)
-    "bまばたき": "BlinkBottom",
-    "b笑い": "SmileBottom",
-    "bウィンク": "WinkBottom.L",
-    "bウィンク２": "Wink2Bottom.L",
-    "bウィンク右": "WinkBottom.R",
-    "bｳｨﾝｸ２右": "Wink2Bottom.R",
+    # Vowels (single hiragana — too short/ambiguous for chunks)
+    "あ": "A", "い": "I", "う": "U", "え": "E", "お": "O", "ん": "N",
+    "あ２": "A2", "あ２": "A2", "あ2": "A2b", "あ３": "A3", "あ４": "A4",
+    "い２": "I2", "い2": "I2b", "い３": "I3", "いB": "Ib",
+    "う２": "U2", "うB": "Ub", "え２": "E2",
+    "いー": "Teeth",  # い + long vowel = teeth-showing expression
+    "わ": "Wa", "へ": "He",
 
-    # --- Eye shape ---
-    "ｷﾘ?1": "SharpEyes",
-    "ｷﾞｭｯ": "SquintTight",
-    "なごみ": "Gentle",
-    "はぅ": "Hau",
-    "びっくり": "Surprised",
-    "じと目": "HalfClosed",
-    "たれ目": "DroopyEyes",
-    "なぬ！": "What!",
+    # Single katakana
+    "ア": "Aa", "オ": "Oo", "ヘ": "MouthHe", "ワ": "MouthWa", "ワE": "WaE",
 
-    # --- Pupil ---
-    "瞳小": "PupilSmall",
-    "瞳縦": "PupilVertical",
-    "近": "EyesClose",
-    "近左": "EyeClose.L",
-    "近右": "EyeClose.R",
-    "離": "EyesFar",
-    "離左": "EyeFar.L",
-    "離右": "EyeFar.R",
-    "短": "EyesShort",
-    "カメラ目": "CameraEyes",
-    "はちゅ目": "HachuEyes",
-    "星目": "StarEyes",
-    "はぁと": "HeartEyes",
-    "恐ろしい子！": "Scary!",
+    # Symbols
+    "ω": "MouthOmega", "ω□": "MouthOmegaSquare",
+    "∧": "MouthLambda", "□": "MouthSquare",
+    "▲": "MouthTriangle", "△": "MouthTriangle2",
 
-    # --- Mouth (vowels) ---
-    "あ": "A",
-    "あ２": "A2",
-    "い": "I",
-    "い２": "I2",
-    "う": "U",
-    "え": "E",
-    "お": "O",
-    "ん": "N",
-
-    # --- Mouth (shapes) ---
-    "▲": "MouthTriangle",
-    "∧": "MouthLambda",
-    "□": "MouthSquare",
-    "ワ": "MouthWa",
-    "ω": "MouthOmega",
-    "ω□": "MouthOmegaSquare",
-    "にやり": "Smirk",
-    "にっこり": "NiceSmile",
-    "ぺろっ": "TongueOut",
-    "口角上げ": "MouthCornersUp",
-    "左口角上げ": "MouthCornerUp.L",
-    "右口角上げ": "MouthCornerUp.R",
-    "口角下げ": "MouthCornersDown",
-    "左口角下げ": "MouthCornerDown.L",
-    "右口角下げ": "MouthCornerDown.R",
-    "口横広げ": "MouthWide",
-    "左口横広げ": "MouthWide.L",
-    "右口横広げ": "MouthWide.R",
-    "もぐもぐ": "Chewing",
-    "左もぐもぐ": "Chewing.L",
-    "右もぐもぐ": "Chewing.R",
-
-    # --- Teeth / tongue ---
-    "歯無し上": "NoUpperTeeth",
-    "歯無し下": "NoLowerTeeth",
-    "舌無し": "NoTongue",
-
-    # --- Tears / blush / effects ---
-    "涙": "Tear",
-    "涙長": "TearLong",
-    "涙上": "TearUp",
-    "涙下": "TearDown",
-    "涙前": "TearForward",
-    "涙近": "TearClose",
-    "照れ": "Blush",
-    "照れ2": "Blush2",
-    "照れ3": "Blush3",
-    "左汗": "Sweat.L",
-    "右汗": "Sweat.R",
-    "汗下": "SweatDown",
-
-    # --- Eyelashes / highlights ---
-    "下睫毛消": "HideLowerLashes",
-    "HL消１": "HideHighlight1",
-
-    # --- Face lines ---
-    "鼻線消し": "HideNoseLine",
-    "鼻線長": "NoseLineLong",
-
-    # --- Symbols / decorations ---
-    "左燈": "Light.L",
-    "右燈": "Light.R",
-    "左！": "Exclaim.L",
-    "右！": "Exclaim.R",
-    "左△△△": "Triangles.L",
-    "右△△△": "Triangles.R",
-
-    # --- Accessories ---
-    "眼鏡": "Glasses",
-    "マイクOFF": "MicOff",
-    "HP消": "HideHP",
-
-    # --- Additional morphs (from mining data) ---
-    "左ウィンク": "Wink.L",
-    "右ウィンク": "Wink.R",
-    "しいたけ": "Shiitake",
-    "白目": "Sclera",
-    "白目左": "Sclera.L",
-    "白目右": "Sclera.R",
-    "口開け": "MouthOpen",
-    "口閉じ": "MouthClose",
-    "舌出し": "TongueOut2",
-    "赤面": "Blush4",
-    "青ざめ": "Pale",
-    "ガーン": "Shocked",
-    "猫目": "CatEyes",
-    "瞳大": "PupilLarge",
-    "あ2": "A2b",
-    "い2": "I2b",
-    "困る2": "Troubled2",
-    "困る3": "Troubled3",
-    "にこり2": "Cheerful2",
-    "怒り2": "Angry2",
-    "丸目": "RoundEyes",
-    "じと目2": "HalfClosed2",
-    "ジト目": "HalfClosed3",
-    "口広": "MouthWideOpen",
-    "口すぼめ": "MouthPucker",
-    "いー": "Teeth",
-    "△": "MouthTriangle2",
-    "口角上": "MouthCornersUp2",
-    "口角下": "MouthCornersDown2",
-    "ウィンク2": "Wink2b.L",
-    "ウィンク右2": "Wink2b.R",
-
-    # --- Halfwidth kana variants (NFKC normalizes to fullwidth) ---
-    "コッチミンナ": "LookHere",
-    "キリッ": "SharpLook",
-    "キリッ２": "SharpLook2",
-
-    # --- Eyes (additional) ---
-    "瞬き": "Blink",
-    "瞬き右": "Blink.R",
-    "瞬き左": "Blink.L",
-    "笑右": "Smile.R",
-    "笑左": "Smile.L",
-    "笑": "Laugh",
-    "怒": "Anger",
-    "ウィンク２右": "Wink2.R",
-    "なんで": "Why",
-    "いやだ": "NoWay",
-    "がーん": "GaanShock",
-    "悲しい": "Sad",
-    "悲しい目": "SadEyes",
-    "困惑": "Puzzled",
-    "凸目": "BulgingEyes",
-    "デヘ目": "DazeEyes",
-    "切長": "NarrowEyes",
-    "奥目": "DeepEyes",
-    "花目": "FlowerEyes",
-    "ねこ目": "CatEyes2",
-    "内寄せ": "CrossEyed",
-    "内開き": "InnerOpen",
-    "外開き": "OuterOpen",
-    "目縮小": "EyeShrink",
-    "瞳縦潰れ": "PupilVertCrush",
-    "はちゅ目縦潰れ": "HachuVertCrush",
-    "はちゅ目横潰れ": "HachuHorizCrush",
-    "はちゅ目２": "HachuEyes2",
-    "キッ": "Kii",
-    "にやり２": "Smirk2",
-    "縦長": "TallEyes",
-
-    # --- Mouth (additional) ---
-    "ア": "Aa",
-    "オ": "Oo",
-    "わ": "Wa",
-    "へ": "He",
-    "に～": "Ni",
-    "に～右": "Ni.R",
-    "に～左": "Ni.L",
-    "三角": "Triangle",
-    "口上げ": "MouthRaise",
-    "口横縮小": "MouthNarrow",
-    "ワE": "WaE",
-    "太": "Thick",
-
-    # --- Mouth (numbered variants) ---
-    "あ２": "A2",
-    "あ３": "A3",
-    "あ４": "A4",
-    "い３": "I3",
-    "いB": "Ib",
-    "う２": "U2",
-    "うB": "Ub",
-    "え２": "E2",
-    "ぺろっE": "TongueOutE",
-    "ぺろっ２": "TongueOut2",
-
-    # --- Eyebrow variants ---
-    "真面目左": "Serious.L",
-    "真面目右": "Serious.R",
-    "困る左": "Troubled.L",
-    "困る右": "Troubled.R",
-    "にこり左": "Cheerful.L",
-    "にこり右": "Cheerful.R",
-    "怒り左": "Angry.L",
-    "怒り右": "Angry.R",
-
-    # --- Teeth / fang ---
-    "歯隠し": "HideTeeth",
-    "前歯大": "BigFrontTeeth",
-    "牙": "Fang",
-
-    # --- Blush / color effects ---
-    "照れ消": "BlushOff",
-    "青褪め": "Pale2",
-    "青ざめる": "Pale3",
-    "ハイライト消し": "HideHighlight",
-    "ハイライト下": "HighlightDown",
-    "HL消": "HideHL",
-    "暗さ": "Darkness",
-    "エッジ": "EdgeMorph",
-    "髮影消": "HairShadowOff",
-
-    # --- Material/display morphs ---
-    "輪郭線が消えて": "OutlineOff",
-    "消えて": "Disappear",
-    "全黒モード": "AllBlackMode",
-    "全灰モード": "AllGrayMode",
-    "全白モード": "AllWhiteMode",
-    "spa消える": "SphereOff",
-    "spa消": "SphereOff2",
-    "toon白くなる": "ToonWhiten",
-    "toon深まる": "ToonDeepen",
-    "鼻筋": "NoseBridge",
-    "動く": "Move",
-
-    # --- Hand morphs ---
-    "左手グー": "FistL",
-    "右手グー": "FistR",
-    "左手グー２": "Fist2L",
-    "右手グー２": "Fist2R",
-    "左指を広げて": "SpreadFingersL",
-    "右指を広げて": "SpreadFingersR",
-
-    # --- Jaw ---
-    "顎開10": "JawOpen10",
-    "顎開10デフォ": "JawOpen10Default",
-    "下顎出し": "JawOut",
-
-    # --- Idiomatic names (not decomposable into chunks) ---
-    "切ない": "Bittersweet",
-    "もっと困る": "MoreTroubled",
-    "粗": "Coarse",
-    "ヘ": "MouthHe",
-    "ぷぅ": "Puu",
+    # Unique onomatopoeia / expressions (no chunk decomposition possible)
+    "がーん": "GaanShock", "ガーン": "Shocked",
+    "しいたけ": "Shiitake", "なごみ": "Gentle", "なぬ！": "What!",
+    "に～": "Ni", "はぁと": "HeartEyes", "ぷぅ": "Puu",
     "へへへ": "Hehehe",
-    "フルート": "Flute",
+    "キッ": "Kii", "キリッ": "SharpLook", "キリッ２": "SharpLook2",
+    "コッチミンナ": "LookHere",
+    "toon深まる": "ToonDeepen",
+
+    # Halfwidth kana edge cases (no NFKC equivalent in chunks)
+    "ｷﾘ?1": "SharpEyes", "ｷﾞｭｯ": "SquintTight",
 }
 # fmt: on
 
 
 # fmt: off
 MATERIAL_NAMES: dict[str, str] = {
-    "顔": "Face",
-    "目": "Eye",
-    "髪": "Hair",
-    "体": "Body",
-    "肌": "Skin",
-    "白目": "Sclera",
-    "舌": "Tongue",
-    "歯": "Teeth",
-    "口内": "Mouth",
-    "瞳": "Pupil",
-    "爪": "Nail",
-    "パンツ": "Panties",
-    "スカート": "Skirt",
-    "ハイライト": "Highlight",
-    "まつ毛": "Eyelash",
-    "照れ": "Blush",
-    "前髪": "Bangs",
-    "涙": "Tears",
-    "赤面": "Blush2",
-    "表情": "Facial",
-    "鼻線": "NoseLine",
-    "身体": "Body2",
-    "メガネ": "Glasses",
-    "腕": "Arm",
-    "レンズ": "Lens",
-    "眉・まぶた": "BrowLash",
-    "眉": "Brow",
-    "しっぽ": "Tail",
-    "猫耳": "CatEar",
-    "ねこみみ": "CatEar2",
-    "靴": "Shoes",
-    "服": "Clothes",
-    "リボン": "Ribbon",
-    "ベルト": "Belt",
-    "手袋": "Gloves",
-    "帽子": "Hat",
-    "胸": "Chest",
-    "下着": "Underwear",
-    "ネクタイ": "Necktie",
-    "袖": "Sleeve",
-    "裾": "Hem",
-    "ボタン": "Button",
-    "アクセサリ": "Accessory",
-    "アクセサリー": "Accessory2",
-    "ヘッドホン": "Headphone",
-    "イヤリング": "Earring",
-    "フリル": "Frill",
-    "スパッツ": "Spats",
-    "ブーツ": "Boots",
-    "ヘッドセット": "Headset",
-    "アームカバー": "ArmCover",
-    "黒目": "Iris",
-    "青ざめ": "Pale",
-    "腹黒": "DarkBelly",
-    "髪飾り": "HairOrnament",
-
-    # Clothing / accessories
-    "シャツ": "Shirt",
-    "レース": "Lace",
-    "ヘアピン": "Hairpin",
-    "指輪": "Ring",
-    "ハート": "Heart",
-    "きらきら目": "SparkleEyes",
-    "きらきら": "Sparkle",
-    "ショーツ": "Shorts",
-    "ビキニ": "Bikini",
-    "マフラー": "Muffler",
-    "スカーフ": "Scarf",
-    "ぱんつ": "Panties2",
-    "ツメ": "Nail2",
-    "リンリボン": "RinRibbon",
-
-    # Face / effect
-    "髮影": "HairShadow",
-    "髮": "Hair2",
-    "口腔": "MouthCavity",
-    "青ざめる": "Pale",
-    "砲身": "GunBarrel",
-    "頬タッチ": "CheekTouch",
-    "紺": "NavyBlue",
-    "目影": "EyeShadow",
-
-    # Simplified Chinese (chunk-based — most compounds auto-resolve)
-    "眼睛": "Eye",
-    "眼白": "Sclera",
-    "头发": "Hair",
-    "脸": "Face",
-    "皮肤": "Skin",
-    "镜片": "Lens",
-    "牙齿": "Teeth",
-    "舌头": "Tongue",
-    "胖次": "Panties",
-    "本体": "Main",
-    "新建": "New",
+    # Only compound words where chunk decomposition gives misleading results.
+    # Everything else is handled by NAME_CHUNKS.
+    "黒目": "Iris",          # chunks: BlackEye
+    "帽子": "Hat",           # chunks: 帽Child
+    "手袋": "Gloves",        # chunks: Hand袋
+    "下着": "Underwear",     # chunks: Lower着
+    "本体": "Main",          # chunks: 本Body
+    "眼白": "Sclera",        # Chinese: chunks: 眼White
 }
 # fmt: on
 
@@ -718,10 +113,12 @@ NAME_CHUNKS: dict[str, str] = {
     "腰": "Waist",
     "つま先": "Toe",
 
-    # Accessories
+    # Accessories / clothing
     "リボン": "Ribbon",
     "ツインテ": "Twintail",
     "ネクタイ": "Necktie",
+    "チェーン": "Chain",
+    "タイ": "Tie",
     "メガネ": "Glasses",
     "ヘッドホン": "Headphone",
     "パーカー": "Hoodie",
@@ -730,6 +127,36 @@ NAME_CHUNKS: dict[str, str] = {
     "しっぽ": "Tail",
     "おっぱい": "Breast",
     "スカ": "Skirt",  # common abbreviation of スカート
+    "パンツ": "Panties",
+    "ぱんつ": "Panties",
+    "ボタン": "Button",
+    "フリル": "Frill",
+    "レンズ": "Lens",
+    "イヤリング": "Earring",
+    "アクセサリー": "Accessory",
+    "アクセサリ": "Accessory",
+    "きらきら": "Sparkle",
+    "ツメ": "Nail",    # katakana form
+    "まつ毛": "Eyelash",  # alternate of まつげ
+    "タッチ": "Touch",
+    "猫": "Cat",
+    "ねこ": "Cat",
+    "みみ": "Ear",     # hiragana form
+    "表情": "Facial",
+    "眉": "Brow",      # kanji form (also have まゆ)
+    "まぶた": "Eyelid",
+    "青ざめ": "Pale",
+    "青ざめる": "Pale",
+    "腔": "Cavity",
+    "新建": "New",      # Chinese
+    "着": "Wear",
+    "水玉": "Polkadot",
+    "襟": "Collar",
+    "カフス": "Cuffs",
+    "ブローチ": "Brooch",
+    "底": "Bottom",
+    "穴": "Hole",
+    "背": "Back",
 
     # Physics/structural
     "錘": "Weight",
@@ -796,7 +223,24 @@ NAME_CHUNKS: dict[str, str] = {
     "隠し": "Hide",
     "出し": "Out",
 
-    # Expression / emotion chunks
+    # Expression / emotion chunks (shared by morphs and bones)
+    "まばたき": "Blink",
+    "笑い": "Smile",
+    "怒り": "Angry",
+    "困る": "Troubled",
+    "にこり": "Cheerful",
+    "にっこり": "NiceSmile",
+    "にやり": "Smirk",
+    "ウィンク": "Wink",
+    "びっくり": "Surprised",
+    "ぺろっ": "TongueOut",
+    "もぐもぐ": "Chewing",
+    "切ない": "Bittersweet",
+    "真面目": "Serious",
+    "困惑": "Puzzled",
+    "平行": "Flat",
+    "暗さ": "Darkness",
+    "動く": "Move",
     "赤面": "Blush",
     "睫毛": "Lash",
     "端": "Edge",
@@ -809,12 +253,31 @@ NAME_CHUNKS: dict[str, str] = {
     "星": "Star",
     "花": "Flower",
     "もっと": "More",
+    "笑": "Smile",
+    "怒": "Angry",
+    "粗": "Coarse",
+    "無し": "No",
+    "大": "Big",
+    "小": "Small",
+    "近": "Close",
+    "離": "Far",
+    "筋": "Bridge",
+    "灰": "Gray",
+    "すぼめ": "Pucker",
+    "開け": "Open",
+    "カメラ": "Camera",
+    "三角": "Triangle",
+    "眼鏡": "Glasses",
+    "あご": "Jaw",
+    "中心": "Center",
+    "鏡": "Mirror",
 
     # Material / misc
     "フルート": "Flute",
     "砲身": "GunBarrel",
     "艤装": "Rigging",
     "紺": "NavyBlue",
+    "水着": "Swimsuit",
 
     # Face
     "舌": "Tongue",
@@ -951,7 +414,7 @@ NAME_CHUNKS: dict[str, str] = {
     "縦": "Vertical",
     "モード": "Mode",
 
-    # Simplified Chinese (chunks handle most compound words)
+    # Simplified Chinese
     "眼睛": "Eye",
     "头发": "Hair",
     "脸": "Face",
@@ -961,16 +424,7 @@ NAME_CHUNKS: dict[str, str] = {
     "舌头": "Tongue",
     "胖次": "Panties",
     "奶子": "Breast",
-    "饰": "Ornament",
-    "铁": "Metal",
     "内侧": "Inner",
-    "甲": "Armor",
-    "环": "Ring",
-    "带": "Belt",
-    "领": "Collar",
-
-    # Simplified Chinese characters (for Chinese-origin models)
-    # These decompose compound words like 衣饰铁 → Clothes+Ornament+Metal
     "衣": "Clothes",
     "裙": "Skirt",
     "鞋": "Shoe",
@@ -988,7 +442,6 @@ NAME_CHUNKS: dict[str, str] = {
     "绿": "Green",
     "红": "Red",
     "光": "Light",
-    "内侧": "Inner",
 
     # Suffixes/markers (NFKC will normalize fullwidth variants)
     "IK": "IK",
@@ -1026,13 +479,15 @@ def normalize_lr(name: str) -> str:
 
 
 def translate(name_j: str) -> str | None:
-    """Look up English name for a Japanese bone name. Returns None if not found."""
-    return BONE_NAMES.get(name_j)
+    """Translate a Japanese bone name. Checks table then chunks."""
+    result = BONE_NAMES.get(name_j) or translate_chunks(name_j)
+    return result
 
 
 def translate_morph(name_j: str) -> str | None:
-    """Look up English name for a Japanese morph name. Returns None if not found."""
-    return MORPH_NAMES.get(name_j)
+    """Translate a Japanese morph name. Checks table then chunks."""
+    result = MORPH_NAMES.get(name_j) or translate_chunks(name_j)
+    return result
 
 
 def _looks_english(text: str) -> bool:
