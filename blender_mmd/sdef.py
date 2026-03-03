@@ -448,7 +448,10 @@ def bake_sdef(armature_obj, frame_start: int, frame_end: int) -> dict:
 
     # Phase 4: Write MDD files + apply modifiers
     for mesh_obj, frames in frame_buffers.items():
-        mdd_path = cache / f"{mesh_obj.name}.mdd"
+        # Sanitize mesh name — some models have names like "/armor//belt"
+        # which would override the cache directory when joined as a path.
+        safe_name = mesh_obj.name.replace("/", "_").replace("\\", "_").strip("_")
+        mdd_path = cache / f"{safe_name}.mdd"
         write_mdd(mdd_path, frames)
         log.info("SDEF bake: wrote %s (%d frames, %d verts)",
                  mdd_path, len(frames), frames[0].shape[0])
