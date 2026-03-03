@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 import bpy
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from bpy_extras.io_utils import ImportHelper
 
 from .helpers import find_mmd_armature
@@ -820,7 +820,7 @@ class BLENDER_MMD_OT_build_outlines(bpy.types.Operator):
         if armature_obj.get("mmd_outlines_built"):
             remove_outlines(armature_obj)
 
-        thickness_mult = context.scene.get("mmd_edge_thickness", 1.0)
+        thickness_mult = context.scene.mmd_edge_thickness
 
         try:
             count = build_outlines(armature_obj, thickness_mult)
@@ -855,6 +855,71 @@ class BLENDER_MMD_OT_remove_outlines(bpy.types.Operator):
             log.exception("Outline removal failed")
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
+
+
+class BLENDER_MMD_OT_toggle_mesh_outline(bpy.types.Operator):
+    """Toggle outline on/off for the selected mesh"""
+
+    bl_idname = "blender_mmd.toggle_mesh_outline"
+    bl_label = "Toggle Mesh Outline"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        from .helpers import find_selected_mesh
+        mesh_obj = find_selected_mesh(context)
+        if not mesh_obj:
+            return False
+        mat = mesh_obj.data.materials[0] if mesh_obj.data.materials else None
+        return mat is not None and mat.get("mmd_edge_enabled", False)
+
+    def execute(self, context):
+        from .helpers import find_selected_mesh
+        from .outlines import toggle_mesh_outline
+
+        mesh_obj = find_selected_mesh(context)
+        if mesh_obj is None:
+            self.report({"ERROR"}, "No MMD mesh selected.")
+            return {"CANCELLED"}
+
+        new_state = toggle_mesh_outline(mesh_obj, mesh_obj.parent)
+        state = "enabled" if new_state else "disabled"
+        self.report({"INFO"}, f"Outline {state} on '{mesh_obj.name}'")
+        return {"FINISHED"}
+
+
+class BLENDER_MMD_OT_set_mesh_edge_color(bpy.types.Operator):
+    """Set edge outline color for the selected mesh"""
+
+    bl_idname = "blender_mmd.set_mesh_edge_color"
+    bl_label = "Set Edge Color"
+    bl_options = {"REGISTER", "UNDO"}
+
+    color: FloatVectorProperty(
+        name="Edge Color",
+        subtype="COLOR",
+        size=4,
+        min=0.0,
+        max=1.0,
+        default=(0.0, 0.0, 0.0, 1.0),
+    )
+
+    @classmethod
+    def poll(cls, context):
+        from .helpers import find_selected_mesh
+        return find_selected_mesh(context) is not None
+
+    def execute(self, context):
+        from .helpers import find_selected_mesh
+        from .outlines import set_mesh_edge_color
+
+        mesh_obj = find_selected_mesh(context)
+        if mesh_obj is None:
+            self.report({"ERROR"}, "No MMD mesh selected.")
+            return {"CANCELLED"}
+
+        set_mesh_edge_color(mesh_obj, tuple(self.color))
+        return {"FINISHED"}
 
 
 class BLENDER_MMD_OT_rebuild_ncc(bpy.types.Operator):
@@ -959,6 +1024,98 @@ class BLENDER_MMD_OT_toggle_chain_physics(bpy.types.Operator):
             return {"CANCELLED"}
 
 
+class BLENDER_MMD_OT_select_mesh_rigid_bodies(bpy.types.Operator):
+    """Select rigid bodies related to the active mesh"""
+
+    bl_idname = "blender_mmd.select_mesh_rigid_bodies"
+    bl_label = "Select Mesh Rigid Bodies"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        from .helpers import find_selected_mesh
+        return find_selected_mesh(context) is not None
+
+    def execute(self, context):
+        from .helpers import find_selected_mesh, get_mesh_physics_chains
+
+        mesh_obj = find_selected_mesh(context)
+        if mesh_obj is None:
+            self.report({"ERROR"}, "No MMD mesh selected.")
+            return {"CANCELLED"}
+
+        armature_obj = mesh_obj.parent
+        chains = get_mesh_physics_chains(mesh_obj, armature_obj)
+        if not chains:
+            self.report({"INFO"}, "No physics chains affect this mesh")
+            return {"CANCELLED"}
+
+        # Collect all rigid indices from matching chains
+        rigid_indices = set()
+        for chain in chains:
+            rigid_indices.update(chain.get("rigid_indices", []))
+
+        col_name = armature_obj.get("physics_collection")
+        if not col_name:
+            return {"CANCELLED"}
+        collection = bpy.data.collections.get(col_name)
+        if not collection:
+            return {"CANCELLED"}
+
+        # Unhide physics collection
+        vl_col = context.view_layer.layer_collection.children.get(col_name)
+        if vl_col and vl_col.hide_viewport:
+            vl_col.hide_viewport = False
+
+        bpy.ops.object.select_all(action="DESELECT")
+        rb_col = collection.children.get("Rigid Bodies")
+        count = 0
+        if rb_col:
+            for obj in rb_col.objects:
+                idx = obj.get("mmd_rigid_index")
+                if idx is not None and idx in rigid_indices:
+                    obj.select_set(True)
+                    count += 1
+                    if count == 1:
+                        context.view_layer.objects.active = obj
+
+        self.report({"INFO"}, f"Selected {count} rigid bodies for '{mesh_obj.name}'")
+        return {"FINISHED"}
+
+
+class BLENDER_MMD_OT_delete_mesh(bpy.types.Operator):
+    """Delete the selected mesh child of an MMD armature"""
+
+    bl_idname = "blender_mmd.delete_mesh"
+    bl_label = "Delete Mesh"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        from .helpers import find_selected_mesh
+        return find_selected_mesh(context) is not None
+
+    def execute(self, context):
+        from .helpers import find_selected_mesh
+        mesh_obj = find_selected_mesh(context)
+        if mesh_obj is None:
+            self.report({"ERROR"}, "No MMD mesh selected.")
+            return {"CANCELLED"}
+
+        armature_obj = mesh_obj.parent
+        name = mesh_obj.name
+        vert_count = len(mesh_obj.data.vertices)
+
+        bpy.data.objects.remove(mesh_obj, do_unlink=True)
+
+        # Select the armature
+        context.view_layer.objects.active = armature_obj
+        armature_obj.select_set(True)
+
+        self.report({"INFO"}, f"Deleted '{name}' ({vert_count} vertices)")
+        return {"FINISHED"}
+
+
 class BLENDER_MMD_OT_view_import_report(bpy.types.Operator):
     """Open the MMD Import Report in a text editor area"""
 
@@ -1024,6 +1181,8 @@ _classes = (
     BLENDER_MMD_OT_clear_physics,
     BLENDER_MMD_OT_reset_physics,
     BLENDER_MMD_OT_build_outlines,
+    BLENDER_MMD_OT_toggle_mesh_outline,
+    BLENDER_MMD_OT_set_mesh_edge_color,
     BLENDER_MMD_OT_remove_outlines,
     BLENDER_MMD_OT_rebuild_ncc,
     BLENDER_MMD_OT_select_chain,
@@ -1040,6 +1199,8 @@ _classes = (
     BLENDER_MMD_OT_bake_sdef,
     BLENDER_MMD_OT_clear_sdef_bake,
     BLENDER_MMD_OT_toggle_sdef,
+    BLENDER_MMD_OT_select_mesh_rigid_bodies,
+    BLENDER_MMD_OT_delete_mesh,
     BLENDER_MMD_OT_view_import_report,
 )
 

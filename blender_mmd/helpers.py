@@ -166,6 +166,79 @@ def get_physics_objects() -> dict:
     return {"rigid_bodies": rigid_bodies, "joints": joints}
 
 
+def find_selected_mesh(context) -> bpy.types.Object | None:
+    """Return active object if it's a mesh child of an MMD armature."""
+    obj = context.active_object
+    if obj and obj.type == "MESH" and obj.parent and is_mmd_armature(obj.parent):
+        return obj
+    return None
+
+
+def get_mesh_sdef_count(mesh_obj) -> int:
+    """Count vertices in the mmd_sdef vertex group."""
+    vg = mesh_obj.vertex_groups.get("mmd_sdef")
+    if not vg:
+        return 0
+    count = 0
+    vg_idx = vg.index
+    for v in mesh_obj.data.vertices:
+        for g in v.groups:
+            if g.group == vg_idx and g.weight > 0:
+                count += 1
+                break
+    return count
+
+
+def get_mesh_physics_chains(mesh_obj, armature_obj) -> list[dict]:
+    """Return physics chains that affect bones weighted on this mesh.
+
+    A chain affects a mesh if any of its rigid bodies are attached to
+    bones that have non-empty vertex groups on the mesh.
+    """
+    import json
+
+    chains_json = armature_obj.get("mmd_physics_chains")
+    phys_json = armature_obj.get("mmd_physics_data")
+    if not chains_json or not phys_json:
+        return []
+
+    # Build set of bone names that have vertex groups on this mesh
+    mesh_bone_names = set()
+    arm_data = armature_obj.data
+    for vg in mesh_obj.vertex_groups:
+        if arm_data.bones.get(vg.name):
+            mesh_bone_names.add(vg.name)
+
+    if not mesh_bone_names:
+        return []
+
+    # Build bone_index → bone_name map from armature
+    bone_idx_to_name = {}
+    for bone in arm_data.bones:
+        idx = bone.get("bone_id")
+        if idx is not None:
+            bone_idx_to_name[idx] = bone.name
+
+    # Build rigid_index → bone_index map from physics data
+    phys_data = json.loads(phys_json)
+    rigid_to_bone_idx = {}
+    for i, rb in enumerate(phys_data.get("rigid_bodies", [])):
+        rigid_to_bone_idx[i] = rb.get("bone_index", -1)
+
+    # Check each chain
+    chains = json.loads(chains_json)
+    matching = []
+    for chain in chains:
+        for ri in chain.get("rigid_indices", []):
+            bone_idx = rigid_to_bone_idx.get(ri, -1)
+            bone_name = bone_idx_to_name.get(bone_idx)
+            if bone_name and bone_name in mesh_bone_names:
+                matching.append(chain)
+                break
+
+    return matching
+
+
 def select_bones_by_name(names: list[str]) -> int:
     """Select pose bones by name. Returns count of bones selected."""
     obj = bpy.context.active_object

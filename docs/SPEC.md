@@ -613,6 +613,10 @@ blender_mmd.toggle_ik                  # Toggle IK for one chain (target_bone)
 blender_mmd.toggle_all_ik              # Enable/disable all IK (enable: bool)
 blender_mmd.build_outlines             # Build edge outlines (Solidify + Emission)
 blender_mmd.remove_outlines            # Remove edge outlines
+blender_mmd.toggle_mesh_outline        # Toggle outline on/off for selected mesh
+blender_mmd.set_mesh_edge_color        # Set edge color for selected mesh (color: RGBA)
+blender_mmd.select_mesh_rigid_bodies   # Select rigid bodies related to selected mesh
+blender_mmd.delete_mesh                # Delete selected mesh child, select armature
 ```
 
 ### VMD binary format
@@ -738,9 +742,15 @@ Rigid body creation, GENERIC_SPRING joints with spring values, collision layers 
 
 **N-panel**: Tab "MMD4B" in 3D Viewport sidebar. Visible when active object is an MMD armature (or child mesh).
 
-**Layout** (parent panel shows model name + report button, sub-panels below):
+**Layout** (parent panel shows model name + report button, all sub-panels collapsed by default):
 
 **Header:** Model name with text icon button (visible when "MMD Import Report" text exists). Clicking opens the report in a Text Editor area — shows untranslated names from PMX import and unmatched names from VMD import.
+
+**Mesh sub-panel** (visible only when a mesh child is selected):
+- **Info:** Mesh name, vertex count, material count
+- **Outlines** (only if material has `mmd_edge_enabled`): Toggle button (eye icon) to enable/disable outline on this mesh. When active: edge color button (updates Emission node + viewport display instantly), per-mesh thickness multiplier slider (`mmd_edge_thickness_mult` registered FloatProperty with `update` callback for instant reactivity). Thickness formula: `edge_size × import_scale × 0.05 × global_mult × per_mesh_mult`.
+- **Physics** (only if physics built and chains affect this mesh): Shows chain count and rigid body count with a select button that highlights the related rigid bodies. Lists each chain by name, group, and body count. Chain management stays in the Physics sub-panel.
+- **Delete Mesh** button: Removes the selected mesh object and selects the armature.
 
 **Animation sub-panel:**
 - Shows current action name when animation is loaded
@@ -770,13 +780,14 @@ Rigid body creation, GENERIC_SPRING joints with spring values, collision layers 
 - Chains discovered by scanning pose bones for IK constraints
 
 **Outlines sub-panel** (collapsed by default):
-- **No outlines state:** Thickness multiplier slider (default 1.0, range 0.1–5.0) + "Build Outlines" button
-- **Outlines active:** Shows count of meshes with outlines, thickness slider, "Rebuild" button (remove + build with new thickness), "Remove" button
+- **No outlines state:** Global thickness multiplier slider (default 1.0, range 0.1–5.0) + "Build Outlines" button
+- **Outlines active:** Shows count of meshes with outlines, global thickness slider, "Rebuild" button (remove + build with new thickness), "Remove" button
 - Uses Solidify modifier (`mmd_edge`) per mesh child with `use_flip_normals=True`, `offset=1` (outward), `material_offset=1` (edge material in slot 1)
 - Edge material: Emission BSDF (unlit, lighting-independent) with PMX edge color. Alpha < 1.0 uses Mix Shader (Emission + Transparent) with BLENDED surface render method
 - Per-vertex thickness modulation via `mmd_edge_scale` vertex group (populated during mesh import from PMX `edge_scale` data)
 - Only builds on meshes where material has `mmd_edge_enabled=True` (eyes, face details, etc. skipped)
-- Thickness formula: `edge_size × import_scale × 0.05 × thickness_mult`
+- **Per-mesh controls** in Mesh sub-panel: toggle outline on/off per mesh, edit edge color, per-mesh thickness multiplier (`mmd_edge_thickness_mult`, default 1.0, reactive via `update` callback)
+- Thickness formula: `edge_size × import_scale × 0.05 × global_mult × per_mesh_mult`
 
 **Workflow:** Import PMX → click "Build Rigid Bodies" in MMD4B panel → optionally import VMD (physics auto-resets) → play animation. Use "Reset" after changing pose to reposition rigid bodies without full rebuild. Use "Clear Animation" to strip all keyframes and reload a different VMD. Use per-chain X buttons to remove physics from specific parts (e.g. remove skirt physics to replace with cloth sim). Use IK Toggle to disable IK chains for non-standard poses. Select a rigid body and use Inspect/Colliders/Contacts for debugging collision issues.
 

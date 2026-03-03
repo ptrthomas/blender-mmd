@@ -7,7 +7,12 @@ import json
 import bpy
 from bpy.props import EnumProperty, FloatProperty
 
-from .helpers import find_mmd_armature
+from .helpers import (
+    find_mmd_armature,
+    find_selected_mesh,
+    get_mesh_physics_chains,
+    get_mesh_sdef_count,
+)
 
 
 def _get_ik_chains(armature_obj) -> list[tuple[str, str, bool]]:
@@ -33,6 +38,99 @@ def _get_physics_chains(armature_obj) -> list[dict]:
     return json.loads(chains_json)
 
 
+class BLENDER_MMD_PT_mesh(bpy.types.Panel):
+    """MMD4B — selected mesh info and operations."""
+
+    bl_label = "Mesh"
+    bl_idname = "BLENDER_MMD_PT_mesh"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "MMD4B"
+    bl_parent_id = "BLENDER_MMD_PT_main"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    @classmethod
+    def poll(cls, context):
+        return find_selected_mesh(context) is not None
+
+    def draw(self, context):
+        layout = self.layout
+        mesh_obj = find_selected_mesh(context)
+        armature_obj = mesh_obj.parent
+
+        # --- Info ---
+        layout.label(text=mesh_obj.name, icon="MESH_DATA")
+        layout.label(
+            text=f"{len(mesh_obj.data.vertices):,} vertices | "
+            f"{len(mesh_obj.data.materials)} materials"
+        )
+
+        # --- Outlines ---
+        mat = mesh_obj.data.materials[0] if mesh_obj.data.materials else None
+        if mat and mat.get("mmd_edge_enabled", False):
+            layout.separator()
+            solidify = mesh_obj.modifiers.get("mmd_edge")
+            has_outline = solidify is not None
+
+            # Toggle + label
+            row = layout.row(align=True)
+            row.operator(
+                "blender_mmd.toggle_mesh_outline",
+                text="",
+                icon="HIDE_OFF" if has_outline else "HIDE_ON",
+                depress=has_outline,
+            )
+            row.label(
+                text=f"Outline: {abs(solidify.thickness):.4f}" if has_outline else "Outline: OFF",
+                icon="MOD_SOLIDIFY",
+            )
+
+            if has_outline:
+                # Edge color swatch
+                edge_color = mat.get("mmd_edge_color", [0.0, 0.0, 0.0, 1.0])
+                op = layout.operator(
+                    "blender_mmd.set_mesh_edge_color",
+                    text=f"Edge Color",
+                    icon="COLOR",
+                )
+                op.color = edge_color
+
+                # Per-mesh thickness multiplier (auto-applies via update callback)
+                row = layout.row(align=True)
+                row.prop(mesh_obj, "mmd_edge_thickness_mult", text="Thickness")
+
+        # --- Physics chains ---
+        if armature_obj.get("physics_collection"):
+            chains = get_mesh_physics_chains(mesh_obj, armature_obj)
+            if chains:
+                layout.separator()
+                rb_count = sum(len(c.get("rigid_indices", [])) for c in chains)
+                row = layout.row(align=True)
+                row.label(
+                    text=f"Physics: {len(chains)} chains, {rb_count} bodies",
+                    icon="PHYSICS",
+                )
+                row.operator(
+                    "blender_mmd.select_mesh_rigid_bodies",
+                    text="",
+                    icon="RESTRICT_SELECT_OFF",
+                )
+                col = layout.column(align=True)
+                for chain in chains:
+                    name = chain.get("name", "?")
+                    group = chain.get("group", "?")
+                    n = len(chain.get("rigid_indices", []))
+                    col.label(text=f"  {name} ({group}, {n})")
+
+        # --- Delete ---
+        layout.separator()
+        layout.operator(
+            "blender_mmd.delete_mesh",
+            text="Delete Mesh",
+            icon="TRASH",
+        )
+
+
 class BLENDER_MMD_PT_physics(bpy.types.Panel):
     """MMD4B — rigid body physics controls."""
 
@@ -42,6 +140,7 @@ class BLENDER_MMD_PT_physics(bpy.types.Panel):
     bl_region_type = "UI"
     bl_category = "MMD4B"
     bl_parent_id = "BLENDER_MMD_PT_main"
+    bl_options = {"DEFAULT_CLOSED"}
 
     @classmethod
     def poll(cls, context):
@@ -254,6 +353,7 @@ class BLENDER_MMD_PT_animation(bpy.types.Panel):
     bl_region_type = "UI"
     bl_category = "MMD4B"
     bl_parent_id = "BLENDER_MMD_PT_main"
+    bl_options = {"DEFAULT_CLOSED"}
 
     @classmethod
     def poll(cls, context):
@@ -357,20 +457,27 @@ class BLENDER_MMD_PT_sdef(bpy.types.Panel):
         layout = self.layout
         armature_obj = find_mmd_armature(context)
 
-        sdef_count = armature_obj.get("mmd_sdef_count", 0)
         is_baked = armature_obj.get("mmd_sdef_baked", False)
         is_enabled = armature_obj.get("mmd_sdef_enabled", True)
 
-        # Count SDEF meshes
-        sdef_mesh_count = 0
-        for child in armature_obj.children:
-            if child.type == "MESH" and child.vertex_groups.get("mmd_sdef"):
-                sdef_mesh_count += 1
-
-        layout.label(
-            text=f"{sdef_count} SDEF vertices across {sdef_mesh_count} meshes",
-            icon="MESH_ICOSPHERE",
-        )
+        # Per-mesh info when an SDEF mesh is selected, model-wide otherwise
+        sel_mesh = find_selected_mesh(context)
+        if sel_mesh and sel_mesh.vertex_groups.get("mmd_sdef"):
+            mesh_count = get_mesh_sdef_count(sel_mesh)
+            layout.label(
+                text=f"{mesh_count:,} SDEF vertices on this mesh",
+                icon="MESH_ICOSPHERE",
+            )
+        else:
+            sdef_count = armature_obj.get("mmd_sdef_count", 0)
+            sdef_mesh_count = sum(
+                1 for child in armature_obj.children
+                if child.type == "MESH" and child.vertex_groups.get("mmd_sdef")
+            )
+            layout.label(
+                text=f"{sdef_count:,} SDEF vertices across {sdef_mesh_count} meshes",
+                icon="MESH_ICOSPHERE",
+            )
 
         if is_baked:
             fs = armature_obj.get("mmd_sdef_frame_start", "?")
@@ -445,6 +552,7 @@ class BLENDER_MMD_PT_main(bpy.types.Panel):
 
 _classes = (
     BLENDER_MMD_PT_main,
+    BLENDER_MMD_PT_mesh,
     BLENDER_MMD_PT_outlines,
     BLENDER_MMD_PT_sdef,
     BLENDER_MMD_PT_animation,
