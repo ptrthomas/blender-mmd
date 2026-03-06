@@ -68,6 +68,19 @@ PYEOF
 # The curl response is JSON, NOT an image. Never pipe/save it as a PNG.
 ```
 
+## Debugging & performance profiling
+
+blender-agent captures all stdout/stderr from executed code in `../blender-agent/output/agent.log`. This includes Python `logging` output (INFO/DEBUG/WARNING from the `blender_mmd` logger) and `print()` statements. When debugging performance or tracing issues:
+
+1. Add `print()` or `log.info()` timing statements in the addon code
+2. Restart Blender (module reloading is unreliable)
+3. Run the operation via blender-agent
+4. Read `../blender-agent/output/agent.log` with the Read tool or `grep` for the timing lines
+
+**Example**: The `clear_physics` 36s bottleneck was found by adding `time.perf_counter()` prints between each step, then reading `agent.log` — revealed that `pb.constraints.remove()` triggered full physics re-solve per call because RBW was still enabled. Fix: disable RBW first → 0.5s.
+
+**Key insight**: `log.info()` output may not appear in the curl JSON response (it goes to stderr), but it **always** appears in `agent.log`. When curl output is missing expected logs, check `agent.log`.
+
 ## Cross-project contributions
 
 When working on blender-mmd and encountering opportunities to improve blender-agent (e.g. Blender 5.0 API hints, common 3D workflow helpers, better error messages), note them and contribute upstream to `../blender-agent/`.

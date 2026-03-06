@@ -142,7 +142,7 @@ class BLENDER_MMD_OT_import_vmd(bpy.types.Operator, ImportHelper):
 
 
 class BLENDER_MMD_OT_build_physics(bpy.types.Operator):
-    """Build physics for an MMD model"""
+    """Build physics for an MMD model (modal with progress)"""
 
     bl_idname = "blender_mmd.build_physics"
     bl_label = "Build MMD Physics"
@@ -178,10 +178,77 @@ class BLENDER_MMD_OT_build_physics(bpy.types.Operator):
         step=10,  # 0.1 increments in Blender UI
     )
 
-    def execute(self, context):
-        from pathlib import Path
+    _timer = None
+    _generator = None
+    _armature_name: str = ""
+    _model = None
 
-        from .physics import build_physics
+    def modal(self, context, event):
+        if event.type == "ESC":
+            self._cleanup(context, cancelled=True)
+            self.report({"WARNING"}, "Physics build cancelled")
+            return {"CANCELLED"}
+
+        if event.type == "TIMER":
+            try:
+                progress, message = next(self._generator)
+                # Update status bar and store progress on armature for panel display
+                context.workspace.status_text_set(f"Building physics... {progress:.0%} — {message}")
+                armature_obj = bpy.data.objects.get(self._armature_name)
+                if armature_obj:
+                    armature_obj["mmd_build_progress"] = progress
+                    armature_obj["mmd_build_message"] = message
+                # Force panel redraw
+                for area in context.screen.areas:
+                    if area.type == "VIEW_3D":
+                        area.tag_redraw()
+            except StopIteration:
+                self._cleanup(context)
+                armature_obj = bpy.data.objects.get(self._armature_name)
+                if armature_obj:
+                    n_rb = len(self._model.rigid_bodies) if self._model else 0
+                    n_j = len(self._model.joints) if self._model else 0
+                    ncc_label = self.ncc_mode if self.ncc_mode != "proximity" else f"proximity={self.ncc_proximity:.1f}"
+                    self.report(
+                        {"INFO"},
+                        f"Physics built (ncc={ncc_label}): {n_rb} rigid bodies, {n_j} joints",
+                    )
+                return {"FINISHED"}
+            except Exception as e:
+                self._cleanup(context, cancelled=True)
+                log.exception("Physics build failed")
+                self.report({"ERROR"}, str(e))
+                return {"CANCELLED"}
+
+        return {"RUNNING_MODAL"}
+
+    def _cleanup(self, context, cancelled=False):
+        if self._timer:
+            context.window_manager.event_timer_remove(self._timer)
+            self._timer = None
+        context.workspace.status_text_set(None)
+        # Close the generator to trigger its finally block (re-enables RBW)
+        if self._generator:
+            self._generator.close()
+            self._generator = None
+        armature_obj = bpy.data.objects.get(self._armature_name)
+        if armature_obj:
+            if "mmd_build_progress" in armature_obj:
+                del armature_obj["mmd_build_progress"]
+            if "mmd_build_message" in armature_obj:
+                del armature_obj["mmd_build_message"]
+            # On cancel, clean up partially-built physics
+            if cancelled:
+                from .physics import clear_physics
+                clear_physics(armature_obj)
+        self._model = None
+        # Force panel redraw so stale progress bar disappears immediately
+        for area in context.screen.areas:
+            if area.type == "VIEW_3D":
+                area.tag_redraw()
+
+    def invoke(self, context, event):
+        from pathlib import Path
 
         armature_obj = find_mmd_armature(context)
         if armature_obj is None:
@@ -193,8 +260,57 @@ class BLENDER_MMD_OT_build_physics(bpy.types.Operator):
             self.report({"ERROR"}, "No PMX filepath stored on armature.")
             return {"CANCELLED"}
 
+        # For non-rigid_body modes, just run synchronously
+        if self.mode != "rigid_body":
+            return self._execute_sync(context, armature_obj, filepath)
+
         scale = armature_obj.get("import_scale", 0.08)
 
+        try:
+            ext = Path(filepath).suffix.lower()
+            if ext == ".pmd":
+                from .pmd import parse
+            else:
+                from .pmx import parse
+
+            from .physics import build_physics_iter
+
+            model = parse(filepath)
+            self._model = model
+            self._armature_name = armature_obj.name
+            self._generator = build_physics_iter(
+                armature_obj, model, scale,
+                mode=self.mode,
+                ncc_mode=self.ncc_mode,
+                ncc_proximity=self.ncc_proximity,
+            )
+        except Exception as e:
+            log.exception("Physics build init failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+        self._timer = context.window_manager.event_timer_add(0.01, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        # Fallback for API/script calls (no invoke → no modal)
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+        filepath = armature_obj.get("pmx_filepath")
+        if not filepath:
+            self.report({"ERROR"}, "No PMX filepath stored on armature.")
+            return {"CANCELLED"}
+        return self._execute_sync(context, armature_obj, filepath)
+
+    def _execute_sync(self, context, armature_obj, filepath):
+        from pathlib import Path
+
+        from .physics import build_physics
+
+        scale = armature_obj.get("import_scale", 0.08)
         try:
             ext = Path(filepath).suffix.lower()
             if ext == ".pmd":
@@ -777,13 +893,103 @@ class BLENDER_MMD_OT_select_sdef_vertices(bpy.types.Operator):
 
 
 class BLENDER_MMD_OT_bake_sdef(bpy.types.Operator):
-    """Bake SDEF deformation to MDD mesh cache files"""
+    """Bake SDEF deformation to MDD mesh cache files (modal with progress)"""
 
     bl_idname = "blender_mmd.bake_sdef"
     bl_label = "Bake SDEF"
     bl_options = {"REGISTER", "UNDO"}
 
+    _timer = None
+    _generator = None
+    _armature_name: str = ""
+
+    def modal(self, context, event):
+        if event.type == "ESC":
+            self._cleanup(context, cancelled=True)
+            self.report({"WARNING"}, "SDEF bake cancelled")
+            return {"CANCELLED"}
+
+        if event.type == "TIMER":
+            try:
+                progress, message, result = next(self._generator)
+                context.workspace.status_text_set(f"Baking SDEF... {progress:.0%} — {message}")
+                armature_obj = bpy.data.objects.get(self._armature_name)
+                if armature_obj:
+                    armature_obj["mmd_sdef_bake_progress"] = progress
+                    armature_obj["mmd_sdef_bake_message"] = message
+                for area in context.screen.areas:
+                    if area.type == "VIEW_3D":
+                        area.tag_redraw()
+                if result is not None:
+                    self._cleanup(context)
+                    self.report(
+                        {"INFO"},
+                        f"SDEF baked: {result['meshes']} meshes, "
+                        f"{result['frames']} frames in {result['time']:.1f}s",
+                    )
+                    return {"FINISHED"}
+            except Exception as e:
+                self._cleanup(context, cancelled=True)
+                log.exception("SDEF bake failed")
+                self.report({"ERROR"}, str(e))
+                return {"CANCELLED"}
+
+        return {"RUNNING_MODAL"}
+
+    def _cleanup(self, context, cancelled=False):
+        if self._timer:
+            context.window_manager.event_timer_remove(self._timer)
+            self._timer = None
+        context.workspace.status_text_set(None)
+        if self._generator:
+            self._generator.close()
+            self._generator = None
+        armature_obj = bpy.data.objects.get(self._armature_name)
+        if armature_obj:
+            if "mmd_sdef_bake_progress" in armature_obj:
+                del armature_obj["mmd_sdef_bake_progress"]
+            if "mmd_sdef_bake_message" in armature_obj:
+                del armature_obj["mmd_sdef_bake_message"]
+            if cancelled:
+                from .sdef import clear_sdef_bake
+                clear_sdef_bake(armature_obj)
+        # Force panel redraw so stale progress bar disappears immediately
+        for area in context.screen.areas:
+            if area.type == "VIEW_3D":
+                area.tag_redraw()
+
+    def invoke(self, context, event):
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        if not bpy.data.is_saved:
+            self.report({"ERROR"}, "Save the .blend file before baking SDEF.")
+            return {"CANCELLED"}
+
+        frame_start = context.scene.frame_start
+        frame_end = context.scene.frame_end
+
+        if context.active_object and context.active_object.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+
+        try:
+            from .sdef import bake_sdef_iter
+
+            self._armature_name = armature_obj.name
+            self._generator = bake_sdef_iter(armature_obj, frame_start, frame_end)
+        except Exception as e:
+            log.exception("SDEF bake init failed")
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+        self._timer = context.window_manager.event_timer_add(0.01, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        return {"RUNNING_MODAL"}
+
     def execute(self, context):
+        # Fallback for API/script calls
         from .sdef import bake_sdef
 
         armature_obj = find_mmd_armature(context)
@@ -791,16 +997,13 @@ class BLENDER_MMD_OT_bake_sdef(bpy.types.Operator):
             self.report({"ERROR"}, "No MMD armature found.")
             return {"CANCELLED"}
 
-        import bpy
         if not bpy.data.is_saved:
             self.report({"ERROR"}, "Save the .blend file before baking SDEF.")
             return {"CANCELLED"}
 
-        # Use scene frame range
         frame_start = context.scene.frame_start
         frame_end = context.scene.frame_end
 
-        # Ensure we're in object mode
         if context.active_object and context.active_object.mode != "OBJECT":
             bpy.ops.object.mode_set(mode="OBJECT")
 

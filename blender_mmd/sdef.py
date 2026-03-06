@@ -379,28 +379,41 @@ def _get_sdef_meshes(armature_obj) -> list:
 
 
 def bake_sdef(armature_obj, frame_start: int, frame_end: int) -> dict:
-    """Bake SDEF deformation to MDD files for all SDEF meshes.
+    """Synchronous wrapper around the generator-based bake.
+
+    Returns:
+        Dict with 'meshes' (count), 'frames' (count), 'time' (seconds),
+        'cache_dir' (absolute path string).
+    """
+    result = None
+    for progress, message, data in bake_sdef_iter(armature_obj, frame_start, frame_end):
+        if data is not None:
+            result = data
+    return result
+
+
+def bake_sdef_iter(armature_obj, frame_start: int, frame_end: int):
+    """Generator that bakes SDEF deformation, yielding (progress, message, result).
+
+    Yields (float 0.0-1.0, str, None) during bake, then a final
+    (1.0, str, result_dict) when complete.
 
     For each mesh with SDEF vertices:
     1. Precompute per-vertex SDEF constants from rest-pose data
     2. For each frame: evaluate depsgraph (LBS), replace SDEF verts, store
     3. Write MDD file per mesh
     4. Apply Mesh Cache modifier, mute Armature modifier
-
-    Args:
-        armature_obj: The MMD armature object.
-        frame_start: First frame to bake.
-        frame_end: Last frame to bake (inclusive).
-
-    Returns:
-        Dict with 'meshes' (count), 'frames' (count), 'time' (seconds),
-        'cache_dir' (absolute path string).
     """
     import bpy
 
     t0 = time.perf_counter()
     scene = bpy.context.scene
     cache = _cache_dir(armature_obj)
+
+    # Clear any existing bake first — Mesh Cache modifiers from a previous
+    # bake make each frame_set() read MDD from disk, doubling eval time.
+    if armature_obj.get("mmd_sdef_baked"):
+        clear_sdef_bake(armature_obj)
 
     sdef_meshes = _get_sdef_meshes(armature_obj)
     if not sdef_meshes:
@@ -414,6 +427,7 @@ def bake_sdef(armature_obj, frame_start: int, frame_end: int) -> dict:
         bone_names[bone.name] = bone.name
 
     # Phase 1: Precompute per-mesh SDEF data
+    yield (0.0, "Precomputing SDEF data...", None)
     mesh_data = {}
     for mesh_obj in sdef_meshes:
         pre = _precompute_sdef_data(mesh_obj.data, mesh_obj.vertex_groups, bone_names)
@@ -428,11 +442,9 @@ def bake_sdef(armature_obj, frame_start: int, frame_end: int) -> dict:
     for mesh_obj in mesh_data:
         frame_buffers[mesh_obj] = []
 
-    # Phase 3: Iterate frames
+    # Phase 3: Iterate frames (bulk of the work, 0.05 - 0.90)
     log.info("SDEF bake: %d frames, %d meshes", frame_count, len(mesh_data))
-
-    wm = bpy.context.window_manager
-    wm.progress_begin(0, frame_count)
+    yield (0.05, f"Baking {frame_count} frames, {len(mesh_data)} meshes...", None)
 
     for i, frame in enumerate(range(frame_start, frame_end + 1)):
         scene.frame_set(frame)
@@ -442,11 +454,11 @@ def bake_sdef(armature_obj, frame_start: int, frame_end: int) -> dict:
             positions = compute_sdef_frame(armature_obj, mesh_obj, depsgraph, pre)
             frame_buffers[mesh_obj].append(positions)
 
-        wm.progress_update(i + 1)
-
-    wm.progress_end()
+        progress = 0.05 + 0.85 * (i + 1) / frame_count
+        yield (progress, f"Frame {frame}/{frame_end} ({i+1}/{frame_count})", None)
 
     # Phase 4: Write MDD files + apply modifiers
+    yield (0.90, "Writing MDD files...", None)
     for mesh_obj, frames in frame_buffers.items():
         # Sanitize mesh name — some models have names like "/armor//belt"
         # which would override the cache directory when joined as a path.
@@ -472,9 +484,6 @@ def bake_sdef(armature_obj, frame_start: int, frame_end: int) -> dict:
         mod.show_render = True
 
         # Move Mesh Cache before Armature in modifier stack
-        # (we want it to replace armature deformation)
-        # Actually, since we mute Armature, order doesn't matter much,
-        # but ensure it's high in the stack
         while mesh_obj.modifiers.find("mmd_sdef") > 0:
             bpy.context.view_layer.objects.active = mesh_obj
             bpy.ops.object.modifier_move_up(modifier="mmd_sdef")
@@ -494,12 +503,13 @@ def bake_sdef(armature_obj, frame_start: int, frame_end: int) -> dict:
     elapsed = time.perf_counter() - t0
     log.info("SDEF bake complete: %.1fs", elapsed)
 
-    return {
+    result = {
         "meshes": len(mesh_data),
         "frames": frame_count,
         "time": elapsed,
         "cache_dir": str(cache),
     }
+    yield (1.0, f"SDEF bake complete: {elapsed:.1f}s", result)
 
 
 def clear_sdef_bake(armature_obj) -> int:

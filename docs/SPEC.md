@@ -557,7 +557,8 @@ Additional physics operations (no re-parse of PMX needed):
 - `rebuild_ncc(armature_obj)` — Recompute NCC pair table from serialized data, reuse existing empties by reassigning pairs, create/delete only the difference. Respects proximity setting and disabled chains. Returns (old_count, new_count).
 - `toggle_chain_collisions(armature_obj, chain_index, enable)` — Set chain's bodies to `collision_collections = [False]*20` (disable) or restore from PMX data (enable). Instant, no rebuild needed.
 - `toggle_chain_physics(armature_obj, chain_index, enable)` — Set chain's bodies to `kinematic=True` (disable/freeze) or restore from PMX mode (enable). Instant, no rebuild.
-- `clear_physics(armature_obj)` — Remove all physics objects and metadata. Preserves user settings (disabled chains, NCC mode/proximity). Only removes `mmd_dynamic`/`mmd_dynamic_bone` constraints (not import-time constraints like `mmd_at_dummy`).
+- `clear_physics(armature_obj)` — Remove all physics objects and metadata. Preserves user settings (disabled chains, NCC mode/proximity). Only removes `mmd_dynamic`/`mmd_dynamic_bone` constraints (not import-time constraints like `mmd_at_dummy`). Disables RBW before constraint removal to prevent per-constraint physics re-solve (without this, removal takes ~36s on 13K objects; with it, <1s).
+- `build_physics_iter(armature_obj, model, scale, ...)` — Generator version of `build_physics` for modal operator use. Yields `(progress, message)` tuples at phase boundaries. Used by the modal operator for responsive UI; `build_physics()` is a sync wrapper that exhausts the generator.
 
 ---
 
@@ -572,6 +573,17 @@ Thin operator layer. Register Blender operators for:
 - Any operation that benefits from Blender's undo stack
 
 Core logic lives in plain Python functions that operators call. Claude can invoke operators via `bpy.ops` or call functions directly, whichever is cleaner.
+
+### Modal operators with progress
+
+Long-running operators (physics build, SDEF bake) use Blender's modal operator pattern for responsive UI:
+
+- Core functions are implemented as **generators** that `yield (progress, message)` tuples at natural chunking points
+- **Sync wrappers** exhaust the generator for API/script calls (blender-agent path)
+- **Modal operators** drive the generator via `TIMER` events (0.01s interval), yielding control to Blender between steps for UI redraw and ESC handling
+- Progress is stored as custom properties on the armature (`mmd_build_progress`, `mmd_sdef_bake_progress`) and displayed in the MMD4B panel
+- ESC cancels the operation, closes the generator (triggering `finally` cleanup), and removes partially-built objects
+- `tag_redraw()` on cleanup ensures the progress bar disappears immediately after cancel/finish
 
 ### Import operator
 

@@ -72,6 +72,33 @@ def build_physics(
     raise ValueError(f"Unknown physics mode: {mode!r}")
 
 
+def build_physics_iter(
+    armature_obj, model, scale: float, mode: str = "rigid_body",
+    ncc_mode: str = "all", ncc_proximity: float = 1.5,
+):
+    """Generator version of build_physics for modal operator use.
+
+    Performs cleanup and metadata storage, then yields (progress, message)
+    tuples from the build. Only supports mode="rigid_body".
+    """
+    log.info(
+        "Building physics (mode=%s, ncc=%s, proximity=%.1f): %d rigid bodies, %d joints",
+        mode, ncc_mode, ncc_proximity, len(model.rigid_bodies), len(model.joints),
+    )
+
+    clear_physics(armature_obj)
+
+    armature_obj["mmd_physics_data"] = serialize_physics_data(model)
+    armature_obj["physics_mode"] = mode
+    armature_obj["mmd_ncc_mode"] = ncc_mode
+    armature_obj["mmd_ncc_proximity"] = ncc_proximity
+
+    if mode != "rigid_body":
+        raise ValueError(f"build_physics_iter only supports mode='rigid_body', got {mode!r}")
+
+    yield from _build_rigid_body_physics_iter(armature_obj, model, scale, ncc_mode, ncc_proximity)
+
+
 def _chain_to_dict(chain) -> dict:
     """Serialize a Chain dataclass to a JSON-compatible dict."""
     return {
@@ -89,31 +116,40 @@ def _build_rigid_body_physics(
     armature_obj, model, scale: float,
     ncc_mode: str = "all", ncc_proximity: float = 1.5,
 ) -> None:
-    """Create rigid bodies, joints, bone coupling, and configure physics world.
+    """Synchronous wrapper around the generator-based build.
+
+    Exhausts the generator, ignoring progress yields. Used by the API path
+    (blender-agent) and as fallback. The modal operator drives the generator
+    directly for UI responsiveness.
+    """
+    gen = _build_rigid_body_physics_iter(armature_obj, model, scale, ncc_mode, ncc_proximity)
+    for _ in gen:
+        pass
+
+
+def _build_rigid_body_physics_iter(
+    armature_obj, model, scale: float,
+    ncc_mode: str = "all", ncc_proximity: float = 1.5,
+):
+    """Generator that builds physics, yielding (progress, message) tuples.
 
     Three-phase build:
       Phase 1 (CREATE): Collections, rigid bodies, joints, joint non-collisions.
       Phase 2 (POSITION): Reposition dynamic bodies and tracking empties.
       Phase 3 (COUPLE & ACTIVATE): Bone coupling, world setup, chains.
 
-    The rigid body world is disabled during setup (following mmd_tools' approach)
-    to prevent the solver from computing forces while bodies are being added.
+    Yields (float 0.0-1.0, str) at natural chunking points. The caller
+    (modal operator or sync wrapper) drives the generator.
     """
     import bpy
 
     _set_rigid_body_world_enabled(bpy.context.scene, False)
 
-    wm = bpy.context.window_manager
-    wm.progress_begin(0, 100)
-
     try:
         # --- Phase 1: CREATE (no depsgraph needed) ---
-        wm.progress_update(0)
+        yield (0.0, "Preparing collections...")
 
-        # Remove stale collections from previous builds (objects removed but
-        # collections left behind → bpy.data.collections.new gives ".001" suffix).
-        # Must remove children first (Rigid Bodies, Joints, Tracking) or they
-        # become orphans that cause ".001" on the next build.
+        # Remove stale collections from previous builds
         col_name = f"{armature_obj.name}_Physics"
         for stale in [c for c in bpy.data.collections if c.name.startswith(col_name)]:
             for child in list(stale.children):
@@ -145,28 +181,36 @@ def _build_rigid_body_physics(
         # Build rigid_index → chain_name lookup
         rigid_to_chain = _build_rigid_to_chain_map(chain_dicts)
 
+        # --- Rigid bodies (0.02 - 0.25) ---
         is_draft = ncc_mode == "draft"
+        n_rb = len(model.rigid_bodies)
+        yield (0.02, f"Creating {n_rb} rigid bodies...")
         rigid_objects = _create_rigid_bodies(
             model, armature_obj, scale, rb_col,
             draft=is_draft,
             collision_disabled_chains=collision_disabled,
             rigid_to_chain=rigid_to_chain,
         )
-        wm.progress_update(20)
+        yield (0.25, f"Created {n_rb} rigid bodies")
 
+        # --- Joints (0.25 - 0.40) ---
+        n_joints = len(model.joints)
+        yield (0.25, f"Creating {n_joints} joints...")
         joint_objects = _create_joints(model, armature_obj, rigid_objects, bone_names, scale, joint_col)
-        wm.progress_update(40)
+        yield (0.40, f"Created {n_joints} joints")
 
+        # --- NCCs (0.40 - 0.75) ---
         if ncc_mode == "draft":
-            # Draft: skip NCC empties entirely. Set disable_collisions on joints.
+            yield (0.40, "Setting draft collision flags...")
             for j_obj in joint_objects:
                 rbc = j_obj.rigid_body_constraint
                 if rbc:
                     rbc.disable_collisions = True
             log.info("Draft mode: skipped NCC empties, %d joints set disable_collisions", len(joint_objects))
+            yield (0.75, "Draft mode: skipped NCCs")
         else:
-            # "proximity" or "all" — compute proximity value for _compute_ncc_pairs
             effective_proximity = ncc_proximity if ncc_mode == "proximity" else 0.0
+            yield (0.40, "Computing NCC pairs...")
             _create_non_collision_constraints(
                 model, rigid_objects, joint_objects, joint_col,
                 chain_dicts=chain_dicts,
@@ -175,9 +219,10 @@ def _build_rigid_body_physics(
                 ncc_proximity=effective_proximity,
                 scale=scale,
             )
-        wm.progress_update(70)
+            yield (0.75, "NCCs created")
 
         # --- Phase 2: POSITION (needs depsgraph for matrix_world) ---
+        yield (0.75, "Repositioning bodies...")
 
         ik_saved_state = _mute_physics_ik_constraints(armature_obj, model, bone_names, mute=True)
         _reposition_dynamic_bodies(model, armature_obj, rigid_objects, bone_names, scale)
@@ -185,6 +230,7 @@ def _build_rigid_body_physics(
         # Flush so matrix_world is current for tracking empty creation
         bpy.context.scene.frame_set(bpy.context.scene.frame_current)
 
+        yield (0.80, "Setting up bone coupling...")
         empty_parent_map = _setup_bone_coupling(
             armature_obj, model, rigid_objects, bone_names, scale, track_col,
         )
@@ -196,9 +242,10 @@ def _build_rigid_body_physics(
 
         # Flush after reparenting so parent inverse matrices are evaluated
         bpy.context.scene.frame_set(bpy.context.scene.frame_current)
-        wm.progress_update(90)
+        yield (0.90, "Bone coupling complete")
 
         # --- Phase 3: COUPLE & ACTIVATE ---
+        yield (0.90, "Activating physics world...")
 
         _unmute_tracking_constraints(armature_obj)
         _restore_ik_mute_state(armature_obj, ik_saved_state)
@@ -207,11 +254,9 @@ def _build_rigid_body_physics(
         vl_col = bpy.context.view_layer.layer_collection.children.get(col_name)
         if vl_col:
             vl_col.hide_viewport = True
-        wm.progress_update(100)
 
     finally:
         _set_rigid_body_world_enabled(bpy.context.scene, True)
-        wm.progress_end()
 
     # Store chains (already detected above)
     armature_obj["mmd_physics_chains"] = json.dumps(chain_dicts)
@@ -222,6 +267,7 @@ def _build_rigid_body_physics(
 
     log.info("Physics build complete: %d rigid bodies, %d joints, %d chains (ncc=%s, proximity=%.1f)",
              len(rigid_objects), len(model.joints), len(chains), ncc_mode, ncc_proximity)
+    yield (1.0, "Physics build complete")
 
 
 def _build_rigid_to_chain_map(chain_dicts: list[dict]) -> dict[int, str]:
@@ -273,27 +319,22 @@ def clear_physics(armature_obj) -> None:
     if col_name:
         collection = bpy.data.collections.get(col_name)
         if collection:
-            # Remove tracking constraints (preserve user IK mute state)
-            if armature_obj.pose:
-                # Only remove physics-specific constraints, NOT import-time
-                # constraints like mmd_at_dummy (additional transform shadow
-                # bones) or mmd_ik_limit_override.
-                _physics_constraint_names = ("mmd_dynamic", "mmd_dynamic_bone")
-                for pb in armature_obj.pose.bones:
-                    to_remove = [
-                        c for c in pb.constraints
-                        if c.name in _physics_constraint_names
-                    ]
-                    for c in to_remove:
-                        pb.constraints.remove(c)
-
-            # Disable RBW before mass deletion
+            # Disable RBW FIRST — prevents depsgraph from re-evaluating
+            # physics on every constraint/object removal. Without this,
+            # each constraint.remove() triggers a full physics solve (~36s).
             rbw = bpy.context.scene.rigidbody_world
             if rbw:
                 rbw.enabled = False
 
-            # Batch-remove all physics objects in one call to avoid
-            # per-object depsgraph/physics updates that hang on 25K+ objects
+            # Mute tracking constraints before batch-removing their targets.
+            _physics_constraint_names = ("mmd_dynamic", "mmd_dynamic_bone")
+            if armature_obj.pose:
+                for pb in armature_obj.pose.bones:
+                    for c in pb.constraints:
+                        if c.name in _physics_constraint_names:
+                            c.mute = True
+
+            # Batch-remove all physics objects in one call
             all_objs = []
             def _collect_objects(col):
                 for child in list(col.children):
@@ -303,6 +344,16 @@ def clear_physics(armature_obj) -> None:
 
             if all_objs:
                 bpy.data.batch_remove(all_objs)
+
+            # Now remove the muted constraints (targets already gone, fast)
+            if armature_obj.pose:
+                for pb in armature_obj.pose.bones:
+                    to_remove = [
+                        c for c in pb.constraints
+                        if c.name in _physics_constraint_names
+                    ]
+                    for c in to_remove:
+                        pb.constraints.remove(c)
 
             # Remove empty collections
             def _remove_collections(col):

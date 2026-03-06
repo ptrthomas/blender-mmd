@@ -36,6 +36,7 @@ mmd_tools is a battle-tested addon that has served the MMD-Blender community for
 | Physics springs | Applied via property update callbacks | Applied directly during joint creation |
 | Split by material | "HIGH RISK & BUGGY" (their words), VMD import doesn't handle split meshes | Fully supported — slotted action shared across all meshes, morph animation works on every piece. Enables per-object light linking and shadow control |
 | VMD layering | Single import only — each VMD replaces previous | Append mode (default) — layer body + lip sync + camera from separate VMDs |
+| Long operations | Blocking — no progress, no cancel | Modal operators with live progress and ESC cancel (physics build, SDEF bake) |
 | UI | Sidebar panels, menus, property groups | Minimal — designed for Claude Code + MMD4B panel |
 
 Both projects share the same core approach for IK constraints (first link bone placement), IK limits (native properties + LIMIT_ROTATION override), and additional transforms (TRANSFORM constraints + shadow bones).
@@ -51,6 +52,7 @@ Both projects share the same core approach for IK constraints (first link bone p
 - **Additional transforms** — grant parent system (D bones, shoulder cancel, arm twist, eye tracking)
 - **IK** — correct constraint placement, native limits, per-bone angle conversion. Knee pre-bend nudge fixes IK solver convergence on PMD models where rest-pose geometry has insufficient forward offset (Lat-style models)
 - **SDEF** — spherical deformation for volume-preserving skinning. Baked to MDD mesh cache files for zero-cost playback (no per-frame Python). Instant A/B toggle to compare SDEF vs standard linear blend skinning. MMD4B panel with Bake/Clear/Toggle/Select controls
+- **Responsive UI** — long-running operations (physics build, SDEF bake) use modal operators with live progress display in the MMD4B panel and ESC to cancel. No frozen UI during heavy operations
 
 ## Physics: correct collision filtering
 

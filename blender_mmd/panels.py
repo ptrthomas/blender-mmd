@@ -150,6 +150,23 @@ class BLENDER_MMD_PT_physics(bpy.types.Panel):
         layout = self.layout
         armature_obj = find_mmd_armature(context)
 
+        # Show progress bar during modal build
+        build_progress = armature_obj.get("mmd_build_progress", -1.0)
+        if build_progress >= 0.0:
+            build_msg = armature_obj.get("mmd_build_message", "Building...")
+            col = layout.column(align=True)
+            if hasattr(layout, "progress"):
+                col.progress(
+                    factor=build_progress,
+                    type="BAR",
+                    text=f"{build_progress:.0%} — {build_msg}",
+                )
+            else:
+                col.label(text=f"Building... {build_progress:.0%} — {build_msg}", icon="TIME")
+            row = col.row()
+            row.label(text="Press ESC to cancel", icon="INFO")
+            return
+
         has_physics = armature_obj.get("physics_collection") is not None
 
         if has_physics:
@@ -511,6 +528,23 @@ class BLENDER_MMD_PT_sdef(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         armature_obj = find_mmd_armature(context)
+
+        # Show progress bar during modal bake
+        bake_progress = armature_obj.get("mmd_sdef_bake_progress", -1.0)
+        if bake_progress >= 0.0:
+            bake_msg = armature_obj.get("mmd_sdef_bake_message", "Baking...")
+            col = layout.column(align=True)
+            if hasattr(layout, "progress"):
+                col.progress(
+                    factor=bake_progress,
+                    type="BAR",
+                    text=f"{bake_progress:.0%} — {bake_msg}",
+                )
+            else:
+                col.label(text=f"Baking... {bake_progress:.0%} — {bake_msg}", icon="TIME")
+            row = col.row()
+            row.label(text="Press ESC to cancel", icon="INFO")
+            return
 
         is_baked = armature_obj.get("mmd_sdef_baked", False)
         is_enabled = armature_obj.get("mmd_sdef_enabled", True)
