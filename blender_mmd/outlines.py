@@ -52,8 +52,9 @@ def build_outlines(
     scale = armature_obj.get("import_scale", 0.08)
     count = 0
 
+    from .mesh import is_control_mesh
     for obj in armature_obj.children:
-        if obj.type != "MESH":
+        if obj.type != "MESH" or is_control_mesh(obj):
             continue
         mat = obj.data.materials[0] if obj.data.materials else None
         if mat is None:

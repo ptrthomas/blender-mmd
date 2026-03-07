@@ -58,6 +58,7 @@ def import_vmd(
     scale: float = 0.08,
     create_new_action: bool = False,
     target_fps: int = 30,
+    include_static: bool = False,
 ) -> None:
     """Apply VMD motion to an armature and its child mesh.
 
@@ -70,6 +71,9 @@ def import_vmd(
             If False (default), reuse existing actions and append keyframes.
         target_fps: Target frame rate. 30 = MMD standard (no scaling). Other values
             scale all keyframe positions by target_fps/30.
+        include_static: If True, create F-curves for bones/morphs that stay at rest
+            pose (zero location/identity rotation, weight=0). Default False — keeps
+            the Graph Editor clean.
     """
     fps_scale = target_fps / 30.0
     # Build Japanese name → Blender bone name lookup
@@ -105,7 +109,8 @@ def import_vmd(
         for pb in armature_obj.pose.bones:
             pb.rotation_mode = "QUATERNION"
 
-        # Apply bone keyframes
+        # Apply bone keyframes (skip bones where all keyframes are at rest)
+        skipped_static = 0
         for jp_name, keyframes in bone_groups.items():
             blender_name = jp_to_bone.get(jp_name)
             if blender_name is None:
@@ -117,11 +122,18 @@ def import_vmd(
                 unmatched_bones.append(jp_name)
                 continue
 
+            if not include_static and _is_static_bone(keyframes):
+                skipped_static += 1
+                continue
+
             matched_bones += 1
             _apply_bone_keyframes(
                 bone_action, armature_obj, pose_bone, keyframes, scale,
                 fps_scale,
             )
+
+        if skipped_static:
+            log.info("VMD: skipped %d static bones (all at rest pose)", skipped_static)
 
         if unmatched_bones:
             log.warning(
@@ -137,6 +149,7 @@ def import_vmd(
     if vmd.morph_keyframes:
         morph_count, unmatched_morphs = _apply_morph_keyframes(
             vmd.morph_keyframes, armature_obj, create_new_action, fps_scale,
+            include_static,
         )
 
     # Apply IK toggle keyframes (use whichever bone action is active)
@@ -392,6 +405,23 @@ def _compatible_quaternion(prev_q: Quaternion, curr_q: Quaternion) -> Quaternion
     return -curr_q if t2 < t1 else curr_q
 
 
+def _is_static_bone(keyframes: list[BoneKeyframe]) -> bool:
+    """Check if all keyframes are at rest pose (zero location, identity rotation)."""
+    for kf in keyframes:
+        lx, ly, lz = kf.location
+        rx, ry, rz, rw = kf.rotation
+        if (abs(lx) > 1e-6 or abs(ly) > 1e-6 or abs(lz) > 1e-6
+                or abs(rx) > 1e-6 or abs(ry) > 1e-6 or abs(rz) > 1e-6
+                or min(abs(rw - 1.0), abs(rw + 1.0)) > 1e-6):
+            return False
+    return True
+
+
+def _is_static_morph(keyframes: list[MorphKeyframe]) -> bool:
+    """Check if all keyframes have weight=0."""
+    return all(abs(kf.weight) < 1e-6 for kf in keyframes)
+
+
 def _apply_bone_keyframes(
     action: bpy.types.Action,
     armature_obj: bpy.types.Object,
@@ -566,33 +596,43 @@ def _apply_morph_keyframes(
     armature_obj: bpy.types.Object,
     create_new_action: bool = False,
     fps_scale: float = 1.0,
-) -> int:
-    """Apply morph keyframes to shape key F-curves on child meshes.
+    include_static: bool = False,
+) -> tuple[int, list[str]]:
+    """Apply morph keyframes to shape key F-curves on the control mesh.
 
-    Supports both single-mesh and split-by-material layouts. When meshes are
-    split, a single morph action is created from the first mesh and shared
-    across all meshes (F-curve data paths like key_blocks["name"].value match
-    because Blender preserves shape key names during separate).
+    The control mesh (_mmd_morphs) owns all shape keys as value holders.
+    Visible meshes' shape keys are driven from the control mesh via drivers.
 
-    Returns the number of morph channels applied.
+    Returns (applied_count, unmatched_names).
     """
-    # Find all child meshes with shape keys
-    mesh_objs = [
-        c for c in armature_obj.children
-        if c.type == "MESH" and c.data.shape_keys
-    ]
-    if not mesh_objs:
-        log.warning("VMD: No child mesh with shape keys found on armature")
-        return 0
+    from ..mesh import find_control_mesh
 
-    # Use the first mesh's shape keys as reference for building F-curves
-    primary_mesh = mesh_objs[0]
-    shape_keys = primary_mesh.data.shape_keys
+    # Find control mesh (preferred) or fall back to first mesh with shape keys
+    ctrl_mesh = find_control_mesh(armature_obj)
+    if ctrl_mesh and ctrl_mesh.data.shape_keys:
+        target_mesh = ctrl_mesh
+    else:
+        # Legacy / single-mesh mode: use first mesh with shape keys
+        target_mesh = None
+        for c in armature_obj.children:
+            if c.type == "MESH" and c.data.shape_keys:
+                target_mesh = c
+                break
 
-    # Load morph name mapping — check armature first (split mesh), then mesh (legacy)
-    morph_map_json = armature_obj.get("mmd_morph_map")
+    if not target_mesh:
+        log.warning("VMD: No mesh with shape keys found on armature")
+        return 0, []
+
+    shape_keys = target_mesh.data.shape_keys
+
+    # Load morph name mapping from control mesh or armature (legacy)
+    morph_map_json = None
+    if ctrl_mesh:
+        morph_map_json = ctrl_mesh.get("mmd_morph_map")
     if not morph_map_json:
-        morph_map_json = primary_mesh.get("mmd_morph_map")
+        morph_map_json = armature_obj.get("mmd_morph_map")
+    if not morph_map_json:
+        morph_map_json = target_mesh.get("mmd_morph_map")
     if morph_map_json:
         morph_map: dict[str, str] = json.loads(morph_map_json)
     else:
@@ -607,7 +647,7 @@ def _apply_morph_keyframes(
     for group in morph_groups.values():
         group.sort(key=lambda kf: kf.frame)
 
-    # Get or create morph action on the primary mesh's shape key datablock
+    # Get or create morph action on the target mesh's shape key datablock
     if shape_keys.animation_data is None:
         shape_keys.animation_data_create()
 
@@ -625,32 +665,21 @@ def _apply_morph_keyframes(
         # Find the shape key name: morph_map → direct match → alias fallback
         sk_name = morph_map.get(jp_name)
         if sk_name is None:
-            # Try direct match on any mesh
-            for obj in mesh_objs:
-                if jp_name in obj.data.shape_keys.key_blocks:
-                    sk_name = jp_name
-                    break
+            if jp_name in shape_keys.key_blocks:
+                sk_name = jp_name
         if sk_name is None:
-            # Try alias fallback — map to alternative Japanese morph name
             for alias_jp in MORPH_ALIASES.get(jp_name, []):
                 alias_en = morph_map.get(alias_jp)
-                if alias_en and any(
-                    alias_en in obj.data.shape_keys.key_blocks
-                    for obj in mesh_objs
-                ):
+                if alias_en and alias_en in shape_keys.key_blocks:
                     sk_name = alias_en
                     log.debug("VMD morph alias: '%s' → '%s' (%s)", jp_name, alias_jp, sk_name)
                     break
 
-        if sk_name is None:
+        if sk_name is None or sk_name not in shape_keys.key_blocks:
             unmatched.append(jp_name)
             continue
 
-        # Check if this shape key exists on at least one mesh
-        if not any(
-            sk_name in obj.data.shape_keys.key_blocks for obj in mesh_objs
-        ):
-            unmatched.append(jp_name)
+        if not include_static and _is_static_morph(keyframes):
             continue
 
         data_path = f'key_blocks["{sk_name}"].value'
@@ -669,23 +698,6 @@ def _apply_morph_keyframes(
         fc.update()
         applied += 1
 
-    # Share the same action + slot across other meshes that aren't handler-synced.
-    # After push_to_nla(), secondary meshes have no animation_data — a frame_change
-    # handler syncs their shape key values from the primary mesh. Skip those.
-    # Without handler (fresh import), use Blender 5.0 slotted actions to share.
-    primary_slot = morph_action.slots[0] if morph_action.slots else None
-    has_morph_sync = armature_obj.get("mmd_morph_sync") is not None
-    for obj in mesh_objs[1:]:
-        sk = obj.data.shape_keys
-        # Skip if morph sync handler is active (post-NLA push state)
-        if has_morph_sync:
-            continue
-        if sk.animation_data is None:
-            sk.animation_data_create()
-        sk.animation_data.action = morph_action
-        if primary_slot is not None:
-            sk.animation_data.action_slot = primary_slot
-
     if unmatched:
         log.warning(
             "VMD: %d morph names unmatched: %s",
@@ -695,8 +707,8 @@ def _apply_morph_keyframes(
         )
 
     log.info(
-        "VMD morphs: %d/%d channels applied across %d meshes",
-        applied, len(morph_groups), len(mesh_objs),
+        "VMD morphs: %d/%d channels applied on %s",
+        applied, len(morph_groups), target_mesh.name,
     )
     return applied, unmatched
 
@@ -767,156 +779,11 @@ def _apply_ik_toggle_keyframes(
     return len(ik_constraints)
 
 
-def push_to_nla(
-    armature_obj: bpy.types.Object,
-    strip_name: str = "VMD",
-) -> dict[str, int]:
-    """Push current bone and morph actions to NLA strips.
-
-    After pushing, the active action slots are cleared so subsequent VMD
-    imports create fresh actions that layer on top via NLA.  Actions get
-    ``use_fake_user`` to prevent garbage collection.
-
-    Returns:
-        Dict with ``bone_strips`` and ``morph_strips`` counts.
-    """
-    bone_strips = 0
-    morph_strips = 0
-
-    # --- Bone action ---
-    anim = armature_obj.animation_data
-    if anim and anim.action:
-        action = anim.action
-        action.use_fake_user = True
-
-        track = anim.nla_tracks.new()
-        track.name = strip_name
-
-        start = int(action.frame_range[0])
-        strip = track.strips.new(strip_name, start, action)
-        strip.extrapolation = "NOTHING"
-        strip.blend_type = "COMBINE"
-
-        anim.action = None
-        bone_strips = 1
-        log.info("Pushed bone action '%s' to NLA track '%s'", action.name, strip_name)
-
-    # --- Morph action (primary mesh gets NLA, secondaries synced via handler) ---
-    mesh_objs = [
-        c for c in armature_obj.children
-        if c.type == "MESH"
-        and c.data.shape_keys
-        and c.data.shape_keys.animation_data
-        and c.data.shape_keys.animation_data.action
-    ]
-    if mesh_objs:
-        primary_mesh = mesh_objs[0]
-        primary_sk = primary_mesh.data.shape_keys
-        morph_action = primary_sk.animation_data.action
-        morph_action.use_fake_user = True
-        start = int(morph_action.frame_range[0])
-        morph_strip_name = f"{strip_name}_Morphs"
-
-        # Push NLA strip on primary mesh only
-        sk_anim = primary_sk.animation_data
-        slot = sk_anim.action_slot
-        track = sk_anim.nla_tracks.new()
-        track.name = morph_strip_name
-        strip = track.strips.new(morph_strip_name, start, morph_action)
-        strip.extrapolation = "NOTHING"
-        strip.blend_type = "COMBINE"
-        if slot is not None:
-            strip.action_slot = slot
-        sk_anim.action = None
-        morph_strips = 1
-
-        # Secondary meshes: clear action + animation_data entirely so they
-        # don't appear in the NLA editor. A frame_change handler syncs values.
-        for mesh_obj in mesh_objs[1:]:
-            sk = mesh_obj.data.shape_keys
-            if sk.animation_data:
-                sk.animation_data.action = None
-                # Clear animation_data so mesh doesn't appear in NLA editor
-                sk.animation_data_clear()
-
-        # Mark armature for morph sync handler
-        armature_obj["mmd_morph_sync"] = primary_mesh.name
-        _ensure_morph_sync_handler()
-
-        log.info(
-            "Pushed morph action '%s' to NLA on primary mesh '%s', "
-            "%d secondary meshes synced via handler",
-            morph_action.name, primary_mesh.name, len(mesh_objs) - 1,
-        )
-
-    # --- Clean up material nodetree animation_data (emission drivers) ---
-    # These clutter the NLA editor with "Shader Nodetree" entries.
-    # Bake current emission value and remove the drivers.
-    _clear_material_drivers(armature_obj)
-
-    return {"bone_strips": bone_strips, "morph_strips": morph_strips}
-
-
-def _clear_material_drivers(armature_obj: bpy.types.Object) -> None:
-    """Remove animation_data from material nodetrees on child meshes.
-
-    Material emission drivers read the armature's mmd_emission property.
-    Clearing them removes "Shader Nodetree" clutter from the NLA editor.
-    The current emission value is preserved on the nodes.
-    """
-    seen = set()
-    for child in armature_obj.children:
-        if child.type != "MESH":
-            continue
-        for slot in child.material_slots:
-            mat = slot.material
-            if mat and mat.name not in seen and mat.node_tree and mat.node_tree.animation_data:
-                mat.node_tree.animation_data_clear()
-                seen.add(mat.name)
-    if seen:
-        log.info("Cleared material nodetree animation_data from %d materials", len(seen))
-
-
-def _morph_sync_handler(scene: bpy.types.Scene) -> None:
-    """frame_change_post handler: copy primary mesh shape key values to secondaries."""
-    for obj in scene.objects:
-        if obj.type != "ARMATURE":
-            continue
-        primary_name = obj.get("mmd_morph_sync")
-        if not primary_name:
-            continue
-        primary = None
-        secondaries = []
-        for c in obj.children:
-            if c.type != "MESH" or not c.data.shape_keys:
-                continue
-            if c.name == primary_name:
-                primary = c
-            else:
-                secondaries.append(c)
-        if not primary or not secondaries:
-            continue
-        primary_sk = primary.data.shape_keys
-        for sec in secondaries:
-            for kb in sec.data.shape_keys.key_blocks:
-                if kb == sec.data.shape_keys.reference_key:
-                    continue
-                src = primary_sk.key_blocks.get(kb.name)
-                if src is not None:
-                    kb.value = src.value
-
-
 def _ensure_morph_sync_handler() -> None:
-    """Register the morph sync handler if not already registered."""
-    for h in bpy.app.handlers.frame_change_post:
-        if getattr(h, "__name__", "") == "_morph_sync_handler":
-            return
-    bpy.app.handlers.frame_change_post.append(_morph_sync_handler)
+    """No-op — kept for backward compatibility. Drivers handle sync now."""
+    pass
 
 
 def _remove_morph_sync_handler() -> None:
-    """Unregister the morph sync handler."""
-    bpy.app.handlers.frame_change_post[:] = [
-        h for h in bpy.app.handlers.frame_change_post
-        if getattr(h, "__name__", "") != "_morph_sync_handler"
-    ]
+    """No-op — kept for backward compatibility."""
+    pass

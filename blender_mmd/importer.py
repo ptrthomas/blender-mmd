@@ -1,4 +1,4 @@
-"""PMX import orchestrator — parse, build armature, build mesh."""
+"""PMX import orchestrator — parse, build armature, build meshes."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import bpy
 
 from .pmx.types import Model, RigidMode
 from .armature import create_armature
-from .mesh import create_mesh
+from .mesh import create_meshes
 from .materials import create_materials, setup_drivers
 
 log = logging.getLogger("blender_mmd")
@@ -21,12 +21,9 @@ DEFAULT_SCALE = 0.08
 
 
 def _log_import_report(armature_obj: bpy.types.Object) -> None:
-    """Log untranslated names to a Blender Text Editor datablock.
-
-    Creates/updates a text called "MMD Import Report" visible in any
-    Text Editor area.  Also prints to the system console.
-    """
+    """Log untranslated names to a Blender Text Editor datablock."""
     from .translations import _looks_english
+    from .mesh import is_control_mesh
 
     # Bones
     bone_jp = []
@@ -34,11 +31,11 @@ def _log_import_report(armature_obj: bpy.types.Object) -> None:
         if not _looks_english(bone.name):
             bone_jp.append(bone.name)
 
-    # Shape keys (morphs) — first mesh only (all share same names after split)
+    # Shape keys (morphs) — from control mesh
     morph_jp = []
     n_morphs = 0
     for child in armature_obj.children:
-        if child.type == "MESH" and child.data.shape_keys:
+        if child.type == "MESH" and is_control_mesh(child) and child.data.shape_keys:
             for kb in child.data.shape_keys.key_blocks:
                 if kb.name == "Basis":
                     continue
@@ -51,7 +48,7 @@ def _log_import_report(armature_obj: bpy.types.Object) -> None:
     seen_mats: set[str] = set()
     mat_jp = []
     for child in armature_obj.children:
-        if child.type == "MESH":
+        if child.type == "MESH" and not is_control_mesh(child):
             for mat in child.data.materials:
                 if mat and mat.name not in seen_mats:
                     seen_mats.add(mat.name)
@@ -77,11 +74,8 @@ def _log_import_report(armature_obj: bpy.types.Object) -> None:
             lines.append(f"  {name}")
 
     report_text = "\n".join(lines)
-
-    # Write to Blender Text datablock
     _write_report_text(report_text)
 
-    # Summary to log
     log.info(
         "Import report: bones %d/%d, morphs %d/%d, materials %d/%d translated"
         " (see 'MMD Import Report' in Text Editor)",
@@ -102,16 +96,10 @@ def _write_report_text(text: str, name: str = "MMD Import Report") -> None:
 
 
 def _filter_degenerate_faces(model: Model) -> None:
-    """Remove degenerate faces (duplicate vertex indices) from model data.
-
-    Degenerate triangles (where two or more vertex indices are identical)
-    produce zero-area polygons that crash Blender's normals_split_custom_set.
-    This mutates model.faces and adjusts material face_counts to match.
-    """
+    """Remove degenerate faces (duplicate vertex indices) from model data."""
     faces = model.faces
     materials = model.materials
 
-    # Build per-face material index from sequential face_count ranges
     mat_face_counts = []
     for mat in materials:
         mat_face_counts.append(mat.face_count // 3)
@@ -139,21 +127,15 @@ def _filter_degenerate_faces(model: Model) -> None:
 
 
 def _setup_bone_collections(armature_obj, model) -> None:
-    """Create bone collections and color-code physics bones.
-
-    Creates "Armature" (standard bones) and "Physics" (dynamic rigid body bones)
-    collections. Physics bones get orange custom color for easy identification.
-    """
+    """Create bone collections and color-code physics bones."""
     arm_data = armature_obj.data
 
-    # Build bone_id → bone name map
     bone_map: dict[int, str] = {}
     for bone in arm_data.bones:
         idx = bone.get("bone_id")
         if idx is not None:
             bone_map[idx] = bone.name
 
-    # Identify dynamic rigid body bones
     dynamic_bones: set[str] = set()
     for rb in model.rigid_bodies:
         if rb.bone_index < 0:
@@ -162,7 +144,6 @@ def _setup_bone_collections(armature_obj, model) -> None:
         if bone_name and rb.mode in (RigidMode.DYNAMIC, RigidMode.DYNAMIC_BONE):
             dynamic_bones.add(bone_name)
 
-    # Create collections in edit mode
     bpy.context.view_layer.objects.active = armature_obj
     bpy.ops.object.mode_set(mode="EDIT")
 
@@ -176,7 +157,6 @@ def _setup_bone_collections(armature_obj, model) -> None:
     shadow_coll = arm_data.collections.get("mmd_shadow")
 
     for ebone in arm_data.edit_bones:
-        # Skip shadow/dummy bones — they stay in mmd_shadow only
         if shadow_coll and shadow_coll in ebone.collections.values():
             continue
         if ebone.name in dynamic_bones:
@@ -186,7 +166,6 @@ def _setup_bone_collections(armature_obj, model) -> None:
 
     bpy.ops.object.mode_set(mode="OBJECT")
 
-    # Color physics bones orange
     for bone in arm_data.bones:
         if bone.name in dynamic_bones:
             bone.color.palette = "CUSTOM"
@@ -194,11 +173,9 @@ def _setup_bone_collections(armature_obj, model) -> None:
             bone.color.custom.select = (1.0, 0.6, 0.0)
             bone.color.custom.active = (1.0, 0.8, 0.2)
 
-    # Hide all bone collections by default (unhide from outliner when needed)
     armature_coll.is_visible = False
     physics_coll.is_visible = False
 
-    # Enable bone colors and use STICK display
     arm_data.show_bone_colors = True
     arm_data.display_type = "STICK"
 
@@ -210,95 +187,6 @@ def _setup_bone_collections(armature_obj, model) -> None:
     )
 
 
-def _split_mesh_by_material(
-    mesh_obj: bpy.types.Object,
-    armature_obj: bpy.types.Object,
-    model: Model,
-) -> list[bpy.types.Object]:
-    """Split a single mesh into per-material mesh objects.
-
-    1. Move mmd_morph_map from mesh to armature (for VMD import after split)
-    2. Back up custom split normals as mesh attribute (separate destroys them)
-    3. Split by material using bpy.ops.mesh.separate
-    4. Restore normals on each resulting mesh
-    5. Name each mesh after its first material
-    6. Set visible_shadow based on mmd_drop_shadow flags
-    7. Organize into a collection named after the model
-
-    Returns the list of split mesh objects.
-    """
-    # 1. Move mmd_morph_map to armature so VMD import can find it
-    morph_map_json = mesh_obj.get("mmd_morph_map")
-    if morph_map_json:
-        armature_obj["mmd_morph_map"] = morph_map_json
-        del mesh_obj["mmd_morph_map"]
-
-    # 2. Back up loop normals as a mesh attribute (separate destroys custom normals)
-    mesh_data = mesh_obj.data
-    n_loops = len(mesh_data.loops)
-    if n_loops > 0:
-        attr = mesh_data.attributes.new("mmd_normal", "FLOAT_VECTOR", "CORNER")
-        normals = np.empty(n_loops * 3, dtype=np.float32)
-        mesh_data.loops.foreach_get("normal", normals)
-        attr.data.foreach_set("vector", normals)
-
-    # 3. Split by material
-    bpy.ops.object.select_all(action="DESELECT")
-    mesh_obj.select_set(True)
-    bpy.context.view_layer.objects.active = mesh_obj
-    bpy.ops.object.mode_set(mode="EDIT")
-    bpy.ops.mesh.select_all(action="SELECT")
-    bpy.ops.mesh.separate(type="MATERIAL")
-    bpy.ops.object.mode_set(mode="OBJECT")
-
-    # 4. Collect all mesh children of the armature
-    split_meshes = [c for c in armature_obj.children if c.type == "MESH"]
-
-    # 5. Restore normals, name meshes, set visible_shadow
-    for obj in split_meshes:
-        md = obj.data
-        attr = md.attributes.get("mmd_normal")
-        if attr:
-            n = len(md.loops)
-            norms = np.empty(n * 3, dtype=np.float32)
-            attr.data.foreach_get("vector", norms)
-            md.normals_split_custom_set(norms.reshape(-1, 3).tolist())
-            md.attributes.remove(attr)
-
-        # Name after first material
-        if md.materials and md.materials[0]:
-            obj.name = md.materials[0].name
-            md.name = md.materials[0].name
-
-        # Set visible_shadow = False if ALL materials have mmd_drop_shadow == False
-        if md.materials:
-            all_no_shadow = all(
-                not mat.get("mmd_drop_shadow", True)
-                for mat in md.materials if mat
-            )
-            if all_no_shadow:
-                obj.visible_shadow = False
-
-    # 6. Organize into collection
-    model_name = model.name_e if model.name_e else model.name
-    collection = bpy.data.collections.new(model_name)
-    bpy.context.scene.collection.children.link(collection)
-
-    # Link armature and all meshes into new collection, unlink from old collections
-    for obj in [armature_obj] + split_meshes:
-        # Unlink from all current collections
-        for old_col in list(obj.users_collection):
-            old_col.objects.unlink(obj)
-        collection.objects.link(obj)
-
-    log.info(
-        "Split mesh into %d objects, organized in collection '%s'",
-        len(split_meshes),
-        collection.name,
-    )
-    return split_meshes
-
-
 def import_pmx(
     filepath: str,
     scale: float = DEFAULT_SCALE,
@@ -307,12 +195,6 @@ def import_pmx(
     split_by_material: bool = True,
 ) -> bpy.types.Object:
     """Import a PMX file into the current scene.
-
-    Args:
-        filepath: Path to .pmx file.
-        scale: Import scale factor.
-        use_toon_sphere: Include toon and sphere texture nodes in materials.
-        split_by_material: Split mesh into per-material objects (default True).
 
     Returns the armature object.
     """
@@ -337,15 +219,45 @@ def import_pmx(
     # Build armature
     armature_obj = create_armature(model, scale)
 
-    # Build mesh
-    mesh_obj = create_mesh(model, armature_obj, scale)
+    # Reset SDEF count before mesh creation (meshes accumulate it)
+    armature_obj["mmd_sdef_count"] = 0
 
-    # Create materials and assign to faces (pass armature for driver setup)
-    create_materials(model, mesh_obj, filepath, armature_obj=armature_obj, use_toon_sphere=use_toon_sphere)
+    # Build meshes (per-material + control mesh, or single mesh)
+    mesh_objects = create_meshes(
+        model, armature_obj, scale,
+        split_by_material=split_by_material,
+    )
 
-    # Split mesh by material (after materials assigned, before drivers)
-    if split_by_material and len(model.materials) > 1:
-        _split_mesh_by_material(mesh_obj, armature_obj, model)
+    # Create materials and assign to mesh faces
+    from .mesh import is_control_mesh
+    for i, mesh_obj in enumerate(mesh_objects):
+        if is_control_mesh(mesh_obj):
+            continue
+        if split_by_material and len(model.materials) > 1:
+            # Each mesh gets one material
+            mat_idx = i
+            if mat_idx < len(model.materials):
+                create_materials(
+                    model, mesh_obj, filepath,
+                    armature_obj=armature_obj,
+                    use_toon_sphere=use_toon_sphere,
+                    single_mat_index=mat_idx,
+                )
+                # Apply BLENDED for overlapping materials
+                if mesh_obj.get("_mmd_overlap_blend"):
+                    mat = mesh_obj.data.materials[0] if mesh_obj.data.materials else None
+                    if mat:
+                        mat.surface_render_method = "BLENDED"
+                        mat.use_transparency_overlap = False
+                        log.debug("Set BLENDED for overlapping material: %s", mat.name)
+                    del mesh_obj["_mmd_overlap_blend"]
+        else:
+            # Single mesh gets all materials
+            create_materials(
+                model, mesh_obj, filepath,
+                armature_obj=armature_obj,
+                use_toon_sphere=use_toon_sphere,
+            )
 
     # Store filepath for deferred physics build
     armature_obj["pmx_filepath"] = filepath
@@ -365,10 +277,11 @@ def import_pmx(
     setup_drivers(armature_obj)
 
     log.info(
-        "Import complete: '%s' — %d bones, %d vertices",
+        "Import complete: '%s' — %d bones, %d vertices, %d meshes",
         armature_obj.name,
         len(model.bones),
         len(model.vertices),
+        len(mesh_objects),
     )
 
     _log_import_report(armature_obj)

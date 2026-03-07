@@ -229,6 +229,7 @@ Default (split by material):
 Scene Collection
   └── "Model Name" (collection)
         ├── Armature (top-level, named after model)
+        ├── _mmd_morphs (control mesh — hidden single-triangle, owns all shape keys)
         ├── body (mesh, Armature modifier)
         ├── hair (mesh, Armature modifier)
         ├── eyes (mesh, Armature modifier)
@@ -241,19 +242,21 @@ Armature (top-level, named after model)
   └── Mesh (child, with Armature modifier)
 ```
 
-No root empty object. The armature is the top-level object. Model-level metadata (original PMX name, import scale) stored as custom properties on the armature. Split meshes are named after their first material.
+No root empty object. The armature is the top-level object. Model-level metadata (original PMX name, import scale) stored as custom properties on the armature. Split meshes are named after their first material. The `_mmd_morphs` control mesh is a single degenerate triangle with no material — invisible in viewports but not `hide_viewport` (which would block animation evaluation).
 
 This differs from mmd_tools' hierarchy (`Root Empty → Armature → Mesh`) intentionally, so both addons can coexist without object naming conflicts.
 
-### Mesh split by material
+### Per-material mesh build
 
-After materials are assigned, the single mesh is split into per-material objects using `bpy.ops.mesh.separate(type='MATERIAL')`. This enables:
+Each material gets its own mesh object built directly from PMX data — no `bpy.ops.mesh.separate()`. This eliminates the need for normals backup/restore (custom normals are set per-mesh during construction) and avoids `mesh.separate()`'s performance cost (~2.8s on complex models). Benefits:
 - Per-object modifiers (cloth sim on skirt, solidify for outlines)
 - Light linking (per-object in Blender 5.0)
 - Per-object `visible_shadow` (honors PMX `mmd_drop_shadow` flag)
 - Selective outline rendering
 
-Custom split normals are backed up as an `mmd_normal` FLOAT_VECTOR attribute on CORNER domain before splitting (since `mesh.separate()` does not preserve custom normals), then restored on each resulting mesh. The `mmd_morph_map` is moved from the mesh to the armature so VMD import can find it after split. Shape key names are preserved by `mesh.separate()`, so a single VMD morph action can be shared across all split meshes. Blender 5.0 slotted actions require explicit slot binding: `fcurve_ensure_for_datablock` auto-creates a slot for the primary mesh's ShapeKey datablock, and all secondary meshes share that same slot via `animation_data.action_slot`.
+Each mesh only gets shape keys for morphs that affect its vertices (sparse — most meshes have zero or few morphs). A hidden **control mesh** (`_mmd_morphs`) owns all shape keys as value holders. VMD morph animation targets only the control mesh — a single action, a single NLA track. A `frame_change_post` handler copies control mesh shape key values to visible meshes each frame.
+
+This architecture produces a clean NLA editor with exactly 2 entries: armature (bone action) + `_mmd_morphs` (morph action). No `animation_data` exists on any visible mesh, shape key, or material nodetree.
 
 ### Mesh construction
 
@@ -602,7 +605,7 @@ Behavior:
 2. Create armature with bones
 3. Create mesh with vertex weights
 4. Set up IK constraints
-5. Split mesh by material (back up normals, split, restore, organize into collection)
+5. Build per-material meshes directly from PMX data, create control mesh with all shape keys
 6. Log summary of what was imported/skipped
 
 ### Physics operators
@@ -620,7 +623,6 @@ blender_mmd.inspect_physics            # Copy full RB diagnostic report to clipb
 blender_mmd.select_colliders           # Select all collision-eligible RBs for active RB
 blender_mmd.select_contacts            # Select RBs in contact with active RB at current frame
 blender_mmd.clear_animation            # Clear bone/morph keyframes, reset to rest pose
-blender_mmd.push_to_nla                # Push bone/morph actions to NLA strips
 blender_mmd.mark_actions_as_assets     # Mark all actions as Blender assets
 blender_mmd.view_import_report         # Open MMD Import Report in Text Editor
 blender_mmd.toggle_ik                  # Toggle IK for one chain (target_bone)
@@ -662,7 +664,7 @@ Behavior:
 2. Find the target armature (active selection or auto-detect)
 3. Build Japanese→English bone name lookup from `mmd_name_j` custom properties
 4. If bone keyframes exist: get or create bone action (reuse existing unless `create_new_action`), apply via per-bone coordinate converter (`_BoneConverter`). If no bone keyframes: skip entirely, preserving existing bone animation
-5. If morph keyframes exist: get or create morph action, apply to shape key F-curves via `mmd_morph_map`. Share action + slot across all split meshes via `animation_data.action_slot`
+5. If morph keyframes exist: get or create morph action on the `_mmd_morphs` control mesh, apply to shape key F-curves via `mmd_morph_map`
 6. Apply VMD Bézier interpolation handles to F-curves
 7. Apply IK toggle keyframes as constraint influence F-curves (CONSTANT interpolation), using whichever bone action is active
 8. Set scene FPS to 30 (MMD standard) and extend frame range to fit animation
@@ -814,11 +816,11 @@ Two shader modes controlled by "Toon & Sphere Textures" checkbox on import:
 - `specular` luminance → `Specular IOR Level` (highlight strength, scaled to 0–0.5 range)
 - `shininess` → `Roughness` via `1.0 / pow(s, 0.37)` (matches mmd_tools)
 
-This means model authors' specular intent is honored through standard Blender nodes — glossy parts get highlights, matte parts stay flat. Users can override any property per-material by removing the driver and editing directly.
+This means model authors' specular intent is honored through standard Blender nodes — glossy parts get highlights, matte parts stay flat.
 
 **Full mode** (checkbox on): "MMD Shader" node group with toon/sphere texture mixing pipeline. Specular IOR Level set to 0.0 (toon textures provide specular control instead).
 
-Both modes: Texture loading with dedup, per-face material assignment, UV V-flip, overlapping face detection, global controls via armature drivers (`mmd_emission`, `mmd_toon_fac`, `mmd_sphere_fac`).
+Both modes: Texture loading with dedup, per-face material assignment, UV V-flip, overlapping face detection. Global material properties (`mmd_emission`, `mmd_toon_fac`, `mmd_sphere_fac`) stored on the armature and applied via `update_materials()` — no per-material drivers, keeping material nodetrees free of `animation_data` for a clean NLA editor.
 
 **Remaining optimizations:** `foreach_set` for UV assignment, degenerate face cleanup.
 
@@ -831,7 +833,7 @@ Additional transforms done (grant parent, shadow bones). PMD format support + VM
 - Edge/outline rendering ✅ (Solidify modifier + Emission edge material, per-material edge color/size/alpha from PMX, per-vertex edge_scale, Build/Rebuild/Remove in MMD4B panel)
 - SDEF ✅ (bake-to-MDD pipeline, Mesh Cache playback, toggle A/B comparison, MMD4B panel)
 - Material morphs (VMD material keyframes → Blender property drivers)
-- Per-material mesh split ✅ (done — default on import, enables per-object modifiers/shadows)
+- Per-material mesh build ✅ (done — built directly from PMX data, control mesh for morphs, clean 2-track NLA)
 
 ### Future Roadmap
 
@@ -860,7 +862,7 @@ All user-visible names in Blender are English. Implemented in `translations.py` 
 
 `translate()` and `translate_morph()` also fall through to `translate_chunks()` when their tables have no match, so even the legacy API benefits from chunk translation.
 
-**Per-object `mmd_name_j` storage:** Original Japanese names stored as custom properties on bones, materials, rigid bodies, and joints for VMD matching and debugging. Shape keys use `mmd_morph_map` JSON (on armature) since Blender 5.0 shape keys don't support custom properties.
+**Per-object `mmd_name_j` storage:** Original Japanese names stored as custom properties on bones, materials, rigid bodies, and joints for VMD matching and debugging. Shape keys use `mmd_morph_map` JSON (on the `_mmd_morphs` control mesh) since Blender 5.0 shape keys don't support custom properties.
 
 **Coverage** (tested on MikuV4X): bones 360/360, morphs 63/63, materials 75/77 translated.
 

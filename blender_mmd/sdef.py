@@ -371,10 +371,11 @@ def _mesh_has_sdef(mesh_obj) -> bool:
 
 
 def _get_sdef_meshes(armature_obj) -> list:
-    """Return child mesh objects that have SDEF data."""
+    """Return child mesh objects that have SDEF data (skip control mesh)."""
+    from .mesh import is_control_mesh
     return [
         child for child in armature_obj.children
-        if child.type == "MESH" and _mesh_has_sdef(child)
+        if child.type == "MESH" and not is_control_mesh(child) and _mesh_has_sdef(child)
     ]
 
 

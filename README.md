@@ -34,7 +34,7 @@ mmd_tools is a battle-tested addon that has served the MMD-Blender community for
 | Physics workflow | Must build from rest pose, complex UI | Build/reset/clear anytime, auto-resets after VMD import |
 | Physics debugging | None | Inspect (clipboard report), Select Colliders, Select Contacts |
 | Physics springs | Applied via property update callbacks | Applied directly during joint creation |
-| Split by material | "HIGH RISK & BUGGY" (their words), VMD import doesn't handle split meshes | Fully supported — slotted action shared across all meshes, morph animation works on every piece. Enables per-object light linking and shadow control |
+| Split by material | "HIGH RISK & BUGGY" (their words), VMD import doesn't handle split meshes | Built per-material directly from PMX data. Hidden control mesh (`_mmd_morphs`) owns all shape keys — single morph action, clean 2-track NLA editor. Per-object light linking and shadow control |
 | VMD layering | Single import only — each VMD replaces previous | Append mode (default) — layer body + lip sync + camera from separate VMDs |
 | Long operations | Blocking — no progress, no cancel | Modal operators with live progress and ESC cancel (physics build, SDEF bake) |
 | UI | Sidebar panels, menus, property groups | Minimal — designed for Claude Code + MMD4B panel |
@@ -44,7 +44,7 @@ Both projects share the same core approach for IK constraints (first link bone p
 ## What's implemented
 
 - **PMX/PMD import** — full PMX 2.0/2.1 and PMD parser, armature, mesh, vertex weights, normals, UVs. PMD format auto-detected by file extension — the same downstream pipeline handles both formats
-- **Materials** — Default mode uses a bare Principled BSDF (no node group) with PMX specular/shininess mapped to native properties — models respond to scene lighting, reflections, and environment out of the box, without toon/sphere textures. Optional "Toon & Sphere" mode adds the full MMD look via a ~7-node group (vs ~20 in mmd_tools). Bundled shared toon files (toon01–10.bmp). Global controls via armature drivers, per-material override by removing driver
+- **Materials** — Default mode uses a bare Principled BSDF (no node group) with PMX specular/shininess mapped to native properties — models respond to scene lighting, reflections, and environment out of the box, without toon/sphere textures. Optional "Toon & Sphere" mode adds the full MMD look via a ~7-node group (vs ~20 in mmd_tools). Bundled shared toon files (toon01–10.bmp). Global controls via armature properties (no per-material drivers — keeps NLA editor clean)
 - **VMD motion** — bone keyframes, morph keyframes, IK toggle, bezier interpolation. Append mode layers multiple VMDs (body + lip sync) without replacing existing animation. Auto-maps bone names across PMD/PMX eras via NFKC normalization (half-width↔full-width katakana) and alias table — newer VMD motions work on older PMD-era rigs and vice versa
 - **Morphs** — vertex, UV, bone, material, group morphs as Blender shape keys
 - **Rigid body physics** — correct PMX collision group/mask enforcement via bilateral check (both masks must agree), all joints `disable_collisions=True`, 3-phase build pipeline, auto-reset after VMD import. Debug tools: Inspect (copies full diagnostic to clipboard), Select Colliders (highlights eligible collision partners), Select Contacts (highlights bodies in contact at current frame). MMD4B panel for build/reset/clear with per-chain management
@@ -66,7 +66,7 @@ The debug inspector helps diagnose physics issues: select any rigid body and use
 
 ## Customization via armature properties
 
-After import, key settings live as custom properties on the armature object. Change a single value and all materials or IK constraints update via drivers:
+After import, key settings live as custom properties on the armature object:
 
 | Property | Default | Effect |
 |---|---|---|
@@ -75,7 +75,7 @@ After import, key settings live as custom properties on the armature object. Cha
 | `mmd_sphere_fac` | 1.0 | Sphere texture influence (0 = off, 1 = full) |
 | `ik_loop_factor` | 1 | Multiplier for IK solver iterations (increase for better foot plant accuracy) |
 
-**Note:** Drivers require **Preferences > Save & Load > Auto Run Python Scripts** to be enabled. Per-material override: remove the driver on that material's shader group input and set it manually in the Shader Editor.
+Material properties are applied via `update_materials()` — no per-material drivers, so material nodetrees stay free of `animation_data` and the NLA editor shows only 2 clean tracks (armature + morphs).
 
 ## Requirements
 

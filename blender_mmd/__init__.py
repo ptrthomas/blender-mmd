@@ -7,11 +7,11 @@ log.setLevel(logging.DEBUG)
 
 
 def _restore_morph_sync_handler(*_args):
-    """Re-register morph sync handler after file load if any armature needs it."""
+    """Re-register morph sync handler after file load if any armature has a control mesh."""
     import bpy
+    from .mesh import find_control_mesh, _ensure_morph_sync_handler
     for obj in bpy.data.objects:
-        if obj.type == "ARMATURE" and obj.get("mmd_morph_sync"):
-            from .vmd.importer import _ensure_morph_sync_handler
+        if obj.type == "ARMATURE" and find_control_mesh(obj):
             _ensure_morph_sync_handler()
             return
 
@@ -29,7 +29,7 @@ def register():
 def unregister():
     import bpy
     from . import operators, outlines, panels
-    from .vmd.importer import _remove_morph_sync_handler
+    from .mesh import _remove_morph_sync_handler
     _remove_morph_sync_handler()
     bpy.app.handlers.load_post[:] = [
         h for h in bpy.app.handlers.load_post

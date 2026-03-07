@@ -37,6 +37,8 @@ def find_mmd_armature(context) -> bpy.types.Object | None:
 
 def get_model_info(armature_name: str | None = None) -> dict:
     """Return summary info about an imported MMD model."""
+    from .mesh import is_control_mesh
+
     if armature_name:
         arm_obj = bpy.data.objects.get(armature_name)
     else:
@@ -48,7 +50,7 @@ def get_model_info(armature_name: str | None = None) -> dict:
         return {"error": "No armature found"}
 
     arm = arm_obj.data
-    mesh_children = [c for c in arm_obj.children if c.type == "MESH"]
+    mesh_children = [c for c in arm_obj.children if c.type == "MESH" and not is_control_mesh(c)]
 
     info = {
         "name": arm_obj.name,

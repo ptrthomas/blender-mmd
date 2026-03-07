@@ -13,6 +13,7 @@ from .helpers import (
     get_mesh_physics_chains,
     get_mesh_sdef_count,
 )
+from .mesh import is_control_mesh
 
 
 def _get_ik_chains(armature_obj) -> list[tuple[str, str, bool]]:
@@ -51,7 +52,8 @@ class BLENDER_MMD_PT_mesh(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        return find_selected_mesh(context) is not None
+        mesh = find_selected_mesh(context)
+        return mesh is not None and not is_control_mesh(mesh)
 
     def draw(self, context):
         layout = self.layout
@@ -406,12 +408,18 @@ class BLENDER_MMD_PT_animation(bpy.types.Panel):
         nla_morph_tracks = 0
         if armature_obj.animation_data:
             nla_bone_tracks = len(armature_obj.animation_data.nla_tracks)
-        for child in armature_obj.children:
-            if child.type == "MESH" and child.data.shape_keys:
-                sk = child.data.shape_keys
-                if sk.animation_data:
-                    nla_morph_tracks = len(sk.animation_data.nla_tracks)
-                break
+        from .mesh import find_control_mesh
+        ctrl = find_control_mesh(armature_obj)
+        morph_mesh = ctrl
+        if morph_mesh is None:
+            for child in armature_obj.children:
+                if child.type == "MESH" and child.data.shape_keys:
+                    morph_mesh = child
+                    break
+        if morph_mesh and morph_mesh.data.shape_keys:
+            sk = morph_mesh.data.shape_keys
+            if sk.animation_data:
+                nla_morph_tracks = len(sk.animation_data.nla_tracks)
 
         if nla_bone_tracks or nla_morph_tracks:
             layout.label(
@@ -427,10 +435,6 @@ class BLENDER_MMD_PT_animation(bpy.types.Panel):
         # --- Action buttons ---
         layout.separator()
 
-        if has_bone_anim or morph_action:
-            row = layout.row(align=True)
-            row.operator("blender_mmd.push_to_nla", text="Push to NLA", icon="NLA_PUSHDOWN")
-
         row = layout.row(align=True)
         row.operator("blender_mmd.mark_actions_as_assets", text="Mark as Assets", icon="ASSET_MANAGER")
 
@@ -442,9 +446,16 @@ class BLENDER_MMD_PT_animation(bpy.types.Panel):
 
 
 def _find_morph_action(armature_obj) -> "bpy.types.Action | None":
-    """Find the morph action from child meshes."""
+    """Find the morph action from control mesh or first mesh with shape keys."""
+    from .mesh import find_control_mesh
+    ctrl = find_control_mesh(armature_obj)
+    if ctrl and ctrl.data.shape_keys:
+        sk = ctrl.data.shape_keys
+        if sk.animation_data and sk.animation_data.action:
+            return sk.animation_data.action
+    # Legacy fallback
     for child in armature_obj.children:
-        if child.type != "MESH":
+        if child.type != "MESH" or is_control_mesh(child):
             continue
         sk = child.data.shape_keys
         if sk and sk.animation_data and sk.animation_data.action:
@@ -474,10 +485,11 @@ class BLENDER_MMD_PT_outlines(bpy.types.Panel):
         has_outlines = armature_obj.get("mmd_outlines_built", False)
 
         if has_outlines:
-            # Count meshes with outline modifier
+            # Count meshes with outline modifier (exclude control mesh)
             outline_count = sum(
                 1 for c in armature_obj.children
-                if c.type == "MESH" and c.modifiers.get("mmd_edge")
+                if c.type == "MESH" and not is_control_mesh(c)
+                and c.modifiers.get("mmd_edge")
             )
             layout.label(
                 text=f"Active: {outline_count} meshes with outlines",
@@ -561,7 +573,8 @@ class BLENDER_MMD_PT_sdef(bpy.types.Panel):
             sdef_count = armature_obj.get("mmd_sdef_count", 0)
             sdef_mesh_count = sum(
                 1 for child in armature_obj.children
-                if child.type == "MESH" and child.vertex_groups.get("mmd_sdef")
+                if child.type == "MESH" and not is_control_mesh(child)
+                and child.vertex_groups.get("mmd_sdef")
             )
             layout.label(
                 text=f"{sdef_count:,} SDEF vertices across {sdef_mesh_count} meshes",

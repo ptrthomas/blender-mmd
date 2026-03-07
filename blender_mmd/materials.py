@@ -329,25 +329,6 @@ def _load_image(filepath: str) -> "bpy.types.Image":
 # ---------------------------------------------------------------------------
 
 
-def _add_driver(
-    node_shader: "bpy.types.ShaderNode",
-    input_name: str,
-    armature_obj: "bpy.types.Object",
-    prop_name: str,
-) -> None:
-    """Add a driver to a shader group node input, targeting an armature custom property."""
-    fcurve = node_shader.inputs[input_name].driver_add("default_value")
-    drv = fcurve.driver
-    drv.type = "AVERAGE"
-    var = drv.variables.new()
-    var.name = "val"
-    var.type = "SINGLE_PROP"
-    target = var.targets[0]
-    target.id_type = "OBJECT"
-    target.id = armature_obj
-    target.data_path = f'["{prop_name}"]'
-
-
 def _setup_armature_controls(armature_obj: "bpy.types.Object") -> None:
     """Add global material control custom properties to the armature."""
     rna = armature_obj.id_properties_ui
@@ -369,42 +350,13 @@ def _setup_armature_controls(armature_obj: "bpy.types.Object") -> None:
 
 
 def setup_drivers(armature_obj: "bpy.types.Object") -> None:
-    """Add drivers to all materials on the mesh child of the armature.
+    """Apply current material control values to all materials.
 
-    Must be called after the full import is complete and the depsgraph
-    has been flushed, otherwise drivers evaluate as invalid.
+    Instead of per-material drivers (which create animation_data and clutter
+    the NLA editor), material controls are synced via the frame_change_post
+    handler in mesh.py. This function does an initial apply of current values.
     """
-    for child in armature_obj.children:
-        if child.type != "MESH":
-            continue
-        for mat in child.data.materials:
-            if not mat or not mat.use_nodes:
-                continue
-            shader = mat.node_tree.nodes.get("MMD Shader")
-            if shader is None:
-                continue
-            # Skip if already has drivers
-            ad = mat.node_tree.animation_data
-            if ad and ad.drivers:
-                continue
-            # Group node has "Emission" input; bare BSDF has "Emission Strength"
-            emission_input = "Emission" if "Emission" in shader.inputs else "Emission Strength"
-            _add_driver(shader, emission_input, armature_obj, "mmd_emission")
-            # Check if toon/sphere textures are connected
-            has_toon = any(
-                link.to_socket.name == "Toon Tex"
-                for link in mat.node_tree.links
-                if link.to_node == shader
-            )
-            has_sphere = any(
-                link.to_socket.name == "Sphere Tex"
-                for link in mat.node_tree.links
-                if link.to_node == shader
-            )
-            if has_toon:
-                _add_driver(shader, "Toon Fac", armature_obj, "mmd_toon_fac")
-            if has_sphere:
-                _add_driver(shader, "Sphere Fac", armature_obj, "mmd_sphere_fac")
+    update_materials(armature_obj)
 
 
 def update_materials(armature_obj: "bpy.types.Object") -> None:
@@ -557,6 +509,7 @@ def create_materials(
     filepath: str,
     armature_obj: "bpy.types.Object | None" = None,
     use_toon_sphere: bool = False,
+    single_mat_index: int | None = None,
 ) -> None:
     """Create Blender materials from PMX data and assign to mesh faces.
 
@@ -566,6 +519,8 @@ def create_materials(
         filepath: Path to the PMX file (for resolving textures).
         armature_obj: The armature object (for driver setup). Optional.
         use_toon_sphere: Include toon and sphere texture nodes.
+        single_mat_index: If set, only create and assign this one material
+            (used for per-material mesh build where each mesh has one material).
     """
     pmx_dir = os.path.dirname(os.path.abspath(filepath))
     mesh_data = mesh_obj.data
@@ -601,7 +556,13 @@ def create_materials(
         # Flush depsgraph so custom properties are visible to drivers
         bpy.context.view_layer.update()
 
-    for mat_data in model.materials:
+    # Determine which materials to create
+    if single_mat_index is not None:
+        mat_list = [model.materials[single_mat_index]]
+    else:
+        mat_list = model.materials
+
+    for mat_data in mat_list:
         mat_name = resolve_name(mat_data.name, mat_data.name_e, MATERIAL_NAMES)
         mat = bpy.data.materials.new(name=mat_name)
         mat.use_nodes = True
@@ -750,22 +711,23 @@ def create_materials(
         mesh_data.materials.append(mat)
 
     # --- Per-face material assignment ---
-    indices = build_material_indices(model.materials)
-    if indices and len(indices) == len(mesh_data.polygons):
-        mesh_data.polygons.foreach_set("material_index", indices)
+    if single_mat_index is None:
+        # Full mesh: assign per-face material indices
+        indices = build_material_indices(model.materials)
+        if indices and len(indices) == len(mesh_data.polygons):
+            mesh_data.polygons.foreach_set("material_index", indices)
+            mesh_data.update()
+        # Fix overlapping face materials (z-fighting layers like eye highlights)
+        _fix_overlapping_face_materials(mesh_data)
+        log.info(
+            "Created %d materials, assigned to %d faces",
+            len(model.materials),
+            len(indices),
+        )
+    else:
+        # Single material per mesh: all faces use material index 0
         mesh_data.update()
-
-    # Fix overlapping face materials (z-fighting layers like eye highlights)
-    _fix_overlapping_face_materials(mesh_data)
-
-    # Note: drivers are added separately via setup_drivers() after import
-    # completes, since the depsgraph needs the armature fully registered.
-
-    log.info(
-        "Created %d materials, assigned to %d faces",
-        len(model.materials),
-        len(indices),
-    )
+        log.info("Assigned material '%s' to mesh", mat_list[0].name)
 
 
 def _fix_overlapping_face_materials(mesh_data: "bpy.types.Mesh") -> None:

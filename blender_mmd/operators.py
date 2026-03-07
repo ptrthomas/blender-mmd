@@ -97,12 +97,19 @@ class BLENDER_MMD_OT_import_vmd(bpy.types.Operator, ImportHelper):
         max=120,
     )
 
+    include_static: BoolProperty(
+        name="Include Static Channels",
+        description="Create F-curves for bones/morphs that stay at rest pose. Off by default for a cleaner Graph Editor",
+        default=False,
+    )
+
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "create_new_action")
         layout.prop(self, "fps_mode")
         if self.fps_mode == "CUSTOM":
             layout.prop(self, "fps_custom")
+        layout.prop(self, "include_static")
 
     def execute(self, context):
         from .vmd import parse
@@ -126,6 +133,7 @@ class BLENDER_MMD_OT_import_vmd(bpy.types.Operator, ImportHelper):
                 vmd, armature_obj, scale,
                 create_new_action=self.create_new_action,
                 target_fps=target_fps,
+                include_static=self.include_static,
             )
             self.report(
                 {"INFO"},
@@ -592,7 +600,7 @@ class BLENDER_MMD_OT_clear_animation(bpy.types.Operator):
             pb.rotation_euler = (0, 0, 0)
             pb.scale = (1, 1, 1)
 
-        # Clear shape key animation on child meshes
+        # Clear shape key animation on child meshes (including control mesh)
         morph_cleared = False
         morph_nla_cleared = False
         for child in armature_obj.children:
@@ -627,16 +635,10 @@ class BLENDER_MMD_OT_clear_animation(bpy.types.Operator):
         if morph_nla_cleared:
             cleared.append("morph NLA")
 
-        # Clear morph sync handler
+        # Clear legacy morph sync handler
         if armature_obj.get("mmd_morph_sync"):
-            from .vmd.importer import _remove_morph_sync_handler
             del armature_obj["mmd_morph_sync"]
-            _remove_morph_sync_handler()
             cleared.append("morph sync")
-
-        # Restore material emission drivers (cleared during NLA push)
-        from .materials import setup_drivers
-        setup_drivers(armature_obj)
 
         # Go to frame 1 for clean state
         bpy.context.scene.frame_set(1)
@@ -1375,14 +1377,12 @@ class BLENDER_MMD_OT_delete_mesh(bpy.types.Operator):
 
         armature_obj = mesh_obj.parent
 
-        # Prevent deleting the primary morph mesh when it holds NLA strips
-        # or is the sync source for secondary meshes
-        primary_name = armature_obj.get("mmd_morph_sync")
-        if primary_name and mesh_obj.name == primary_name:
+        # Prevent deleting the control mesh
+        from .mesh import is_control_mesh
+        if is_control_mesh(mesh_obj):
             self.report(
                 {"ERROR"},
-                "Cannot delete: this mesh holds morph NLA strips. "
-                "Clear animation first.",
+                "Cannot delete: this is the morph control mesh.",
             )
             return {"CANCELLED"}
 
@@ -1446,55 +1446,6 @@ class BLENDER_MMD_OT_view_import_report(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class BLENDER_MMD_OT_push_to_nla(bpy.types.Operator):
-    """Push current VMD actions to NLA strips for layering"""
-
-    bl_idname = "blender_mmd.push_to_nla"
-    bl_label = "Push to NLA"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        arm = find_mmd_armature(context)
-        if not arm:
-            return False
-        has_bone = arm.animation_data and arm.animation_data.action
-        has_morph = any(
-            c.type == "MESH"
-            and c.data.shape_keys
-            and c.data.shape_keys.animation_data
-            and c.data.shape_keys.animation_data.action
-            for c in arm.children
-        )
-        return has_bone or has_morph
-
-    def execute(self, context):
-        from .vmd.importer import push_to_nla
-
-        armature_obj = find_mmd_armature(context)
-        if armature_obj is None:
-            self.report({"ERROR"}, "No MMD armature found.")
-            return {"CANCELLED"}
-
-        # Use bone action name as strip name, or fallback
-        strip_name = "VMD"
-        if armature_obj.animation_data and armature_obj.animation_data.action:
-            strip_name = armature_obj.animation_data.action.name
-
-        try:
-            result = push_to_nla(armature_obj, strip_name)
-            self.report(
-                {"INFO"},
-                f"Pushed to NLA: {result['bone_strips']} bone, "
-                f"{result['morph_strips']} morph strips",
-            )
-            return {"FINISHED"}
-        except Exception as e:
-            log.exception("NLA push failed")
-            self.report({"ERROR"}, str(e))
-            return {"CANCELLED"}
-
-
 class BLENDER_MMD_OT_mark_actions_as_assets(bpy.types.Operator):
     """Mark bone and morph actions as Blender assets for reuse"""
 
@@ -1530,17 +1481,21 @@ class BLENDER_MMD_OT_mark_actions_as_assets(bpy.types.Operator):
                 for strip in track.strips:
                     _mark(strip.action)
 
-        # Active + NLA morph actions
-        for child in armature_obj.children:
-            if child.type != "MESH":
-                continue
-            sk = child.data.shape_keys
-            if sk and sk.animation_data:
+        # Active + NLA morph actions (from control mesh or first mesh with SK)
+        from .mesh import find_control_mesh
+        morph_mesh = find_control_mesh(armature_obj)
+        if morph_mesh is None:
+            for child in armature_obj.children:
+                if child.type == "MESH" and child.data.shape_keys:
+                    morph_mesh = child
+                    break
+        if morph_mesh and morph_mesh.data.shape_keys:
+            sk = morph_mesh.data.shape_keys
+            if sk.animation_data:
                 _mark(sk.animation_data.action)
                 for track in sk.animation_data.nla_tracks:
                     for strip in track.strips:
                         _mark(strip.action)
-            break  # only check primary mesh (all share same action)
 
         if marked:
             self.report({"INFO"}, f"Marked as assets: {', '.join(marked)}")
@@ -1588,7 +1543,6 @@ _classes = (
     BLENDER_MMD_OT_select_mesh_rigid_bodies,
     BLENDER_MMD_OT_delete_mesh,
     BLENDER_MMD_OT_view_import_report,
-    BLENDER_MMD_OT_push_to_nla,
     BLENDER_MMD_OT_mark_actions_as_assets,
 )
 
