@@ -436,11 +436,12 @@ class BLENDER_MMD_PT_animation(bpy.types.Panel):
         layout.separator()
 
         row = layout.row(align=True)
+        row.operator("blender_mmd.rest_pose", text="Rest Pose", icon="ARMATURE_DATA")
         row.operator("blender_mmd.mark_actions_as_assets", text="Mark as Assets", icon="ASSET_MANAGER")
 
         layout.operator(
             "blender_mmd.clear_animation",
-            text="Clear Animation",
+            text="Remove Animation",
             icon="TRASH",
         )
 

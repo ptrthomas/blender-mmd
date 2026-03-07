@@ -559,11 +559,46 @@ class BLENDER_MMD_OT_remove_chain(bpy.types.Operator):
             return {"CANCELLED"}
 
 
+class BLENDER_MMD_OT_rest_pose(bpy.types.Operator):
+    """Reset armature to rest pose and all morphs to zero"""
+
+    bl_idname = "blender_mmd.rest_pose"
+    bl_label = "Rest Pose"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        armature_obj = find_mmd_armature(context)
+        if armature_obj is None:
+            self.report({"ERROR"}, "No MMD armature found.")
+            return {"CANCELLED"}
+
+        # Reset all pose bones
+        for pb in armature_obj.pose.bones:
+            pb.location = (0, 0, 0)
+            pb.rotation_quaternion = (1, 0, 0, 0)
+            pb.rotation_euler = (0, 0, 0)
+            pb.scale = (1, 1, 1)
+
+        # Reset all shape key values to 0
+        for child in armature_obj.children:
+            if child.type != "MESH":
+                continue
+            sk = child.data.shape_keys
+            if sk is None:
+                continue
+            for kb in sk.key_blocks:
+                if kb != sk.reference_key:
+                    kb.value = 0.0
+
+        self.report({"INFO"}, "Reset to rest pose")
+        return {"FINISHED"}
+
+
 class BLENDER_MMD_OT_clear_animation(bpy.types.Operator):
-    """Clear all animation from MMD model (bone keyframes, morph keyframes)"""
+    """Remove all animation from MMD model (actions, NLA tracks)"""
 
     bl_idname = "blender_mmd.clear_animation"
-    bl_label = "Clear MMD Animation"
+    bl_label = "Remove Animation"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -1530,6 +1565,7 @@ _classes = (
     BLENDER_MMD_OT_remove_chain,
     BLENDER_MMD_OT_toggle_chain_collisions,
     BLENDER_MMD_OT_toggle_chain_physics,
+    BLENDER_MMD_OT_rest_pose,
     BLENDER_MMD_OT_clear_animation,
     BLENDER_MMD_OT_toggle_ik,
     BLENDER_MMD_OT_toggle_all_ik,

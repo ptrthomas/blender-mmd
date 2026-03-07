@@ -622,7 +622,8 @@ blender_mmd.toggle_chain_physics       # Toggle kinematic mode for a chain (chai
 blender_mmd.inspect_physics            # Copy full RB diagnostic report to clipboard
 blender_mmd.select_colliders           # Select all collision-eligible RBs for active RB
 blender_mmd.select_contacts            # Select RBs in contact with active RB at current frame
-blender_mmd.clear_animation            # Clear bone/morph keyframes, reset to rest pose
+blender_mmd.rest_pose                  # Reset bones to rest pose, morphs to zero (temporary)
+blender_mmd.clear_animation            # Remove all animation (actions + NLA tracks)
 blender_mmd.mark_actions_as_assets     # Mark all actions as Blender assets
 blender_mmd.view_import_report         # Open MMD Import Report in Text Editor
 blender_mmd.toggle_ik                  # Toggle IK for one chain (target_bone)
@@ -657,14 +658,15 @@ blender_mmd.import_vmd
 Parameters:
 - `filepath`: Path to .vmd file
 - `create_new_action`: Create new actions replacing existing (default: off — appends to current actions)
+- `include_static`: Create F-curves for bones/morphs at rest pose (default: off — keeps Graph Editor clean)
 - Scale auto-detected from armature's `import_scale` custom property
 
 Behavior:
 1. Parse VMD file (bone keyframes, morph keyframes, property/IK toggle keyframes)
 2. Find the target armature (active selection or auto-detect)
 3. Build Japanese→English bone name lookup from `mmd_name_j` custom properties
-4. If bone keyframes exist: get or create bone action (reuse existing unless `create_new_action`), apply via per-bone coordinate converter (`_BoneConverter`). If no bone keyframes: skip entirely, preserving existing bone animation
-5. If morph keyframes exist: get or create morph action on the `_mmd_morphs` control mesh, apply to shape key F-curves via `mmd_morph_map`
+4. If bone keyframes exist: get or create bone action (reuse existing unless `create_new_action`), skip static bones (all keyframes at rest pose) unless `include_static`, apply via per-bone coordinate converter (`_BoneConverter`). If no bone keyframes: skip entirely, preserving existing bone animation
+5. If morph keyframes exist: get or create morph action on the `_mmd_morphs` control mesh, skip static morphs (all keyframes at weight=0) unless `include_static`, apply to shape key F-curves via `mmd_morph_map`
 6. Apply VMD Bézier interpolation handles to F-curves
 7. Apply IK toggle keyframes as constraint influence F-curves (CONSTANT interpolation), using whichever bone action is active
 8. Set scene FPS to 30 (MMD standard) and extend frame range to fit animation
@@ -770,7 +772,8 @@ Rigid body creation, GENERIC_SPRING joints with spring values, collision layers 
 
 **Animation sub-panel:**
 - Shows current action name when animation is loaded
-- "Clear Animation" button: removes bone keyframes (armature action) and morph keyframes (shape key action), resets all pose bones to rest position, resets shape key values to 0, returns to frame 1
+- "Rest Pose" button: temporarily resets all pose bones and morph values to zero — keyframes take over again on playback/scrub
+- "Remove Animation" button: removes all actions and NLA tracks, resets to rest pose, returns to frame 1
 
 **Physics sub-panel:**
 - **No physics state:** NCC mode dropdown (Draft/Proximity/All) + proximity slider (greyed out unless Proximity selected) + "Build Rigid Bodies" button (calls `build_physics` with `mode=rigid_body`)
@@ -805,7 +808,7 @@ Rigid body creation, GENERIC_SPRING joints with spring values, collision layers 
 - **Per-mesh controls** in Mesh sub-panel: toggle outline on/off per mesh, edit edge color, per-mesh thickness multiplier (`mmd_edge_thickness_mult`, default 1.0, reactive via `update` callback)
 - Thickness formula: `edge_size × import_scale × 0.05 × global_mult × per_mesh_mult`
 
-**Workflow:** Import PMX → click "Build Rigid Bodies" in MMD4B panel → optionally import VMD (physics auto-resets) → play animation. Use "Reset" after changing pose to reposition rigid bodies without full rebuild. Use "Clear Animation" to strip all keyframes and reload a different VMD. Use per-chain X buttons to remove physics from specific parts (e.g. remove skirt physics to replace with cloth sim). Use IK Toggle to disable IK chains for non-standard poses. Select a rigid body and use Inspect/Colliders/Contacts for debugging collision issues.
+**Workflow:** Import PMX → click "Build Rigid Bodies" in MMD4B panel → optionally import VMD (physics auto-resets) → play animation. Use "Reset" after changing pose to reposition rigid bodies without full rebuild. Use "Rest Pose" to temporarily return to rest pose while editing. Use "Remove Animation" to strip all keyframes and reload a different VMD. Use per-chain X buttons to remove physics from specific parts (e.g. remove skirt physics to replace with cloth sim). Use IK Toggle to disable IK chains for non-standard poses. Select a rigid body and use Inspect/Colliders/Contacts for debugging collision issues.
 
 ### Milestone 5: Materials & Textures ✅
 
