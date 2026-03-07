@@ -595,8 +595,8 @@ def resolve_name(name_j: str, name_e: str, table: dict[str, str]) -> str:
 
     Priority:
     1. Full-name table lookup (after NFKC normalization)
-    2. Non-empty name_e (if it looks English — mostly ASCII)
-    3. Chunk-based translation of name_j
+    2. Chunk-based translation of name_j (consistent CamelCase)
+    3. Non-empty name_e (if it looks English — fallback for unknown chunks)
     4. name_j as-is (fallback)
     """
     if not name_j:
@@ -612,16 +612,16 @@ def resolve_name(name_j: str, name_e: str, table: dict[str, str]) -> str:
         if result:
             return result
 
-    # 2. Non-empty name_e that looks English
+    # 2. Chunk-based translation (preferred — produces consistent CamelCase)
+    chunked = translate_chunks(name_j)
+    if chunked:
+        return chunked
+
+    # 3. Non-empty name_e that looks English (fallback for untranslatable chunks)
     if name_e and name_e.strip():
         cleaned = name_e.strip()
         if _looks_english(cleaned):
             return normalize_lr(cleaned)
-
-    # 3. Chunk-based translation
-    chunked = translate_chunks(name_j)
-    if chunked:
-        return chunked
 
     # 4. Fallback: Japanese name as-is
     return name_j

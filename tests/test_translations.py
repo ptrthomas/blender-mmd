@@ -160,16 +160,16 @@ class TestTranslateChunks:
 
 
 class TestResolveName:
-    def test_english_name_used(self):
-        # With empty BONE_NAMES, name_e is used when it looks English
-        assert resolve_name("センター", "center", BONE_NAMES) == "center"
+    def test_chunks_preferred_over_name_e(self):
+        # Chunks produce consistent CamelCase, preferred over lowercase name_e
+        assert resolve_name("センター", "center", BONE_NAMES) == "Center"
 
     def test_chunks_used_when_no_name_e(self):
         # No name_e → chunks translate
         assert resolve_name("センター", "", BONE_NAMES) == "Center"
 
     def test_english_name_fallback(self):
-        # Unknown Japanese, good English name
+        # Unknown Japanese, good English name → name_e used as fallback
         assert resolve_name("不明な骨", "SomeBone", BONE_NAMES) == "SomeBone"
 
     def test_garbage_english_filtered(self):
