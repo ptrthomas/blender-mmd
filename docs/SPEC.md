@@ -824,7 +824,7 @@ Both modes: Texture loading with dedup, per-face material assignment, UV V-flip,
 
 ### Milestone 6: Animation Polish
 
-Additional transforms done (grant parent, shadow bones). PMD format support + VMD bone name auto-mapping done. PMD WaistCancel fix neutralizes LowerBody-cancelling bones that break modern VMDs. Knee pre-bend nudge fixes IK solver convergence on PMD models with backward knee geometry. Remaining: VMD camera motion, CCD IK solver.
+Additional transforms done (grant parent, shadow bones). PMD format support + VMD bone name auto-mapping done. PMD WaistCancel fix neutralizes LowerBody-cancelling bones that break modern VMDs. Knee pre-bend nudge fixes IK solver convergence on PMD models with backward knee geometry.
 
 ### Milestone 7: Creative Tools (in progress)
 
@@ -866,34 +866,11 @@ All user-visible names in Blender are English. Implemented in `translations.py` 
 
 **Import report:** After PMX import (and VMD import), a "MMD Import Report" Blender Text datablock is created listing all untranslated names and unmatched VMD bones/morphs. Viewable via Text Editor or the report button in the MMD4B panel header. Helps identify candidates for new chunk/table entries.
 
-#### Lookup Consolidation (future)
-
-Centralized reverse-lookup maps on the armature to eliminate redundant O(n) scans. Six subsystems currently rebuild their own lookup maps by scanning all bones. Solution: build canonical lookup tables once at import time, store on armature as JSON custom properties (`mmd_bone_index_map`, `mmd_bone_jp_map`, `mmd_morph_jp_map`).
-
 #### Performance & Mesh Optimizations
 
-- **UV foreach_set:** Replace per-loop UV assignment with flat-array `foreach_set` (same pattern as material_index assignment). Significant speedup on 100k+ vertex models.
+- **UV foreach_set:** ✅ Done. UV assignment uses flat-array `foreach_set` (same pattern as material_index assignment).
 - **Degenerate face cleanup:** ✅ Done. `_filter_degenerate_faces()` in `importer.py` removes triangles with duplicate vertex indices before geometry creation, adjusting per-material `face_count` to keep material assignment correct. Prevents `normals_split_custom_set` crash on models with degenerate topology.
 - **Sharp edge marking:** ✅ Done. All edges marked sharp via `foreach_set("use_edge_sharp", True)` — safe because custom normals override sharpness. Avoids `bpy.ops.mesh.edges_select_sharp` and `bmesh.normal_update()` which both hang on degenerate topology.
-- **Parallel texture loading:** Load textures in batch rather than one-at-a-time during material setup.
-- **Decimate / face reduction:** Many MMD models are over-tessellated (100k+ faces where 30k would suffice). Post-import decimate pass or operator that intelligently reduces face count while preserving UV seams, shape keys, and material boundaries. Could use Blender's Decimate modifier with smart settings, or a custom approach that respects MMD-specific topology (face layers, edge loops at material boundaries).
-
-#### VMD Camera Motion
-
-Import VMD camera keyframes (position, rotation, FOV, distance) as Blender camera animation. VMD camera data is already parsed; just needs the Blender camera creation and F-curve setup.
-
-#### Bone Morphs
-
-VMD can keyframe bone morphs (pose presets like "T-pose", "fist"). Currently parsed but not applied. Needs driver or action-based implementation.
-
-#### UV Morphs
-
-PMX UV morphs offset UV coordinates per-vertex. Need shape key UV layers or a Geometry Nodes approach since Blender shape keys only affect vertex positions, not UVs.
-
-#### CCD IK Solver
-
-MMD uses CCD (Cyclic Coordinate Descent) IK which converges differently than Blender's built-in IK. A custom CCD solver (evaluated per-frame via driver or handler) would match MMD motion more precisely. High complexity, moderate impact (current IK is "close enough" for most motions).
-
 #### Retargeting Tools
 
 Since we understand MMD bone rolls and local axes, we could build tools to retarget between:
@@ -931,3 +908,33 @@ API changes from earlier Blender versions that affect our code:
 4. **Progressive enhancement**: Each milestone builds on the previous. The addon is useful at every stage.
 5. **Minimal metadata**: Don't pollute Blender objects with MMD-specific data. Store only what's needed for the current feature set.
 6. **Fix as we go**: Handle Blender API issues as they surface during testing rather than auditing upfront.
+
+---
+
+## Community Contributions Welcome
+
+Features not currently planned by the maintainer. Contributions welcome from anyone interested.
+
+#### VMD Camera Motion
+
+Import VMD camera keyframes (position, rotation, FOV, distance) as Blender camera animation. VMD camera data is already parsed; needs Blender camera creation and F-curve setup.
+
+#### CCD IK Solver
+
+MMD uses CCD (Cyclic Coordinate Descent) IK which converges differently than Blender's built-in IK. A custom CCD solver (evaluated per-frame via driver or handler) would match MMD motion more precisely. High complexity, moderate impact (current IK is "close enough" for most motions).
+
+#### Bone Morphs
+
+VMD can keyframe bone morphs (pose presets like "T-pose", "fist"). Currently parsed but not applied. Needs driver or action-based implementation.
+
+#### UV Morphs
+
+PMX UV morphs offset UV coordinates per-vertex. Need shape key UV layers or a Geometry Nodes approach since Blender shape keys only affect vertex positions, not UVs.
+
+#### Decimate / Face Reduction
+
+Many MMD models are over-tessellated (100k+ faces where 30k would suffice). Post-import decimate pass or operator that intelligently reduces face count while preserving UV seams, shape keys, and material boundaries.
+
+#### Lookup Consolidation
+
+Centralized reverse-lookup maps on the armature to eliminate redundant O(n) bone scans. ~4 subsystems each scan all bones for `bone_id` or `mmd_name_j`. Low priority — each scan is O(n) over 100-400 bones, runs once per operation, negligible cost.

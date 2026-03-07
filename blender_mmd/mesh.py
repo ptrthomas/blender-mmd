@@ -52,40 +52,50 @@ def create_mesh(
     mesh_data.update()
 
     # --- Vertex groups (bone weights) ---
-    # Pre-create all vertex groups
+    # Pre-create all vertex groups and cache references by bone index
+    vg_list: list[bpy.types.VertexGroup] = []
     for name in bone_names:
-        mesh_obj.vertex_groups.new(name=name)
+        vg_list.append(mesh_obj.vertex_groups.new(name=name))
+    n_bones = len(bone_names)
 
-    # Assign weights
+    # Collect per-bone assignments: bone_idx -> (unity_verts, varying_pairs)
+    # unity_verts: list of vertex indices with weight 1.0 (batchable)
+    # varying_pairs: list of (vi, weight) for non-1.0 weights
+    unity: dict[int, list[int]] = {}
+    varying: dict[int, list[tuple[int, float]]] = {}
+
     for vi, pmx_v in enumerate(pmx_verts):
         w = pmx_v.weight
         if isinstance(w, BoneWeightBDEF1):
-            if 0 <= w.bone < len(bone_names):
-                vg = mesh_obj.vertex_groups[bone_names[w.bone]]
-                vg.add([vi], 1.0, "REPLACE")
+            if 0 <= w.bone < n_bones:
+                unity.setdefault(w.bone, []).append(vi)
         elif isinstance(w, (BoneWeightBDEF2, BoneWeightSDEF)):
             if w.bone1 == w.bone2:
-                # Both bones identical — assign weight 1.0 to avoid
-                # second assignment overwriting the first with near-zero
-                if 0 <= w.bone1 < len(bone_names):
-                    mesh_obj.vertex_groups[bone_names[w.bone1]].add(
-                        [vi], 1.0, "REPLACE"
-                    )
+                if 0 <= w.bone1 < n_bones:
+                    unity.setdefault(w.bone1, []).append(vi)
             else:
-                if 0 <= w.bone1 < len(bone_names) and w.weight > 0:
-                    mesh_obj.vertex_groups[bone_names[w.bone1]].add(
-                        [vi], w.weight, "REPLACE"
-                    )
-                if 0 <= w.bone2 < len(bone_names) and (1.0 - w.weight) > 0:
-                    mesh_obj.vertex_groups[bone_names[w.bone2]].add(
-                        [vi], 1.0 - w.weight, "REPLACE"
-                    )
+                if 0 <= w.bone1 < n_bones and w.weight > 0:
+                    varying.setdefault(w.bone1, []).append((vi, w.weight))
+                w2 = 1.0 - w.weight
+                if 0 <= w.bone2 < n_bones and w2 > 0:
+                    varying.setdefault(w.bone2, []).append((vi, w2))
         elif isinstance(w, (BoneWeightBDEF4, BoneWeightQDEF)):
             for bone_idx, weight in zip(w.bones, w.weights):
-                if 0 <= bone_idx < len(bone_names) and weight > 0:
-                    mesh_obj.vertex_groups[bone_names[bone_idx]].add(
-                        [vi], weight, "REPLACE"
-                    )
+                if 0 <= bone_idx < n_bones and weight > 0:
+                    if weight == 1.0:
+                        unity.setdefault(bone_idx, []).append(vi)
+                    else:
+                        varying.setdefault(bone_idx, []).append((vi, weight))
+
+    # Batch assign weight=1.0 vertices (one call per bone)
+    for bone_idx, verts in unity.items():
+        vg_list[bone_idx].add(verts, 1.0, "REPLACE")
+
+    # Assign varying weights (one call per vertex, but with cached vg ref)
+    for bone_idx, pairs in varying.items():
+        vg = vg_list[bone_idx]
+        for vi, w in pairs:
+            vg.add([vi], w, "REPLACE")
 
     # --- SDEF attributes ---
     # Store SDEF C/R0/R1 parameters as per-vertex float3 mesh attributes
@@ -134,9 +144,13 @@ def create_mesh(
     # --- Per-vertex edge scale ---
     # Stored as a locked vertex group for Solidify modifier per-vertex thickness
     vg_edge = mesh_obj.vertex_groups.new(name="mmd_edge_scale")
+    # Batch by weight value to minimize vg.add calls
+    edge_by_weight: dict[float, list[int]] = {}
     for vi, pmx_v in enumerate(pmx_verts):
         if pmx_v.edge_scale > 0:
-            vg_edge.add([vi], pmx_v.edge_scale, "REPLACE")
+            edge_by_weight.setdefault(round(pmx_v.edge_scale, 6), []).append(vi)
+    for weight, indices in edge_by_weight.items():
+        vg_edge.add(indices, weight, "REPLACE")
     vg_edge.lock_weight = True
 
     # --- UV coordinates ---
@@ -192,6 +206,7 @@ def create_mesh(
     # --- Custom split normals ---
     normals = [pmx_verts[v.vertex_index].normal for v in mesh_data.loops]
     mesh_data.normals_split_custom_set(normals)
+
     # --- Shape keys (vertex morphs) ---
     _create_shape_keys(model, mesh_obj, scale)
 

@@ -776,22 +776,47 @@ def _fix_overlapping_face_materials(mesh_data: "bpy.types.Mesh") -> None:
     Setting it to BLENDED with use_transparency_overlap=False prevents z-fighting.
     Matches mmd_tools __fixOverlappingFaceMaterials.
     """
+    import numpy as np
+
     if not mesh_data.materials:
         return
 
+    n_polys = len(mesh_data.polygons)
+    if n_polys == 0:
+        return
+
+    # Bulk read all data upfront (avoids per-polygon RNA access)
+    mat_indices = np.empty(n_polys, dtype=np.int32)
+    mesh_data.polygons.foreach_get("material_index", mat_indices)
+
+    n_loops = len(mesh_data.loops)
+    loop_vi = np.empty(n_loops, dtype=np.int32)
+    mesh_data.loops.foreach_get("vertex_index", loop_vi)
+
+    n_verts = len(mesh_data.vertices)
+    coords_flat = np.empty(n_verts * 3, dtype=np.float32)
+    mesh_data.vertices.foreach_get("co", coords_flat)
+
+    loop_starts = np.empty(n_polys, dtype=np.int32)
+    loop_totals = np.empty(n_polys, dtype=np.int32)
+    mesh_data.polygons.foreach_get("loop_start", loop_starts)
+    mesh_data.polygons.foreach_get("loop_total", loop_totals)
+
+    # Pre-compute rounded per-vertex coords for fast key building
+    coords = coords_flat.reshape(-1, 3)
+    rounded = np.round(coords, 6)
+
     check: dict[tuple, int] = {}
     mi_skip = -1
-    verts = mesh_data.vertices
 
-    for poly in mesh_data.polygons:
-        mi = poly.material_index
+    for pi in range(n_polys):
+        mi = int(mat_indices[pi])
         if mi <= mi_skip:
             continue
-        vis = [mesh_data.loops[li].vertex_index for li in poly.loop_indices]
-        key = tuple(sorted(
-            (round(verts[vi].co.x, 6), round(verts[vi].co.y, 6), round(verts[vi].co.z, 6))
-            for vi in vis
-        ))
+        ls = int(loop_starts[pi])
+        lt = int(loop_totals[pi])
+        vis = loop_vi[ls:ls + lt]
+        key = tuple(sorted(tuple(rounded[v]) for v in vis))
         if key not in check:
             check[key] = mi
         elif check[key] < mi:
