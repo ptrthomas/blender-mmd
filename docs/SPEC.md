@@ -809,8 +809,7 @@ Let parsing exceptions propagate. The import operator catches exceptions at the 
 
 ### Open items
 
-- **Material morphs** — VMD material keyframes (per-frame color/alpha/texture changes). Parsed but not applied.
-- **Cloth/soft body** — cage-based hair/skirt deformation as alternative to rigid body physics.
+- **Cloth simulation** — Blender-native cloth for garments/hair as alternative to rigid body physics. See `docs/CLOTH.md` for design notes.
 
 ---
 
@@ -850,8 +849,8 @@ Features not currently planned by the maintainer. Contributions welcome from any
 - **VMD camera motion** — import camera keyframes (position, rotation, FOV, distance) as Blender camera animation. VMD camera data is already parsed; needs Blender camera creation and F-curve setup.
 - **CCD IK solver** — MMD uses CCD (Cyclic Coordinate Descent) IK which converges differently than Blender's built-in solver. A custom CCD solver (per-frame via handler) would match MMD motion more precisely. High complexity, moderate impact (current IK is close enough for most motions).
 - **Bone morphs** — VMD can keyframe bone morphs (pose presets like "T-pose", "fist"). Currently parsed but not applied. Needs action-based implementation.
+- **Material morphs** — VMD material keyframes (per-frame color/alpha/texture changes). Parsed but not applied.
 - **Retargeting tools** — MMD↔Mixamo/Rigify/mocap retargeting. Correct bone rolls make this feasible.
-- **Soft body / cloth improvements** — cage-based hair/skirt deformation.
 
 #### UV Morphs
 

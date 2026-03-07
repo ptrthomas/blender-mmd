@@ -1,70 +1,73 @@
 # Cloth Simulation for MMD Models
 
-## Approach
+## Approach: Cage-based deformation
 
-Start with a simple base model (swimsuit/bodysuit type). Build cloth garments on top with clean topology designed for Blender's cloth sim. This gives proper clothes-to-body and clothes-to-clothes collision.
+Preserve original meshes (with all materials, textures, emission, alpha effects) and deform them via a low-poly cloth cage.
 
 ### Pipeline
 
-1. Import PMX base model
-2. Delete original garment faces from mesh (by material)
-3. Create cloth garment — clean quad topology, user-editable
-4. Separate collision body from base mesh (just the skin areas that garments touch)
-5. Apply modifiers: Armature + Cloth on garment, Collision on body
-6. Optionally bake original textures onto new garment mesh (Selected to Active bake)
+1. User selects meshes that make up a garment (e.g. 5 skirt meshes)
+2. Generate an open-ended cylinder cage around the selection (N rings x M segments)
+3. Shrinkwrap cage onto mesh surface to get initial shape
+4. User edits cage to better fit model contours (optional)
+5. Auto-weight cage to armature bones
+6. Add Cloth modifier to cage with pin group on top ring(s)
+7. Bind original meshes to cage via Mesh Deform
+8. User picks body meshes for collision (e.g. thighs, pantsu)
+9. Play animation — cage simulates cloth, original meshes follow
+
+### Why this approach
+
+- **Preserves original materials** — no need to rebake textures, emission, alpha, decals
+- **One cage per garment** — even composite garments (5 skirt meshes for emission/transparency layers) share one cage
+- **User-editable** — cage is simple enough to tweak by hand
+- **Clean separation** — cage handles physics, original meshes handle rendering
 
 ### Objects
 
 | Object | Modifiers | Notes |
 |--------|-----------|-------|
 | **Armature** | — | Skeleton + VMD animation |
-| **Base Mesh** | Armature | Body with garment faces deleted, NO Collision |
-| **Cloth Garment** | Armature → Cloth | Clean quads, smooth shaded, `use_dynamic_mesh=True` |
-| **Collision Body** | Armature → Collision | Separated skin materials (e.g. thighs, torso), follows animation |
+| **Original meshes** | Armature + MeshDeform | Unchanged rendering, deformed by cage |
+| **Cloth cage** | Armature + Cloth | Low-poly, wireframe display, `use_dynamic_mesh=True` |
+| **Collision body** | Armature + Collision | User-selected body meshes (thighs, torso, etc.) |
 
-### Preserving Original UV/Textures
+### Binding: Mesh Deform (not Surface Deform)
 
-Original modeler's UV work can be transferred to new cloth mesh:
-1. Keep original mesh hidden as reference
-2. UV unwrap the new cloth mesh
-3. Bake > Diffuse from original (Selected) to new mesh (Active)
-4. Use shader nodes for animated/luminous effects that MMD materials had
+Surface Deform requires the target to enclose/surround the source vertices and projects onto faces — fails when the cage is shrinkwrapped ON the surface rather than around it. Mesh Deform works with a cage that approximates the mesh volume and handles vertices outside the cage bbox gracefully.
 
 ---
 
-## Key Decisions
+## Proof of concept findings
 
-- **Garment IS the cloth mesh** — don't try to deform the original hi-res mesh via Surface Deform or Mesh Deform (causes crumpling from normal discontinuities and overlapping decal layers)
-- **Targeted collision only** — collide against specific body materials (e.g. `body02` + `pantsu` for thighs), NOT the full mesh. Full mesh causes false collisions with hair, sleeves, etc.
-- **Delete original garment faces** — they must be removed from the base mesh, not just hidden. Otherwise cloth collides against original geometry.
-- **Small model scale** — MMD models are ~1.5 Blender units tall. Collision distances must be ~0.001, not the typical 0.005+.
-- **`use_dynamic_mesh = True`** — critical. Recalculates cloth rest shape from Armature each frame so pinned vertices follow body.
-- **Simple topology wins** — a clean cone/cylinder with predictable quads simulates more stably than a decimated or scanned approximation of the original shape.
+Tested on YYB Miku skirt (5 meshes, 18K verts) with twirl animation.
 
-### Approaches Tried and Rejected
+### What worked
 
-- **Mesh Deform with closed cage**: works but cylindrical cage can't handle non-cylindrical garments
-- **Surface Deform to hi-res mesh**: binds OK but crumples during simulation
-- **Decimated original as cloth mesh**: irregular topology, unstable sim
-- **3D-scan profiling**: shape matches well but body intersection issues, smoothing artifacts
-- **Collision against full body mesh**: false collisions everywhere
+- Cylinder generation (12 rings x 24 segments = 288 verts)
+- Shrinkwrap to largest skirt mesh — cage conforms to skirt shape
+- Mesh Deform binding — all 5 skirt meshes bound successfully
+- Auto-weights from armature — cage follows body movement
+- Pin group on top 2 rings (full pin + half pin gradient)
+
+### What needs work
+
+- **Cloth stability** — twirl motion flings cage outward. Needs:
+  - Higher stiffness values (tension/compression/shear)
+  - More pin rows (3-4 instead of 2) with steeper gradient
+  - Possibly higher damping to prevent oscillation
+  - Mass tuning for small MMD scale
+- **Cage fit** — shrinkwrap targets only the largest mesh. Could use a merged temporary target from all selected meshes for better fit
+- **Collision tuning** — small model scale (1.5 Blender units tall) needs tiny collision distances (~0.001)
 
 ---
 
-## Cloth Settings
-
-### Pin Group
-
-`vertex_group_mass`: **1.0 = pinned** (follows armature), **0.0 = free** (cloth physics).
-
-Top edge of garment pinned, 2-3 row gradient below for stiff waistband, rest free.
-
-### Parameters (Starting Point)
+## Cloth settings (starting point)
 
 ```python
 cloth.quality = 12                  # substeps
 cloth.mass = 0.3
-cloth.air_damping = 2.0             # prevents rubber oscillation
+cloth.air_damping = 2.0
 cloth.tension_stiffness = 15.0
 cloth.compression_stiffness = 15.0
 cloth.shear_stiffness = 5.0
@@ -77,7 +80,7 @@ cloth.pin_stiffness = 1.0
 cloth.use_dynamic_mesh = True
 ```
 
-### Collision Parameters
+### Collision parameters
 
 ```python
 # On collision body object
@@ -85,7 +88,7 @@ collision.thickness_outer = 0.001
 collision.thickness_inner = 0.0005
 collision.cloth_friction = 5.0
 
-# On cloth garment
+# On cloth cage
 collision_settings.distance_min = 0.001
 collision_settings.collision_quality = 5
 collision_settings.use_self_collision = False  # enable later if needed
@@ -93,23 +96,23 @@ collision_settings.use_self_collision = False  # enable later if needed
 
 ---
 
-## TODO
+## Planned operator
 
-### Phase 1: Base Model Workflow
-- [ ] Find/prepare simple base model (swimsuit type)
-- [ ] Build cloth skirt on base model
-- [ ] Get cloth-to-body collision working cleanly
-- [ ] Test with VMD animation
-- [ ] Tune parameters for natural movement
+`blender_mmd.build_cloth` in MMD4B panel:
 
-### Phase 2: Operator
-- [ ] `build_cloth_garment` — material selection → face deletion → proxy generation → modifier wiring
-- [ ] Add to MMD4B panel
-- [ ] Expose cloth params for tuning
+1. User selects garment meshes in outliner/viewport
+2. Click "Build Cloth Cage" — generates cylinder, shrinkwraps, auto-weights, adds Cloth + MeshDeform
+3. User picks collision body meshes
+4. Expose key cloth params for tuning (stiffness, damping, pin rows)
+5. "Remove Cloth" to tear down cage and restore original modifiers
 
-### Phase 3: Full Garment System
-- [ ] Multiple garment layers with inter-garment collision
-- [ ] UV bake workflow for transferring original textures
-- [ ] Shader nodes for MMD-style effects (emission, toon)
-- [ ] Per-model presets
-- [ ] Bake workflow for final renders
+### TODO
+
+- **MeshDeform not transferring cage motion** — skirt meshes stay frozen at rest pose when Armature modifier is removed (only MeshDeform from cage remains). With both Armature + MeshDeform, the Armature dominates and MeshDeform has no visible effect. Need to investigate: possibly MeshDeform binds to the cage's rest shape and doesn't pick up Armature+Cloth evaluated mesh. May need to use a different binding approach, or bind after applying Armature as rest shape on the cage. Alternatively, try Surface Deform with a cage that fully encloses the mesh (add caps + slight inflation beyond shrinkwrap).
+
+### Key decisions still needed
+
+- **Pin bone detection** — auto-detect which bone to pin to (nearest ancestor of garment vertices), or let user pick
+- **Cylinder dimensions** — auto-size from bounding box, or let user specify rings/segments
+- **Multi-garment** — cloth-to-cloth collision between e.g. top overlay and skirt
+- **Bake workflow** — bake cloth sim for final renders (Blender native bake)
