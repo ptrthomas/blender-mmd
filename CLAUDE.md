@@ -5,16 +5,14 @@ Read `docs/SPEC.md` first. It is the single source of truth for architecture, de
 ## Quick orientation
 
 - **This project**: PMX/PMD/VMD importer addon for Blender 5.0+, driven by Claude Code
-- **Milestone 1** (done): PMX parser + armature + mesh import
-- **Milestone 2** (done): Morphs / shape keys
-- **Milestone 3** (done): VMD motion import (bone keyframes, morph keyframes, bone roll)
-- **Milestone 3.5** (done): IK fix — correct constraint placement, native limits, VMD IK toggle
-- **Milestone 4** (done): Rigid body physics — functional but limited by Blender's RB solver
-- **Milestone 4b** (done): Physics cleanup — two modes (none, rigid_body), MMD4B panel with Build/Rebuild/Clear. NCC proximity slider + draft checkbox, per-chain collision/physics toggles, NCC rebuild. Cloth/soft body deferred to future phase.
-- **Milestone 5** (done): Materials & textures — Principled BSDF-based "MMD Shader" node group, bundled toon textures with fallback, global controls via armature drivers (emission/toon/sphere), per-face assignment, UV V-flip, overlapping face fix.
-- **Milestone 6** (in progress): Animation polish — additional transforms done (grant parent, shadow bones). PMD format support + VMD bone name auto-mapping done. Remaining: VMD camera, CCD IK
-- **Milestone 7** (in progress): Creative tools — edge/outline rendering done. Material morphs remaining.
-- **Milestone 8** (in progress): NLA & animation workflow — FPS control done, NLA push-down done, asset marking done. See `docs/NLA.md` for design doc. Remaining: body-part splitting, asset library, remixing tools, rig retargeting.
+- PMX/PMD parser, armature, per-material mesh build, vertex weights, normals, UVs
+- Morphs (vertex + group flattening), control mesh architecture, clean 2-track NLA
+- VMD motion (bone/morph keyframes, IK toggle, interpolation, append mode, FPS control, static channel filtering)
+- Rigid body physics (3-phase build, NCC empties, debug inspector, per-chain management)
+- Materials (bare Principled BSDF default, optional toon/sphere, no drivers)
+- Additional transforms (grant parent, shadow bones), SDEF, edge outlines
+- PMD support, cross-era VMD bone name mapping, chunk-based name translation
+- See `docs/SPEC.md` "Open items" for remaining work
 
 ## Reference repos (siblings in ../  )
 
@@ -87,7 +85,7 @@ When working on blender-mmd and encountering opportunities to improve blender-ag
 
 ## Key decisions
 
-- **Name translation**: Unified `resolve_name()` in `translations.py` for all categories (bones, morphs, materials, rigid bodies, joints). Priority: full-name table → English name (if pure ASCII, no CJK/kana) → chunk-based translation → Japanese fallback. `translate_chunks()` does greedy longest-match against `NAME_CHUNKS` dict (~150 entries), handles 左/右→.L/.R, NFKC normalization. Covers Japanese and simplified Chinese model names. Japanese names stored as `mmd_name_j` custom properties for VMD matching.
+- **Name translation**: Unified `resolve_name()` in `translations.py` for all categories (bones, morphs, materials, rigid bodies, joints). Priority: full-name table → chunk-based translation (consistent CamelCase) → English name_e fallback → Japanese fallback. `translate_chunks()` does greedy longest-match against `NAME_CHUNKS` dict (~320 entries), handles 左/右→.L/.R, NFKC normalization. Chunks preferred over model-provided `name_e` which is often low-quality (lowercase, duplicated). Japanese names stored as `mmd_name_j` custom properties for VMD matching.
 - **Bone names**: English in Blender, Japanese stored as `mmd_name_j` custom property (for VMD matching)
 - **Coordinate conversion**: Done in parser. Downstream code uses Blender coords only.
 - **IK constraints**: Placed on first link bone (e.g. knee), NOT the end effector (ankle). Uses Blender-native `ik_min_x/max_x` properties instead of `LIMIT_ROTATION` constraints. `ik_loop_factor` param (default 5) multiplies PMX iteration count for good foot placement.

@@ -731,23 +731,20 @@ Let parsing exceptions propagate. The import operator catches exceptions at the 
 
 ---
 
-## Milestones
+## Status
 
-### Milestone 1: Import PMX — Armature + Mesh ✅
+### What's done
 
-PMX parser (clean rewrite), armature with bones, mesh with geometry/weights/normals/UVs, IK constraints, import operator. Parser test harness validates against mmd_tools.
-
-### Milestone 2: Morphs & Shape Keys ✅
-
-Vertex morphs imported as Blender shape keys. Group morphs flattened into composite vertex shape keys at import time (recursively resolves vertex morph children, accumulates weighted deltas; non-vertex children like UV/BONE/MATERIAL skipped). This enables VMD mouth/face animation on models that use group morphs (e.g. YYB Miku's あ/い/う/え/お).
-
-### Milestone 3: VMD Motion Import ✅
-
-VMD parser, bone/morph keyframes as F-curves, IK toggle via constraint influence, translation table for Japanese→English bone matching, interpolation curves, scene FPS (30).
-
-### Milestone 4: Rigid Body Physics ✅
-
-Rigid body creation, GENERIC_SPRING joints with spring values, collision layers (shared layer 0 + own group), non-collision constraint empties with proximity-based filtering (mmd_tools-style `non_collision_distance_scale`), all joints `disable_collisions=True`, bone coupling (STATIC/DYNAMIC/DYNAMIC_BONE). Springs enabled, soft constraints disabled (oscillation issues). Build restructured into 3 phases. Debug inspector (inspect/colliders/contacts operators). Auto-reset after VMD import. MMD4B panel for Build/Reset/Remove with per-chain management and selected RB diagnostics.
+- **PMX/PMD import** — full parser (clean rewrite), armature with bones, per-material mesh build, vertex weights, normals, UVs, IK constraints. PMD auto-detected by extension, same downstream pipeline.
+- **Morphs** — vertex morphs as shape keys, group morphs flattened into composite vertex keys. Hidden control mesh (`_mmd_morphs`) owns all shape keys — single morph action, clean 2-track NLA editor.
+- **VMD motion** — bone/morph keyframes as F-curves, IK toggle via constraint influence, interpolation curves, append mode for layering, static channel filtering for clean Graph Editor, FPS control.
+- **Rigid body physics** — 3-phase build, GENERIC_SPRING joints, bilateral collision mask enforcement via NCC empties, debug inspector (inspect/colliders/contacts), auto-reset after VMD import, per-chain management in MMD4B panel.
+- **Materials** — two shader modes (bare Principled BSDF default, optional toon/sphere node group), specular mapping, bundled toon textures, global controls via armature properties (no drivers).
+- **Additional transforms** — grant parent system (D bones, shoulder cancel, arm twist, eye tracking), shadow bones.
+- **Edge outlines** — Solidify modifier + Emission BSDF, per-material edge color/size/alpha, per-vertex edge_scale, per-mesh controls.
+- **SDEF** — bake-to-MDD pipeline, Mesh Cache playback, instant A/B toggle.
+- **Name translation** — unified 4-tier engine: full-name table → chunk translation (CamelCase) → name_e fallback → Japanese. ~320 chunk entries, covers 95%+ of names.
+- **PMD support** — separate parser outputting same types, cross-era VMD bone name mapping, WaistCancel fix, knee pre-bend.
 
 **Test data (`tests/samples/`):**
 - `初音ミク.pmx` — simple Miku model (122 bones, 45 rigid bodies, 27 joints)
@@ -810,80 +807,10 @@ Rigid body creation, GENERIC_SPRING joints with spring values, collision layers 
 
 **Workflow:** Import PMX → click "Build Rigid Bodies" in MMD4B panel → optionally import VMD (physics auto-resets) → play animation. Use "Reset" after changing pose to reposition rigid bodies without full rebuild. Use "Rest Pose" to temporarily return to rest pose while editing. Use "Remove Animation" to strip all keyframes and reload a different VMD. Use per-chain X buttons to remove physics from specific parts (e.g. remove skirt physics to replace with cloth sim). Use IK Toggle to disable IK chains for non-standard poses. Select a rigid body and use Inspect/Colliders/Contacts for debugging collision issues.
 
-### Milestone 5: Materials & Textures ✅
+### Open items
 
-Two shader modes controlled by "Toon & Sphere Textures" checkbox on import:
-
-**Basic mode** (default): Bare Principled BSDF named "MMD Shader" — no node group wrapper. Uses native BSDF inputs directly, giving a hybrid toon/3D look: emission provides MMD-style flat illumination while the BSDF responds to scene lighting, reflections, and environment. PMX specular data mapped to native BSDF properties:
-- `specular` color → `Specular Tint` (highlight color)
-- `specular` luminance → `Specular IOR Level` (highlight strength, scaled to 0–0.5 range)
-- `shininess` → `Roughness` via `1.0 / pow(s, 0.37)` (matches mmd_tools)
-
-This means model authors' specular intent is honored through standard Blender nodes — glossy parts get highlights, matte parts stay flat.
-
-**Full mode** (checkbox on): "MMD Shader" node group with toon/sphere texture mixing pipeline. Specular IOR Level set to 0.0 (toon textures provide specular control instead).
-
-Both modes: Texture loading with dedup, per-face material assignment, UV V-flip, overlapping face detection. Global material properties (`mmd_emission`, `mmd_toon_fac`, `mmd_sphere_fac`) stored on the armature and applied via `update_materials()` — no per-material drivers, keeping material nodetrees free of `animation_data` for a clean NLA editor.
-
-**Remaining optimizations:** `foreach_set` for UV assignment, degenerate face cleanup.
-
-### Milestone 6: Animation Polish
-
-Additional transforms done (grant parent, shadow bones). PMD format support + VMD bone name auto-mapping done. PMD WaistCancel fix neutralizes LowerBody-cancelling bones that break modern VMDs. Knee pre-bend nudge fixes IK solver convergence on PMD models with backward knee geometry.
-
-### Milestone 7: Creative Tools (in progress)
-
-- Edge/outline rendering ✅ (Solidify modifier + Emission edge material, per-material edge color/size/alpha from PMX, per-vertex edge_scale, Build/Rebuild/Remove in MMD4B panel)
-- SDEF ✅ (bake-to-MDD pipeline, Mesh Cache playback, toggle A/B comparison, MMD4B panel)
-- Material morphs (VMD material keyframes → Blender property drivers)
-- Per-material mesh build ✅ (done — built directly from PMX data, control mesh for morphs, clean 2-track NLA)
-
-### Future Roadmap
-
-Features beyond the current milestone plan. Ordered roughly by impact/feasibility.
-
-#### SDEF — Spherical Deformation (volume preservation)
-
-PMX supports SDEF bone weighting as an alternative to standard linear blend skinning (LBS). SDEF preserves volume at joints — prevents the "candy wrapper" collapse at elbows and knees that LBS causes when bones rotate significantly.
-
-**How it works in MMD:** Each SDEF vertex stores three extra parameters: C (center point), R0, and R1 (reference positions for each bone). Instead of linearly blending the two bone transforms, SDEF spherically interpolates rotations around C, keeping the mesh surface on a sphere and preventing volume loss.
-
-**Implementation:** Bake-to-MDD pipeline in `sdef.py`. SDEF C/R0/R1 stored as `mmd_sdef_c`/`mmd_sdef_r0`/`mmd_sdef_r1` float3 mesh attributes (scaled by import_scale, Y↔Z swapped by parser). Per-vertex NLERP quaternion blending computes volume-preserving positions. Results written to MDD (LightWave PointCache2 format) and played back via Mesh Cache modifier (zero-cost). Armature modifier muted on baked meshes. Toggle swaps modifier visibility for instant SDEF/LBS A/B. MMD4B SDEF sub-panel with Bake/Clear/Toggle/Select. See `docs/SDEF.md` for full algorithm and architecture.
-
-**Impact:** High for character animation quality. Noticeable on elbows, knees, shoulders. Most visible in close-up renders and extreme poses.
-
-#### English Names Everywhere ✅
-
-All user-visible names in Blender are English. Implemented in `translations.py` via a unified 4-tier resolution engine applied to every named object category.
-
-**`resolve_name(name_j, name_e, table)`** — unified resolver used by bones, morphs, materials, rigid bodies, and joints:
-
-1. **Full-name table lookup** — small override tables only for names where chunks produce no result or misleading results: `BONE_NAMES` (empty — chunks handle everything), `MORPH_NAMES` (47 entries — single hiragana vowels, symbols, unique onomatopoeia), `MATERIAL_NAMES` (6 entries — compound words like 黒目→Iris). NFKC-normalized before lookup.
-2. **English name validation** — uses `name_e` from PMX only if it "looks English" (>50% of non-whitespace chars are ASCII). Filters out garbage `name_e` values (e.g. `ﾀｧ､・`) that model authors copy from the Japanese field.
-3. **Chunk-based translation** — `translate_chunks()` splits the Japanese name into chunks (kanji runs, kana runs, ASCII runs, numbers) and translates each via `NAME_CHUNKS` table (~320 entries). Greedy longest-match. Handles `左`/`右` → `.L`/`.R` Blender suffix convention. Example: `右スリーブ１IK` → `Sleeve1IK.R`. This is the workhorse — handles 95%+ of all translations.
-4. **Japanese fallback** — original name as-is.
-
-`translate()` and `translate_morph()` also fall through to `translate_chunks()` when their tables have no match, so even the legacy API benefits from chunk translation.
-
-**Per-object `mmd_name_j` storage:** Original Japanese names stored as custom properties on bones, materials, rigid bodies, and joints for VMD matching and debugging. Shape keys use `mmd_morph_map` JSON (on the `_mmd_morphs` control mesh) since Blender 5.0 shape keys don't support custom properties.
-
-**Coverage** (tested on MikuV4X): bones 360/360, morphs 63/63, materials 75/77 translated.
-
-**Import report:** After PMX import (and VMD import), a "MMD Import Report" Blender Text datablock is created listing all untranslated names and unmatched VMD bones/morphs. Viewable via Text Editor or the report button in the MMD4B panel header. Helps identify candidates for new chunk/table entries.
-
-#### Performance & Mesh Optimizations
-
-- **UV foreach_set:** ✅ Done. UV assignment uses flat-array `foreach_set` (same pattern as material_index assignment).
-- **Degenerate face cleanup:** ✅ Done. `_filter_degenerate_faces()` in `importer.py` removes triangles with duplicate vertex indices before geometry creation, adjusting per-material `face_count` to keep material assignment correct. Prevents `normals_split_custom_set` crash on models with degenerate topology.
-- **Sharp edge marking:** ✅ Done. All edges marked sharp via `foreach_set("use_edge_sharp", True)` — safe because custom normals override sharpness. Avoids `bpy.ops.mesh.edges_select_sharp` and `bmesh.normal_update()` which both hang on degenerate topology.
-#### Retargeting Tools
-
-Since we understand MMD bone rolls and local axes, we could build tools to retarget between:
-- MMD models (different bone structures)
-- MMD ↔ standard rigs (Mixamo, Rigify)
-- Motion capture data → MMD armature
-
-This is where correct bone roll really pays off — the roll defines what "rotate arm 45° around X" means physically.
+- **Material morphs** — VMD material keyframes (per-frame color/alpha/texture changes). Parsed but not applied.
+- **Cloth/soft body** — cage-based hair/skirt deformation as alternative to rigid body physics.
 
 ---
 
@@ -920,17 +847,11 @@ API changes from earlier Blender versions that affect our code:
 
 Features not currently planned by the maintainer. Contributions welcome from anyone interested.
 
-#### VMD Camera Motion
-
-Import VMD camera keyframes (position, rotation, FOV, distance) as Blender camera animation. VMD camera data is already parsed; needs Blender camera creation and F-curve setup.
-
-#### CCD IK Solver
-
-MMD uses CCD (Cyclic Coordinate Descent) IK which converges differently than Blender's built-in IK. A custom CCD solver (evaluated per-frame via driver or handler) would match MMD motion more precisely. High complexity, moderate impact (current IK is "close enough" for most motions).
-
-#### Bone Morphs
-
-VMD can keyframe bone morphs (pose presets like "T-pose", "fist"). Currently parsed but not applied. Needs driver or action-based implementation.
+- **VMD camera motion** — import camera keyframes (position, rotation, FOV, distance) as Blender camera animation. VMD camera data is already parsed; needs Blender camera creation and F-curve setup.
+- **CCD IK solver** — MMD uses CCD (Cyclic Coordinate Descent) IK which converges differently than Blender's built-in solver. A custom CCD solver (per-frame via handler) would match MMD motion more precisely. High complexity, moderate impact (current IK is close enough for most motions).
+- **Bone morphs** — VMD can keyframe bone morphs (pose presets like "T-pose", "fist"). Currently parsed but not applied. Needs action-based implementation.
+- **Retargeting tools** — MMD↔Mixamo/Rigify/mocap retargeting. Correct bone rolls make this feasible.
+- **Soft body / cloth improvements** — cage-based hair/skirt deformation.
 
 #### UV Morphs
 
