@@ -121,7 +121,7 @@ def _draw_sdef(layout, armature_obj):
         fs = armature_obj.get("mmd_sdef_frame_start", "?")
         fe = armature_obj.get("mmd_sdef_frame_end", "?")
         state = "ON" if is_enabled else "OFF (LBS)"
-        label = f"SDEF: {sdef_count:,} verts, {sdef_mesh_count} meshes | {fs}\u2013{fe} | {state}"
+        label = f"SDEF: {sdef_count:,} vertices, {sdef_mesh_count} meshes | {fs}\u2013{fe} | {state}"
         layout.label(text=label, icon="MESH_ICOSPHERE")
 
         row = layout.row(align=True)
@@ -131,7 +131,7 @@ def _draw_sdef(layout, armature_obj):
         row.operator("blender_mmd.bake_sdef", text="Rebake", icon="FILE_REFRESH")
         row.operator("blender_mmd.clear_sdef_bake", text="Clear", icon="TRASH")
     else:
-        label = f"SDEF: {sdef_count:,} verts across {sdef_mesh_count} meshes"
+        label = f"SDEF: {sdef_count:,} vertices across {sdef_mesh_count} meshes"
         row = layout.row(align=True)
         row.label(text=label, icon="MESH_ICOSPHERE")
         if not bpy.data.is_saved:
@@ -560,7 +560,7 @@ class BLENDER_MMD_PT_mesh(bpy.types.Panel):
             mesh_sdef_count = get_mesh_sdef_count(mesh_obj)
             row = layout.row(align=True)
             row.label(
-                text=f"{mesh_sdef_count:,} SDEF vertices",
+                text=f"SDEF: {mesh_sdef_count:,} vertices",
                 icon="MESH_ICOSPHERE",
             )
             row.operator(
