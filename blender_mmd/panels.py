@@ -513,12 +513,9 @@ class BLENDER_MMD_PT_mesh(bpy.types.Panel):
         mesh_obj = find_selected_mesh(context)
         armature_obj = mesh_obj.parent
 
-        # --- Info ---
-        layout.label(text=mesh_obj.name, icon="MESH_DATA")
-        layout.label(
-            text=f"{len(mesh_obj.data.vertices):,} vertices | "
-            f"{len(mesh_obj.data.materials)} materials"
-        )
+        row = layout.row()
+        row.label(text=mesh_obj.name, icon="MESH_DATA")
+        row.operator("blender_mmd.delete_mesh", text="Delete", icon="TRASH")
 
         mat = mesh_obj.data.materials[0] if mesh_obj.data.materials else None
 
@@ -532,15 +529,15 @@ class BLENDER_MMD_PT_mesh(bpy.types.Panel):
             has_outline = solidify is not None
 
             row = layout.row(align=True)
+            row.label(
+                text=f"Outline: {abs(solidify.thickness):.4f}" if has_outline else "Outline",
+                icon="MOD_SOLIDIFY",
+            )
             row.operator(
                 "blender_mmd.toggle_mesh_outline",
                 text="",
                 icon="HIDE_OFF" if has_outline else "HIDE_ON",
                 depress=has_outline,
-            )
-            row.label(
-                text=f"Outline: {abs(solidify.thickness):.4f}" if has_outline else "Outline: OFF",
-                icon="MOD_SOLIDIFY",
             )
 
             if has_outline:
@@ -592,13 +589,6 @@ class BLENDER_MMD_PT_mesh(bpy.types.Panel):
                     n = len(chain.get("rigid_indices", []))
                     col.label(text=f"  {name} ({group}, {n})")
 
-        # --- Delete ---
-        layout.separator()
-        layout.operator(
-            "blender_mmd.delete_mesh",
-            text="Delete Mesh",
-            icon="TRASH",
-        )
 
 
 # ---------------------------------------------------------------------------
