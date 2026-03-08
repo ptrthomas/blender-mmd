@@ -36,20 +36,18 @@ def _on_thickness_mult_update(obj, _context):
     if not arm:
         return
     scale = arm.get("import_scale", 0.08)
-    global_mult = arm.get("mmd_edge_thickness", 1.0)
+    global_mult = arm.mmd_edge_thickness
     edge_size = base_mat.get("mmd_edge_size", 1.0)
     mod.thickness = edge_size * scale * _THICKNESS_FACTOR * global_mult * obj.mmd_edge_thickness_mult
 
 
-def build_outlines(
-    armature_obj: bpy.types.Object,
-    thickness_mult: float = 1.0,
-) -> int:
+def build_outlines(armature_obj: bpy.types.Object) -> int:
     """Build outline modifiers on all eligible mesh children.
 
     Returns the number of meshes that received outlines.
     """
     scale = armature_obj.get("import_scale", 0.08)
+    global_mult = armature_obj.mmd_edge_thickness
     count = 0
 
     from .mesh import is_control_mesh
@@ -76,7 +74,7 @@ def build_outlines(
         mod.offset = 1  # extrude outward
         mod.material_offset = 1  # use slot 1 for shell
         per_mesh_mult = obj.mmd_edge_thickness_mult
-        mod.thickness = edge_size * scale * _THICKNESS_FACTOR * thickness_mult * per_mesh_mult
+        mod.thickness = edge_size * scale * _THICKNESS_FACTOR * global_mult * per_mesh_mult
 
         # Per-vertex thickness via mmd_edge_scale vertex group
         if "mmd_edge_scale" in obj.vertex_groups:
@@ -87,7 +85,7 @@ def build_outlines(
     if count > 0:
         armature_obj["mmd_outlines_built"] = True
 
-    log.info("Built outlines on %d meshes (thickness_mult=%.2f)", count, thickness_mult)
+    log.info("Built outlines on %d meshes (global_mult=%.2f)", count, global_mult)
     return count
 
 
@@ -215,7 +213,7 @@ def toggle_mesh_outline(mesh_obj: bpy.types.Object, armature_obj: bpy.types.Obje
             return False
 
         scale = armature_obj.get("import_scale", 0.08)
-        global_mult = armature_obj.get("mmd_edge_thickness", 1.0)
+        global_mult = armature_obj.mmd_edge_thickness
         per_mesh_mult = mesh_obj.mmd_edge_thickness_mult
         edge_color = base_mat.get("mmd_edge_color", [0.0, 0.0, 0.0, 1.0])
         edge_size = base_mat.get("mmd_edge_size", 1.0)
@@ -265,14 +263,39 @@ def update_mesh_outline_thickness(mesh_obj: bpy.types.Object, armature_obj: bpy.
         return
 
     scale = armature_obj.get("import_scale", 0.08)
-    global_mult = armature_obj.get("mmd_edge_thickness", 1.0)
+    global_mult = armature_obj.mmd_edge_thickness
     per_mesh_mult = mesh_obj.mmd_edge_thickness_mult
     edge_size = base_mat.get("mmd_edge_size", 1.0)
     mod.thickness = edge_size * scale * _THICKNESS_FACTOR * global_mult * per_mesh_mult
 
 
+def _on_global_thickness_update(self, _context):
+    """Auto-apply outline thickness when the global slider changes."""
+    if self.type != "ARMATURE":
+        return
+    from .mesh import is_control_mesh
+    for obj in self.children:
+        if obj.type != "MESH" or is_control_mesh(obj):
+            continue
+        update_mesh_outline_thickness(obj, self)
+
+
 def register():
     from bpy.props import FloatProperty
+
+    bpy.types.Object.mmd_edge_thickness = FloatProperty(
+        name="Outline Thickness",
+        description="Global outline thickness multiplier",
+        default=1.0,
+        min=0.1,
+        max=5.0,
+        soft_min=0.1,
+        soft_max=3.0,
+        step=10,
+        precision=2,
+        update=_on_global_thickness_update,
+    )
+
     bpy.types.Object.mmd_edge_thickness_mult = FloatProperty(
         name="Outline Thickness",
         description="Per-mesh outline thickness multiplier",
@@ -288,5 +311,7 @@ def register():
 
 
 def unregister():
+    if hasattr(bpy.types.Object, "mmd_edge_thickness"):
+        del bpy.types.Object.mmd_edge_thickness
     if hasattr(bpy.types.Object, "mmd_edge_thickness_mult"):
         del bpy.types.Object.mmd_edge_thickness_mult

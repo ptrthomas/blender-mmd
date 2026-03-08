@@ -757,20 +757,13 @@ Let parsing exceptions propagate. The import operator catches exceptions at the 
 
 **N-panel**: Tab "MMD4B" in 3D Viewport sidebar. Visible when active object is an MMD armature (or child mesh).
 
-**Layout** (parent panel shows model name + report button, all sub-panels collapsed by default):
+**Layout**: Main panel shows model name, report button, and armature-level controls inline. Sub-panels (collapsed by default) for Physics, IK, Animation. Mesh panel (open by default) appears at bottom only when a mesh child is selected.
 
-**Header:** Model name with text icon button (visible when "MMD Import Report" text exists). Clicking opens the report in a Text Editor area — shows untranslated names from PMX import and unmatched names from VMD import.
-
-**Mesh sub-panel** (visible only when a mesh child is selected):
-- **Info:** Mesh name, vertex count, material count
-- **Outlines** (only if material has `mmd_edge_enabled`): Toggle button (eye icon) to enable/disable outline on this mesh. When active: edge color button (updates Emission node + viewport display instantly), per-mesh thickness multiplier slider (`mmd_edge_thickness_mult` registered FloatProperty with `update` callback for instant reactivity). Thickness formula: `edge_size × import_scale × 0.05 × global_mult × per_mesh_mult`.
-- **Physics** (only if physics built and chains affect this mesh): Shows chain count and rigid body count with a select button that highlights the related rigid bodies. Lists each chain by name, group, and body count. Chain management stays in the Physics sub-panel.
-- **Delete Mesh** button: Removes the selected mesh object and selects the armature.
-
-**Animation sub-panel:**
-- Shows current action name when animation is loaded
-- "Rest Pose" button: temporarily resets all pose bones and morph values to zero — keyframes take over again on playback/scrub
-- "Remove Animation" button: removes all actions and NLA tracks, resets to rest pose, returns to frame 1
+**Main panel (always visible):**
+- Model name with text icon button (opens "MMD Import Report" in Text Editor — untranslated/unmatched names)
+- **Emission** slider: global `mmd_emission` on armature (registered FloatProperty, instant reactive update)
+- **Outline Thickness** slider + Build/Rebuild/Remove button on same row. `mmd_edge_thickness` registered FloatProperty on armature (per-model, animatable, instant reactive update)
+- **SDEF** (inline, only when model has SDEF vertices): vertex/mesh count + Bake/Rebake/Toggle/Clear buttons. "Save to Bake" shown disabled when .blend not saved. Uses Solidify modifier, Emission BSDF edge material, per-vertex `mmd_edge_scale` vertex group. Thickness: `edge_size × import_scale × 0.05 × global_mult × per_mesh_mult`
 
 **Physics sub-panel:**
 - **No physics state:** NCC mode dropdown (Draft/Proximity/All) + proximity slider (greyed out unless Proximity selected) + "Build Rigid Bodies" button (calls `build_physics` with `mode=rigid_body`)
@@ -787,7 +780,7 @@ Let parsing exceptions propagate. The import operator catches exceptions at the 
 - Per-chain settings stored on armature: `mmd_chain_collision_disabled` (JSON list), `mmd_chain_physics_disabled` (JSON list). Preserved across clear/rebuild. Full rebuild brings back all deleted chains, respecting these settings.
 - Chain data detected via `chains.py` during physics build and stored as `mmd_physics_chains` JSON on the armature
 
-**IK Toggle sub-panel** (collapsed by default):
+**IK sub-panel** (collapsed by default):
 - **All On / All Off** buttons at top (eye icons)
 - Per-chain toggle buttons showing current state (eye icon, `depress` for visual feedback)
 - Toggles IK constraint `mute` (not `influence`) so user overrides persist during animation playback. VMD F-curves drive `influence` but `mute` takes precedence — a muted constraint is completely skipped regardless of F-curve values.
@@ -795,15 +788,18 @@ Let parsing exceptions propagate. The import operator catches exceptions at the 
 - Physics build/clear preserves user mute state (saved/restored around internal IK muting)
 - Chains discovered by scanning pose bones for IK constraints
 
-**Outlines sub-panel** (collapsed by default):
-- **No outlines state:** Global thickness multiplier slider (default 1.0, range 0.1–5.0) + "Build Outlines" button
-- **Outlines active:** Shows count of meshes with outlines, global thickness slider, "Rebuild" button (remove + build with new thickness), "Remove" button
-- Uses Solidify modifier (`mmd_edge`) per mesh child with `use_flip_normals=True`, `offset=1` (outward), `material_offset=1` (edge material in slot 1)
-- Edge material: Emission BSDF (unlit, lighting-independent) with PMX edge color. Alpha < 1.0 uses Mix Shader (Emission + Transparent) with BLENDED surface render method
-- Per-vertex thickness modulation via `mmd_edge_scale` vertex group (populated during mesh import from PMX `edge_scale` data)
-- Only builds on meshes where material has `mmd_edge_enabled=True` (eyes, face details, etc. skipped)
-- **Per-mesh controls** in Mesh sub-panel: toggle outline on/off per mesh, edit edge color, per-mesh thickness multiplier (`mmd_edge_thickness_mult`, default 1.0, reactive via `update` callback)
-- Thickness formula: `edge_size × import_scale × 0.05 × global_mult × per_mesh_mult`
+**Animation sub-panel:**
+- Shows current action name when animation is loaded
+- "Rest Pose" button: temporarily resets all pose bones and morph values to zero — keyframes take over again on playback/scrub
+- "Remove Animation" button: removes all actions and NLA tracks, resets to rest pose, returns to frame 1
+
+**Mesh panel** (open by default, visible only when a mesh child is selected):
+- **Info:** Mesh name, vertex count, material count
+- **Emission Factor:** per-material `mmd_emission_fac` (registered FloatProperty, instant reactive — multiplied by global `mmd_emission`)
+- **Outlines** (only if material has `mmd_edge_enabled`): Toggle button (eye icon) to enable/disable outline on this mesh. When active: edge color button (updates Emission node + viewport display instantly), per-mesh outline factor slider (`mmd_edge_thickness_mult` registered FloatProperty with `update` callback for instant reactivity)
+- **SDEF** (only if mesh has SDEF vertices): vertex count + "Select" button to select SDEF vertices
+- **Physics** (only if physics built and chains affect this mesh): Shows chain count and rigid body count with a select button that highlights the related rigid bodies. Lists each chain by name, group, and body count.
+- **Delete Mesh** button: Removes the selected mesh object and selects the armature.
 
 **Workflow:** Import PMX → click "Build Rigid Bodies" in MMD4B panel → optionally import VMD (physics auto-resets) → play animation. Use "Reset" after changing pose to reposition rigid bodies without full rebuild. Use "Rest Pose" to temporarily return to rest pose while editing. Use "Remove Animation" to strip all keyframes and reload a different VMD. Use per-chain X buttons to remove physics from specific parts (e.g. remove skirt physics to replace with cloth sim). Use IK Toggle to disable IK chains for non-standard poses. Select a rigid body and use Inspect/Colliders/Contacts for debugging collision issues.
 

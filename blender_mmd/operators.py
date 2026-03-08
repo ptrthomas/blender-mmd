@@ -1135,10 +1135,8 @@ class BLENDER_MMD_OT_build_outlines(bpy.types.Operator):
         if armature_obj.get("mmd_outlines_built"):
             remove_outlines(armature_obj)
 
-        thickness_mult = armature_obj.get("mmd_edge_thickness", 1.0)
-
         try:
-            count = build_outlines(armature_obj, thickness_mult)
+            count = build_outlines(armature_obj)
             self.report({"INFO"}, f"Outlines built on {count} meshes")
             return {"FINISHED"}
         except Exception as e:

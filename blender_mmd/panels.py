@@ -39,98 +39,112 @@ def _get_physics_chains(armature_obj) -> list[dict]:
     return json.loads(chains_json)
 
 
-class BLENDER_MMD_PT_mesh(bpy.types.Panel):
-    """MMD4B — selected mesh info and operations."""
+# ---------------------------------------------------------------------------
+# Main panel (always visible when armature found)
+# ---------------------------------------------------------------------------
 
-    bl_label = "Mesh"
-    bl_idname = "BLENDER_MMD_PT_mesh"
+
+class BLENDER_MMD_PT_main(bpy.types.Panel):
+    """MMD4B — main panel container."""
+
+    bl_label = "MMD4B"
+    bl_idname = "BLENDER_MMD_PT_main"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "MMD4B"
-    bl_parent_id = "BLENDER_MMD_PT_main"
-    bl_options = {"DEFAULT_CLOSED"}
 
     @classmethod
     def poll(cls, context):
-        mesh = find_selected_mesh(context)
-        return mesh is not None and not is_control_mesh(mesh)
+        return find_mmd_armature(context) is not None
 
     def draw(self, context):
+        armature_obj = find_mmd_armature(context)
         layout = self.layout
-        mesh_obj = find_selected_mesh(context)
-        armature_obj = mesh_obj.parent
 
-        # --- Info ---
-        layout.label(text=mesh_obj.name, icon="MESH_DATA")
-        layout.label(
-            text=f"{len(mesh_obj.data.vertices):,} vertices | "
-            f"{len(mesh_obj.data.materials)} materials"
-        )
-
-        # --- Outlines ---
-        mat = mesh_obj.data.materials[0] if mesh_obj.data.materials else None
-        if mat and mat.get("mmd_edge_enabled", False):
-            layout.separator()
-            solidify = mesh_obj.modifiers.get("mmd_edge")
-            has_outline = solidify is not None
-
-            # Toggle + label
-            row = layout.row(align=True)
+        row = layout.row()
+        row.label(text=armature_obj.name, icon="ARMATURE_DATA")
+        if bpy.data.texts.get("MMD Import Report"):
             row.operator(
-                "blender_mmd.toggle_mesh_outline",
-                text="",
-                icon="HIDE_OFF" if has_outline else "HIDE_ON",
-                depress=has_outline,
-            )
-            row.label(
-                text=f"Outline: {abs(solidify.thickness):.4f}" if has_outline else "Outline: OFF",
-                icon="MOD_SOLIDIFY",
+                "blender_mmd.view_import_report",
+                text="", icon="TEXT",
             )
 
-            if has_outline:
-                # Edge color swatch
-                edge_color = mat.get("mmd_edge_color", [0.0, 0.0, 0.0, 1.0])
-                op = layout.operator(
-                    "blender_mmd.set_mesh_edge_color",
-                    text=f"Edge Color",
-                    icon="COLOR",
-                )
-                op.color = edge_color
+        # Global emission
+        layout.prop(armature_obj, "mmd_emission", text="Emission")
 
-                # Per-mesh thickness multiplier (auto-applies via update callback)
-                row = layout.row(align=True)
-                row.prop(mesh_obj, "mmd_edge_thickness_mult", text="Thickness")
+        # Outline thickness + build/rebuild/remove on same row
+        has_outlines = armature_obj.get("mmd_outlines_built", False)
+        row = layout.row(align=True)
+        row.prop(armature_obj, "mmd_edge_thickness", text="Outline Thickness")
+        if has_outlines:
+            row.operator("blender_mmd.build_outlines", text="Rebuild", icon="FILE_REFRESH")
+            row.operator("blender_mmd.remove_outlines", text="", icon="TRASH")
+        else:
+            row.operator("blender_mmd.build_outlines", text="Build", icon="MOD_SOLIDIFY")
 
-        # --- Physics chains ---
-        if armature_obj.get("physics_collection"):
-            chains = get_mesh_physics_chains(mesh_obj, armature_obj)
-            if chains:
-                layout.separator()
-                rb_count = sum(len(c.get("rigid_indices", [])) for c in chains)
-                row = layout.row(align=True)
-                row.label(
-                    text=f"Physics: {len(chains)} chains, {rb_count} bodies",
-                    icon="PHYSICS",
-                )
-                row.operator(
-                    "blender_mmd.select_mesh_rigid_bodies",
-                    text="",
-                    icon="RESTRICT_SELECT_OFF",
-                )
-                col = layout.column(align=True)
-                for chain in chains:
-                    name = chain.get("name", "?")
-                    group = chain.get("group", "?")
-                    n = len(chain.get("rigid_indices", []))
-                    col.label(text=f"  {name} ({group}, {n})")
+        # SDEF controls (only when model has SDEF vertices)
+        if armature_obj.get("mmd_has_sdef", False):
+            _draw_sdef(layout, armature_obj)
 
-        # --- Delete ---
-        layout.separator()
-        layout.operator(
-            "blender_mmd.delete_mesh",
-            text="Delete Mesh",
-            icon="TRASH",
-        )
+
+
+def _draw_sdef(layout, armature_obj):
+    """Draw SDEF controls inline in the main panel."""
+    # Show progress bar during modal bake
+    bake_progress = armature_obj.get("mmd_sdef_bake_progress", -1.0)
+    if bake_progress >= 0.0:
+        bake_msg = armature_obj.get("mmd_sdef_bake_message", "Baking...")
+        col = layout.column(align=True)
+        if hasattr(layout, "progress"):
+            col.progress(
+                factor=bake_progress,
+                type="BAR",
+                text=f"{bake_progress:.0%} — {bake_msg}",
+            )
+        else:
+            col.label(text=f"Baking... {bake_progress:.0%} — {bake_msg}", icon="TIME")
+        row = col.row()
+        row.label(text="Press ESC to cancel", icon="INFO")
+        return
+
+    is_baked = armature_obj.get("mmd_sdef_baked", False)
+    is_enabled = armature_obj.get("mmd_sdef_enabled", True)
+
+    sdef_count = armature_obj.get("mmd_sdef_count", 0)
+    sdef_mesh_count = sum(
+        1 for child in armature_obj.children
+        if child.type == "MESH" and not is_control_mesh(child)
+        and child.vertex_groups.get("mmd_sdef")
+    )
+
+    if is_baked:
+        fs = armature_obj.get("mmd_sdef_frame_start", "?")
+        fe = armature_obj.get("mmd_sdef_frame_end", "?")
+        state = "ON" if is_enabled else "OFF (LBS)"
+        label = f"SDEF: {sdef_count:,} verts, {sdef_mesh_count} meshes | {fs}\u2013{fe} | {state}"
+        layout.label(text=label, icon="MESH_ICOSPHERE")
+
+        row = layout.row(align=True)
+        toggle_text = "Disable" if is_enabled else "Enable"
+        toggle_icon = "PAUSE" if is_enabled else "PLAY"
+        row.operator("blender_mmd.toggle_sdef", text=toggle_text, icon=toggle_icon)
+        row.operator("blender_mmd.bake_sdef", text="Rebake", icon="FILE_REFRESH")
+        row.operator("blender_mmd.clear_sdef_bake", text="Clear", icon="TRASH")
+    else:
+        label = f"SDEF: {sdef_count:,} verts across {sdef_mesh_count} meshes"
+        row = layout.row(align=True)
+        row.label(text=label, icon="MESH_ICOSPHERE")
+        if not bpy.data.is_saved:
+            sub = row.row(align=True)
+            sub.enabled = False
+            sub.operator("blender_mmd.bake_sdef", text="Save to Bake", icon="RENDER_ANIMATION")
+        else:
+            row.operator("blender_mmd.bake_sdef", text="Bake", icon="RENDER_ANIMATION")
+
+
+# ---------------------------------------------------------------------------
+# Physics (armature-level)
+# ---------------------------------------------------------------------------
 
 
 class BLENDER_MMD_PT_physics(bpy.types.Panel):
@@ -319,10 +333,15 @@ class BLENDER_MMD_PT_physics(bpy.types.Panel):
             op.ncc_proximity = context.scene.mmd_ncc_proximity
 
 
+# ---------------------------------------------------------------------------
+# IK Toggle (armature-level)
+# ---------------------------------------------------------------------------
+
+
 class BLENDER_MMD_PT_ik_toggle(bpy.types.Panel):
     """MMD4B — IK chain toggles."""
 
-    bl_label = "IK Toggle"
+    bl_label = "IK"
     bl_idname = "BLENDER_MMD_PT_ik_toggle"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -361,6 +380,11 @@ class BLENDER_MMD_PT_ik_toggle(bpy.types.Panel):
                 depress=enabled,
             )
             op.target_bone = target_name
+
+
+# ---------------------------------------------------------------------------
+# Animation (armature-level)
+# ---------------------------------------------------------------------------
 
 
 class BLENDER_MMD_PT_animation(bpy.types.Panel):
@@ -464,203 +488,129 @@ def _find_morph_action(armature_obj) -> "bpy.types.Action | None":
     return None
 
 
-class BLENDER_MMD_PT_outlines(bpy.types.Panel):
-    """MMD4B — edge/outline rendering controls."""
+# ---------------------------------------------------------------------------
+# Mesh (per-mesh, only when a mesh child is selected — shown after IK)
+# ---------------------------------------------------------------------------
 
-    bl_label = "Outlines"
-    bl_idname = "BLENDER_MMD_PT_outlines"
+
+class BLENDER_MMD_PT_mesh(bpy.types.Panel):
+    """MMD4B — selected mesh info and per-mesh controls."""
+
+    bl_label = "Mesh"
+    bl_idname = "BLENDER_MMD_PT_mesh"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "MMD4B"
     bl_parent_id = "BLENDER_MMD_PT_main"
-    bl_options = {"DEFAULT_CLOSED"}
 
     @classmethod
     def poll(cls, context):
-        return find_mmd_armature(context) is not None
+        mesh = find_selected_mesh(context)
+        return mesh is not None and not is_control_mesh(mesh)
 
     def draw(self, context):
         layout = self.layout
-        armature_obj = find_mmd_armature(context)
+        mesh_obj = find_selected_mesh(context)
+        armature_obj = mesh_obj.parent
 
-        has_outlines = armature_obj.get("mmd_outlines_built", False)
+        # --- Info ---
+        layout.label(text=mesh_obj.name, icon="MESH_DATA")
+        layout.label(
+            text=f"{len(mesh_obj.data.vertices):,} vertices | "
+            f"{len(mesh_obj.data.materials)} materials"
+        )
 
-        if has_outlines:
-            # Count meshes with outline modifier (exclude control mesh)
-            outline_count = sum(
-                1 for c in armature_obj.children
-                if c.type == "MESH" and not is_control_mesh(c)
-                and c.modifiers.get("mmd_edge")
+        mat = mesh_obj.data.materials[0] if mesh_obj.data.materials else None
+
+        # --- Emission factor ---
+        if mat:
+            layout.prop(mat, "mmd_emission_fac", text="Emission Factor")
+
+        # --- Outlines ---
+        if mat and mat.get("mmd_edge_enabled", False):
+            solidify = mesh_obj.modifiers.get("mmd_edge")
+            has_outline = solidify is not None
+
+            row = layout.row(align=True)
+            row.operator(
+                "blender_mmd.toggle_mesh_outline",
+                text="",
+                icon="HIDE_OFF" if has_outline else "HIDE_ON",
+                depress=has_outline,
             )
-            layout.label(
-                text=f"Active: {outline_count} meshes with outlines",
+            row.label(
+                text=f"Outline: {abs(solidify.thickness):.4f}" if has_outline else "Outline: OFF",
                 icon="MOD_SOLIDIFY",
             )
 
-            # Thickness slider + Rebuild/Remove
-            row = layout.row(align=True)
-            row.prop(armature_obj, '["mmd_edge_thickness"]', text="Thickness")
-
-            row = layout.row(align=True)
-            row.operator(
-                "blender_mmd.build_outlines",
-                text="Rebuild",
-                icon="FILE_REFRESH",
-            )
-            row.operator(
-                "blender_mmd.remove_outlines",
-                text="Remove",
-                icon="TRASH",
-            )
-        else:
-            row = layout.row(align=True)
-            row.prop(armature_obj, '["mmd_edge_thickness"]', text="Thickness")
-            layout.operator(
-                "blender_mmd.build_outlines",
-                text="Build Outlines",
-                icon="MOD_SOLIDIFY",
-            )
-
-
-class BLENDER_MMD_PT_sdef(bpy.types.Panel):
-    """MMD4B — SDEF (spherical deformation) controls."""
-
-    bl_label = "SDEF"
-    bl_idname = "BLENDER_MMD_PT_sdef"
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
-    bl_category = "MMD4B"
-    bl_parent_id = "BLENDER_MMD_PT_main"
-    bl_options = {"DEFAULT_CLOSED"}
-
-    @classmethod
-    def poll(cls, context):
-        arm = find_mmd_armature(context)
-        return arm is not None and arm.get("mmd_has_sdef", False)
-
-    def draw(self, context):
-        layout = self.layout
-        armature_obj = find_mmd_armature(context)
-
-        # Show progress bar during modal bake
-        bake_progress = armature_obj.get("mmd_sdef_bake_progress", -1.0)
-        if bake_progress >= 0.0:
-            bake_msg = armature_obj.get("mmd_sdef_bake_message", "Baking...")
-            col = layout.column(align=True)
-            if hasattr(layout, "progress"):
-                col.progress(
-                    factor=bake_progress,
-                    type="BAR",
-                    text=f"{bake_progress:.0%} — {bake_msg}",
+            if has_outline:
+                edge_color = mat.get("mmd_edge_color", [0.0, 0.0, 0.0, 1.0])
+                op = layout.operator(
+                    "blender_mmd.set_mesh_edge_color",
+                    text="Edge Color",
+                    icon="COLOR",
                 )
-            else:
-                col.label(text=f"Baking... {bake_progress:.0%} — {bake_msg}", icon="TIME")
-            row = col.row()
-            row.label(text="Press ESC to cancel", icon="INFO")
-            return
+                op.color = edge_color
 
-        is_baked = armature_obj.get("mmd_sdef_baked", False)
-        is_enabled = armature_obj.get("mmd_sdef_enabled", True)
+                row = layout.row(align=True)
+                row.prop(mesh_obj, "mmd_edge_thickness_mult", text="Outline Factor")
 
-        # Per-mesh info when an SDEF mesh is selected, model-wide otherwise
-        sel_mesh = find_selected_mesh(context)
-        if sel_mesh and sel_mesh.vertex_groups.get("mmd_sdef"):
-            mesh_count = get_mesh_sdef_count(sel_mesh)
-            layout.label(
-                text=f"{mesh_count:,} SDEF vertices on this mesh",
+        # --- SDEF info ---
+        if mesh_obj.vertex_groups.get("mmd_sdef"):
+            mesh_sdef_count = get_mesh_sdef_count(mesh_obj)
+            row = layout.row(align=True)
+            row.label(
+                text=f"{mesh_sdef_count:,} SDEF vertices",
                 icon="MESH_ICOSPHERE",
             )
-        else:
-            sdef_count = armature_obj.get("mmd_sdef_count", 0)
-            sdef_mesh_count = sum(
-                1 for child in armature_obj.children
-                if child.type == "MESH" and not is_control_mesh(child)
-                and child.vertex_groups.get("mmd_sdef")
-            )
-            layout.label(
-                text=f"{sdef_count:,} SDEF vertices across {sdef_mesh_count} meshes",
-                icon="MESH_ICOSPHERE",
-            )
-
-        if is_baked:
-            fs = armature_obj.get("mmd_sdef_frame_start", "?")
-            fe = armature_obj.get("mmd_sdef_frame_end", "?")
-            state = "ON" if is_enabled else "OFF (LBS)"
-            layout.label(text=f"Baked: frames {fs}\u2013{fe} | {state}")
-
-            # Toggle button
-            toggle_text = "Disable SDEF" if is_enabled else "Enable SDEF"
-            toggle_icon = "PAUSE" if is_enabled else "PLAY"
-            layout.operator(
-                "blender_mmd.toggle_sdef",
-                text=toggle_text,
-                icon=toggle_icon,
-            )
-
-            row = layout.row(align=True)
             row.operator(
-                "blender_mmd.bake_sdef",
-                text="Rebake",
-                icon="FILE_REFRESH",
+                "blender_mmd.select_sdef_vertices",
+                text="Select",
+                icon="VERTEXSEL",
             )
-            row.operator(
-                "blender_mmd.clear_sdef_bake",
-                text="Clear",
-                icon="TRASH",
-            )
-        else:
-            import bpy as _bpy
-            if not _bpy.data.is_saved:
-                layout.label(text="Save .blend to enable baking", icon="ERROR")
-                row = layout.row()
-                row.enabled = False
-                row.operator("blender_mmd.bake_sdef", text="Bake SDEF", icon="RENDER_ANIMATION")
-            else:
-                layout.operator(
-                    "blender_mmd.bake_sdef",
-                    text="Bake SDEF",
-                    icon="RENDER_ANIMATION",
+
+        # --- Physics chains ---
+        if armature_obj.get("physics_collection"):
+            chains = get_mesh_physics_chains(mesh_obj, armature_obj)
+            if chains:
+                layout.separator()
+                rb_count = sum(len(c.get("rigid_indices", [])) for c in chains)
+                row = layout.row(align=True)
+                row.label(
+                    text=f"Physics: {len(chains)} chains, {rb_count} bodies",
+                    icon="PHYSICS",
                 )
+                row.operator(
+                    "blender_mmd.select_mesh_rigid_bodies",
+                    text="",
+                    icon="RESTRICT_SELECT_OFF",
+                )
+                col = layout.column(align=True)
+                for chain in chains:
+                    name = chain.get("name", "?")
+                    group = chain.get("group", "?")
+                    n = len(chain.get("rigid_indices", []))
+                    col.label(text=f"  {name} ({group}, {n})")
 
+        # --- Delete ---
+        layout.separator()
         layout.operator(
-            "blender_mmd.select_sdef_vertices",
-            text="Select SDEF Vertices",
-            icon="VERTEXSEL",
+            "blender_mmd.delete_mesh",
+            text="Delete Mesh",
+            icon="TRASH",
         )
 
 
-class BLENDER_MMD_PT_main(bpy.types.Panel):
-    """MMD4B — main panel container."""
-
-    bl_label = "MMD4B"
-    bl_idname = "BLENDER_MMD_PT_main"
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
-    bl_category = "MMD4B"
-
-    @classmethod
-    def poll(cls, context):
-        return find_mmd_armature(context) is not None
-
-    def draw(self, context):
-        armature_obj = find_mmd_armature(context)
-        row = self.layout.row()
-        row.label(text=armature_obj.name, icon="ARMATURE_DATA")
-        if bpy.data.texts.get("MMD Import Report"):
-            row.operator(
-                "blender_mmd.view_import_report",
-                text="", icon="TEXT",
-            )
-
+# ---------------------------------------------------------------------------
+# Registration — order determines panel display order
+# ---------------------------------------------------------------------------
 
 _classes = (
     BLENDER_MMD_PT_main,
-    BLENDER_MMD_PT_mesh,
-    BLENDER_MMD_PT_outlines,
-    BLENDER_MMD_PT_sdef,
-    BLENDER_MMD_PT_animation,
     BLENDER_MMD_PT_physics,
     BLENDER_MMD_PT_ik_toggle,
+    BLENDER_MMD_PT_animation,
+    BLENDER_MMD_PT_mesh,
 )
 
 
