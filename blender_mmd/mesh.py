@@ -35,6 +35,7 @@ def create_meshes(
     scale: float,
     *,
     split_by_material: bool = True,
+    offset_overlapping: bool = False,
 ) -> list[bpy.types.Object]:
     """Create per-material Blender meshes and a control mesh from PMX data.
 
@@ -108,6 +109,10 @@ def create_meshes(
         sub_positions = positions[unique_verts]
         sub_normals = normals_arr[unique_verts]
         sub_uvs = vert_uvs[unique_verts]
+
+        # Offset overlapping material vertices along normals to prevent z-fighting
+        if offset_overlapping and mat_idx in overlap_mats:
+            sub_positions = sub_positions + sub_normals * (0.0002 * scale / 0.08)
 
         # Create mesh
         mat_data = model.materials[mat_idx]
@@ -726,9 +731,14 @@ def is_control_mesh(obj: bpy.types.Object) -> bool:
 
 def _morph_sync_handler(scene: bpy.types.Scene) -> None:
     """frame_change_post handler: sync control mesh → visible meshes + material controls."""
+    from .materials import update_materials
+
     for obj in scene.objects:
         if obj.type != "ARMATURE" or obj.get("import_scale") is None:
             continue
+
+        # --- Material controls: sync toon_fac, sphere_fac, emission ---
+        update_materials(obj)
 
         # --- Morph sync: control mesh → visible meshes ---
         ctrl = None

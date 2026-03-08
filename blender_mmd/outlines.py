@@ -36,7 +36,7 @@ def _on_thickness_mult_update(obj, _context):
     if not arm:
         return
     scale = arm.get("import_scale", 0.08)
-    global_mult = bpy.context.scene.mmd_edge_thickness
+    global_mult = arm.get("mmd_edge_thickness", 1.0)
     edge_size = base_mat.get("mmd_edge_size", 1.0)
     mod.thickness = edge_size * scale * _THICKNESS_FACTOR * global_mult * obj.mmd_edge_thickness_mult
 
@@ -215,7 +215,7 @@ def toggle_mesh_outline(mesh_obj: bpy.types.Object, armature_obj: bpy.types.Obje
             return False
 
         scale = armature_obj.get("import_scale", 0.08)
-        global_mult = bpy.context.scene.mmd_edge_thickness
+        global_mult = armature_obj.get("mmd_edge_thickness", 1.0)
         per_mesh_mult = mesh_obj.mmd_edge_thickness_mult
         edge_color = base_mat.get("mmd_edge_color", [0.0, 0.0, 0.0, 1.0])
         edge_size = base_mat.get("mmd_edge_size", 1.0)
@@ -265,7 +265,7 @@ def update_mesh_outline_thickness(mesh_obj: bpy.types.Object, armature_obj: bpy.
         return
 
     scale = armature_obj.get("import_scale", 0.08)
-    global_mult = bpy.context.scene.mmd_edge_thickness
+    global_mult = armature_obj.get("mmd_edge_thickness", 1.0)
     per_mesh_mult = mesh_obj.mmd_edge_thickness_mult
     edge_size = base_mat.get("mmd_edge_size", 1.0)
     mod.thickness = edge_size * scale * _THICKNESS_FACTOR * global_mult * per_mesh_mult

@@ -193,6 +193,7 @@ def import_pmx(
     *,
     use_toon_sphere: bool = False,
     split_by_material: bool = True,
+    offset_overlapping: bool = False,
 ) -> bpy.types.Object:
     """Import a PMX file into the current scene.
 
@@ -226,6 +227,7 @@ def import_pmx(
     mesh_objects = create_meshes(
         model, armature_obj, scale,
         split_by_material=split_by_material,
+        offset_overlapping=offset_overlapping,
     )
 
     # Create materials and assign to mesh faces

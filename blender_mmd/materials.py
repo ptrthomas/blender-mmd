@@ -338,6 +338,11 @@ def _setup_armature_controls(armature_obj: "bpy.types.Object") -> None:
         ui = rna("mmd_emission")
         ui.update(min=0.0, max=2.0, soft_min=0.0, soft_max=1.0, description="Emission strength for all materials")
 
+    if "mmd_edge_thickness" not in armature_obj:
+        armature_obj["mmd_edge_thickness"] = 1.0
+        ui = rna("mmd_edge_thickness")
+        ui.update(min=0.1, max=5.0, soft_min=0.1, soft_max=3.0, description="Global outline thickness multiplier")
+
     if "mmd_toon_fac" not in armature_obj:
         armature_obj["mmd_toon_fac"] = 1.0
         ui = rna("mmd_toon_fac")
@@ -378,10 +383,12 @@ def update_materials(armature_obj: "bpy.types.Object") -> None:
             shader = mat.node_tree.nodes.get("MMD Shader")
             if shader is None:
                 continue
+            mult = mat.mmd_emission_fac
+            val = emission * mult
             if "Emission" in shader.inputs:
-                shader.inputs["Emission"].default_value = emission
+                shader.inputs["Emission"].default_value = val
             elif "Emission Strength" in shader.inputs:
-                shader.inputs["Emission Strength"].default_value = emission
+                shader.inputs["Emission Strength"].default_value = val
             if "Toon Fac" in shader.inputs:
                 shader.inputs["Toon Fac"].default_value = toon_fac
             if "Sphere Fac" in shader.inputs:
@@ -888,3 +895,64 @@ def _fix_overlapping_face_materials(mesh_data: "bpy.types.Mesh") -> None:
             _convert_to_diffuse_shader(mat)
             mi_skip = mi
             log.debug("Converted overlapping material to diffuse: %s", mat.name)
+
+
+# ---------------------------------------------------------------------------
+# Registered properties with update callbacks
+# ---------------------------------------------------------------------------
+
+
+def _on_emission_fac_update(self, context):
+    """Called when mmd_emission_fac changes on a material."""
+    for obj in bpy.data.objects:
+        if obj.type != "ARMATURE" or obj.get("import_scale") is None:
+            continue
+        for child in obj.children:
+            if child.type != "MESH":
+                continue
+            if self in list(child.data.materials):
+                update_materials(obj)
+                return
+
+
+_emission_cache: dict[str, float] = {}
+
+
+def _on_depsgraph_update(scene, depsgraph):
+    """Check if mmd_emission changed on any armature and sync materials."""
+    for obj in scene.objects:
+        if obj.type != "ARMATURE" or obj.get("import_scale") is None:
+            continue
+        val = obj.get("mmd_emission", 1.0)
+        cached = _emission_cache.get(obj.name)
+        if cached != val:
+            _emission_cache[obj.name] = val
+            update_materials(obj)
+
+
+def register():
+    from bpy.props import FloatProperty
+
+    bpy.types.Material.mmd_emission_fac = FloatProperty(
+        name="Emission Factor",
+        description="Per-material emission factor (multiplied by global mmd_emission)",
+        default=1.0,
+        min=0.0,
+        max=5.0,
+        soft_min=0.0,
+        soft_max=2.0,
+        step=10,
+        precision=2,
+        update=_on_emission_fac_update,
+    )
+
+    bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph_update)
+
+
+def unregister():
+    if hasattr(bpy.types.Material, "mmd_emission_fac"):
+        del bpy.types.Material.mmd_emission_fac
+    bpy.app.handlers.depsgraph_update_post[:] = [
+        h for h in bpy.app.handlers.depsgraph_update_post
+        if h is not _on_depsgraph_update
+    ]

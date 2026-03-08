@@ -18,7 +18,8 @@ def _restore_morph_sync_handler(*_args):
 
 def register():
     import bpy
-    from . import operators, outlines, panels
+    from . import materials, operators, outlines, panels
+    materials.register()
     outlines.register()
     operators.register()
     panels.register()
@@ -28,7 +29,7 @@ def register():
 
 def unregister():
     import bpy
-    from . import operators, outlines, panels
+    from . import materials, operators, outlines, panels
     from .mesh import _remove_morph_sync_handler
     _remove_morph_sync_handler()
     bpy.app.handlers.load_post[:] = [
@@ -38,4 +39,5 @@ def unregister():
     panels.unregister()
     operators.unregister()
     outlines.unregister()
+    materials.unregister()
     log.info("Blender MMD unregistered")

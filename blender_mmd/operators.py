@@ -43,6 +43,12 @@ class BLENDER_MMD_OT_import_pmx(bpy.types.Operator, ImportHelper):
         default=True,
     )
 
+    offset_overlapping: BoolProperty(
+        name="Offset Overlapping",
+        description="Nudge overlapping materials along normals to prevent z-fighting in Cycles",
+        default=False,
+    )
+
     def execute(self, context):
         from .importer import import_pmx
 
@@ -52,6 +58,7 @@ class BLENDER_MMD_OT_import_pmx(bpy.types.Operator, ImportHelper):
                 self.scale,
                 use_toon_sphere=self.use_toon_sphere,
                 split_by_material=self.split_by_material,
+                offset_overlapping=self.offset_overlapping,
             )
             self.report({"INFO"}, f"Imported: {armature.name}")
             return {"FINISHED"}
@@ -1128,7 +1135,7 @@ class BLENDER_MMD_OT_build_outlines(bpy.types.Operator):
         if armature_obj.get("mmd_outlines_built"):
             remove_outlines(armature_obj)
 
-        thickness_mult = context.scene.mmd_edge_thickness
+        thickness_mult = armature_obj.get("mmd_edge_thickness", 1.0)
 
         try:
             count = build_outlines(armature_obj, thickness_mult)

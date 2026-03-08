@@ -499,7 +499,7 @@ class BLENDER_MMD_PT_outlines(bpy.types.Panel):
 
             # Thickness slider + Rebuild/Remove
             row = layout.row(align=True)
-            row.prop(context.scene, "mmd_edge_thickness", text="Thickness")
+            row.prop(armature_obj, '["mmd_edge_thickness"]', text="Thickness")
 
             row = layout.row(align=True)
             row.operator(
@@ -514,7 +514,7 @@ class BLENDER_MMD_PT_outlines(bpy.types.Panel):
             )
         else:
             row = layout.row(align=True)
-            row.prop(context.scene, "mmd_edge_thickness", text="Thickness")
+            row.prop(armature_obj, '["mmd_edge_thickness"]', text="Thickness")
             layout.operator(
                 "blender_mmd.build_outlines",
                 text="Build Outlines",
@@ -667,14 +667,6 @@ _classes = (
 def register():
     for cls in _classes:
         bpy.utils.register_class(cls)
-    bpy.types.Scene.mmd_edge_thickness = FloatProperty(
-        name="Edge Thickness",
-        description="Multiplier for edge/outline thickness",
-        default=1.0,
-        min=0.1,
-        max=5.0,
-        step=10,
-    )
     bpy.types.Scene.mmd_ncc_mode = EnumProperty(
         name="NCC Mode",
         description="Non-collision constraint mode",
@@ -696,8 +688,6 @@ def register():
 
 
 def unregister():
-    if hasattr(bpy.types.Scene, "mmd_edge_thickness"):
-        del bpy.types.Scene.mmd_edge_thickness
     if hasattr(bpy.types.Scene, "mmd_ncc_proximity"):
         del bpy.types.Scene.mmd_ncc_proximity
     if hasattr(bpy.types.Scene, "mmd_ncc_mode"):
