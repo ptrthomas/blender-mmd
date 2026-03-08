@@ -378,8 +378,10 @@ def update_materials(armature_obj: "bpy.types.Object") -> None:
             shader = mat.node_tree.nodes.get("MMD Shader")
             if shader is None:
                 continue
-            emission_input = "Emission" if "Emission" in shader.inputs else "Emission Strength"
-            shader.inputs[emission_input].default_value = emission
+            if "Emission" in shader.inputs:
+                shader.inputs["Emission"].default_value = emission
+            elif "Emission Strength" in shader.inputs:
+                shader.inputs["Emission Strength"].default_value = emission
             if "Toon Fac" in shader.inputs:
                 shader.inputs["Toon Fac"].default_value = toon_fac
             if "Sphere Fac" in shader.inputs:
@@ -498,6 +500,71 @@ def _setup_sphere_texture(
     return sphere_tex_node
 
 
+def _convert_to_diffuse_shader(mat: "bpy.types.Material") -> None:
+    """Convert an existing material from Principled BSDF to Diffuse+Transparent.
+
+    Used for overlapping materials (e.g. eye highlights) in single-mesh mode.
+    Preserves existing texture connections.
+    """
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+
+    shader = nodes.get("MMD Shader")
+    if shader is None:
+        return
+
+    # Capture current values before removing
+    base_color = list(shader.inputs["Base Color"].default_value)
+    alpha_val = shader.inputs["Alpha"].default_value
+
+    # Find what's connected to Base Color and Alpha
+    color_from = None
+    alpha_from = None
+    for link in list(links):
+        if link.to_node == shader:
+            if link.to_socket.name == "Base Color":
+                color_from = link.from_socket
+            elif link.to_socket.name == "Alpha":
+                alpha_from = link.from_socket
+
+    # Find output node
+    node_output = None
+    for n in nodes:
+        if isinstance(n, bpy.types.ShaderNodeOutputMaterial):
+            node_output = n
+            break
+
+    # Remove old shader
+    nodes.remove(shader)
+
+    # Diffuse BSDF
+    node_diffuse = nodes.new("ShaderNodeBsdfDiffuse")
+    node_diffuse.name = "MMD Shader"
+    node_diffuse.location = (0, 400)
+    node_diffuse.inputs["Color"].default_value = base_color
+
+    # Transparent BSDF
+    node_transparent = nodes.new("ShaderNodeBsdfTransparent")
+    node_transparent.location = (0, 200)
+
+    # Mix Shader: Transparent (slot 1) + Diffuse (slot 2), factor = Alpha
+    node_mix = nodes.new("ShaderNodeMixShader")
+    node_mix.name = "MMD Mix"
+    node_mix.location = (200, 300)
+    node_mix.inputs["Fac"].default_value = alpha_val
+
+    links.new(node_transparent.outputs["BSDF"], node_mix.inputs[1])
+    links.new(node_diffuse.outputs["BSDF"], node_mix.inputs[2])
+    if node_output:
+        links.new(node_mix.outputs["Shader"], node_output.inputs["Surface"])
+
+    # Reconnect texture links
+    if color_from:
+        links.new(color_from, node_diffuse.inputs["Color"])
+    if alpha_from:
+        links.new(alpha_from, node_mix.inputs["Fac"])
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -510,6 +577,7 @@ def create_materials(
     armature_obj: "bpy.types.Object | None" = None,
     use_toon_sphere: bool = False,
     single_mat_index: int | None = None,
+    use_diffuse_shader: bool = False,
 ) -> None:
     """Create Blender materials from PMX data and assign to mesh faces.
 
@@ -521,6 +589,8 @@ def create_materials(
         use_toon_sphere: Include toon and sphere texture nodes.
         single_mat_index: If set, only create and assign this one material
             (used for per-material mesh build where each mesh has one material).
+        use_diffuse_shader: Use Diffuse BSDF + Transparent BSDF mix instead of
+            Principled BSDF (for overlapping materials like eye highlights).
     """
     pmx_dir = os.path.dirname(os.path.abspath(filepath))
     mesh_data = mesh_obj.data
@@ -614,6 +684,31 @@ def create_materials(
             node_shader.inputs["Specular Tint"].default_value = (*mat_data.specular, 1.0)
             _INPUT_COLOR = "Color"
             _INPUT_ALPHA = "Alpha"
+        elif use_diffuse_shader:
+            # Overlapping material: Diffuse BSDF + Transparent BSDF mix
+            default_bsdf = nodes.get("Principled BSDF")
+            if default_bsdf:
+                nodes.remove(default_bsdf)
+
+            node_shader = nodes.new("ShaderNodeBsdfDiffuse")
+            node_shader.name = "MMD Shader"
+            node_shader.location = (0, 400)
+            node_shader.inputs["Color"].default_value = (*mixed_color, 1.0)
+
+            node_transparent = nodes.new("ShaderNodeBsdfTransparent")
+            node_transparent.location = (0, 200)
+
+            node_mix = nodes.new("ShaderNodeMixShader")
+            node_mix.name = "MMD Mix"
+            node_mix.location = (200, 300)
+            node_mix.inputs["Fac"].default_value = alpha
+
+            links.new(node_transparent.outputs["BSDF"], node_mix.inputs[1])
+            links.new(node_shader.outputs["BSDF"], node_mix.inputs[2])
+            links.new(node_mix.outputs["Shader"], node_output.inputs["Surface"])
+
+            _INPUT_COLOR = "Color"
+            _INPUT_ALPHA = None  # alpha handled by Mix Shader fac
         else:
             # Basic mode: bare Principled BSDF, no node group
             node_shader = nodes.get("Principled BSDF")
@@ -643,7 +738,9 @@ def create_materials(
         mat.use_backface_culling = not mat_data.is_double_sided
         if not mat_data.is_double_sided:
             mat.use_backface_culling_shadow = True
-        mat.surface_render_method = "DITHERED"
+        mat.surface_render_method = "BLENDED" if use_diffuse_shader else "DITHERED"
+        if use_diffuse_shader:
+            mat.use_transparency_overlap = False
         # Transparent shadow: materials with alpha < 1 should cast
         # alpha-aware shadows so they don't create solid shadow silhouettes
         if alpha < 1.0 - 1e-3:
@@ -681,7 +778,7 @@ def create_materials(
                     node_shader.inputs[_INPUT_COLOR],
                 )
                 # Basic mode: also wire texture to Emission Color
-                if shader_group is None:
+                if shader_group is None and not use_diffuse_shader:
                     links.new(
                         base_tex_node.outputs["Color"],
                         node_shader.inputs["Emission Color"],
@@ -694,7 +791,13 @@ def create_materials(
                     alpha_mul.location = node_shader.location + Vector((-1 * 210, -2.5 * 220))
                     alpha_mul.inputs[0].default_value = alpha
                     links.new(base_tex_node.outputs["Alpha"], alpha_mul.inputs[1])
-                    links.new(alpha_mul.outputs["Value"], node_shader.inputs[_INPUT_ALPHA])
+                    if _INPUT_ALPHA is not None:
+                        links.new(alpha_mul.outputs["Value"], node_shader.inputs[_INPUT_ALPHA])
+                    else:
+                        # Diffuse shader: wire alpha to Mix Shader fac
+                        node_mix = nodes.get("MMD Mix")
+                        if node_mix:
+                            links.new(alpha_mul.outputs["Value"], node_mix.inputs["Fac"])
 
         # --- Toon & sphere textures (only when enabled) ---
         if use_toon_sphere and node_uv is not None:
@@ -731,12 +834,11 @@ def create_materials(
 
 
 def _fix_overlapping_face_materials(mesh_data: "bpy.types.Mesh") -> None:
-    """Detect overlapping faces and set overlay materials to BLENDED.
+    """Detect overlapping faces and convert overlay materials to Diffuse+Transparent.
 
     When two faces share the same vertex positions but belong to different
     materials, the later material is an overlay (e.g. eye highlights).
-    Setting it to BLENDED with use_transparency_overlap=False prevents z-fighting.
-    Matches mmd_tools __fixOverlappingFaceMaterials.
+    Replaces Principled BSDF with Diffuse BSDF + Transparent BSDF mix.
     """
     import numpy as np
 
@@ -783,7 +885,6 @@ def _fix_overlapping_face_materials(mesh_data: "bpy.types.Mesh") -> None:
             check[key] = mi
         elif check[key] < mi:
             mat = mesh_data.materials[mi]
-            mat.surface_render_method = "BLENDED"
-            mat.use_transparency_overlap = False
+            _convert_to_diffuse_shader(mat)
             mi_skip = mi
-            log.debug("Set BLEND for overlapping material: %s", mat.name)
+            log.debug("Converted overlapping material to diffuse: %s", mat.name)

@@ -163,9 +163,9 @@ def create_meshes(
         if not mat_data.enabled_drop_shadow:
             mesh_obj.visible_shadow = False
 
-        # --- Set overlapping material to BLENDED (deferred until material assigned) ---
+        # --- Flag overlapping materials for diffuse shader ---
         if mat_idx in overlap_mats:
-            mesh_obj["_mmd_overlap_blend"] = True
+            mesh_obj["_mmd_overlap"] = True
 
         mesh_objects.append(mesh_obj)
 
@@ -666,10 +666,10 @@ def _detect_overlapping_materials(
     model: Model,
     positions: np.ndarray,
 ) -> set[int]:
-    """Detect which material indices need BLENDED due to overlapping faces.
+    """Detect which material indices have faces overlapping earlier materials.
 
     Runs on the full PMX face data before per-material mesh build.
-    Returns set of material indices that should use BLENDED render method.
+    Returns set of material indices that overlap.
     """
     faces = model.faces
     materials = model.materials

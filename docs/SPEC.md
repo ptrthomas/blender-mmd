@@ -739,7 +739,7 @@ Let parsing exceptions propagate. The import operator catches exceptions at the 
 - **Morphs** — vertex morphs as shape keys, group morphs flattened into composite vertex keys. Hidden control mesh (`_mmd_morphs`) owns all shape keys — single morph action, clean 2-track NLA editor.
 - **VMD motion** — bone/morph keyframes as F-curves, IK toggle via constraint influence, interpolation curves, append mode for layering, static channel filtering for clean Graph Editor, FPS control.
 - **Rigid body physics** — 3-phase build, GENERIC_SPRING joints, bilateral collision mask enforcement via NCC empties, debug inspector (inspect/colliders/contacts), auto-reset after VMD import, per-chain management in MMD4B panel.
-- **Materials** — two shader modes (bare Principled BSDF default, optional toon/sphere node group), specular mapping, bundled toon textures, global controls via armature properties (no drivers).
+- **Materials** — two shader modes (bare Principled BSDF default, optional toon/sphere node group), specular mapping, bundled toon textures, global controls via armature properties (no drivers). Overlapping materials (e.g. eye highlights) auto-detected and use Diffuse BSDF + Transparent BSDF mix (BLENDED) to prevent z-fighting.
 - **Additional transforms** — grant parent system (D bones, shoulder cancel, arm twist, eye tracking), shadow bones.
 - **Edge outlines** — Solidify modifier + Emission BSDF, per-material edge color/size/alpha, per-vertex edge_scale, per-mesh controls.
 - **SDEF** — bake-to-MDD pipeline, Mesh Cache playback, instant A/B toggle.

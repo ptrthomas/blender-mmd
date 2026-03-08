@@ -242,15 +242,10 @@ def import_pmx(
                     armature_obj=armature_obj,
                     use_toon_sphere=use_toon_sphere,
                     single_mat_index=mat_idx,
+                    use_diffuse_shader=bool(mesh_obj.get("_mmd_overlap")),
                 )
-                # Apply BLENDED for overlapping materials
-                if mesh_obj.get("_mmd_overlap_blend"):
-                    mat = mesh_obj.data.materials[0] if mesh_obj.data.materials else None
-                    if mat:
-                        mat.surface_render_method = "BLENDED"
-                        mat.use_transparency_overlap = False
-                        log.debug("Set BLENDED for overlapping material: %s", mat.name)
-                    del mesh_obj["_mmd_overlap_blend"]
+                if "_mmd_overlap" in mesh_obj:
+                    del mesh_obj["_mmd_overlap"]
         else:
             # Single mesh gets all materials
             create_materials(
