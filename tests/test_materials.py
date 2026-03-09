@@ -89,6 +89,24 @@ class TestResolveTexturePath:
         expected = os.path.join("/models/miku", "textures/body.png")
         assert result == expected
 
+    def test_case_insensitive_fallback(self, tmp_path):
+        """PMX references lowercase but file on disk is mixed-case."""
+        tex_dir = tmp_path / "t"
+        tex_dir.mkdir()
+        (tex_dir / "Tatoo.png").write_bytes(b"fake")
+        # PMX says "t/tatoo.png" (lowercase) — should find the file
+        result = resolve_texture_path(str(tmp_path), "t/tatoo.png")
+        assert os.path.exists(result)
+        # On case-sensitive FS this returns the corrected name;
+        # on case-insensitive FS the original path already works.
+        assert result.lower().endswith("tatoo.png")
+
+    def test_case_insensitive_missing(self, tmp_path):
+        """No match at all — returns the original path."""
+        result = resolve_texture_path(str(tmp_path), "t/nope.png")
+        expected = os.path.join(str(tmp_path), "t", "nope.png")
+        assert result == expected
+
 
 class TestSharedToonFilename:
     def test_index_0(self):

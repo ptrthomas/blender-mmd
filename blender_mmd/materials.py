@@ -64,9 +64,30 @@ def build_material_indices(materials: list[Material]) -> list[int]:
 
 
 def resolve_texture_path(pmx_dir: str, rel_path: str) -> str:
-    """Normalize backslashes and join with PMX directory."""
+    """Normalize backslashes, join with PMX directory, case-insensitive fallback.
+
+    PMX files are authored on Windows (case-insensitive) so texture filenames
+    may not match the on-disk casing.  When the exact path doesn't exist we
+    scan the target directory for a case-insensitive match.
+    """
     rel_path = rel_path.replace("\\", os.sep)
-    return os.path.join(pmx_dir, rel_path)
+    full = os.path.join(pmx_dir, rel_path)
+    if os.path.exists(full):
+        return full
+    # Case-insensitive fallback: walk each path component
+    parts = Path(rel_path).parts
+    current = pmx_dir
+    for part in parts:
+        try:
+            entries = os.listdir(current)
+        except OSError:
+            return full  # directory gone — return original
+        lower = part.lower()
+        match = next((e for e in entries if e.lower() == lower), None)
+        if match is None:
+            return full  # no match — return original (will be logged as missing)
+        current = os.path.join(current, match)
+    return current
 
 
 def shared_toon_filename(index: int) -> str:
